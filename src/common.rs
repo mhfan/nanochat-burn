@@ -1,0 +1,75 @@
+
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use burn::backend::autodiff::Autodiff;
+use burn::tensor::{Tensor, f16};
+
+/// 定义默认的 GPU 后端与自动微分包装
+//pub type ModelBackend = Wgpu;
+pub type ModelBackend = Wgpu<f16, i32>;
+pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
+
+/// 初始化系统计算设备：如果有可用的 GPU，优先使用 WGPU；否则优雅回退
+pub fn init_device() -> WgpuDevice {
+    let device = WgpuDevice::DefaultDevice;
+    // Burn 会自动探查最佳的 WGPU 适配器 (Vulkan, Metal, DX12)
+    tracing::info!("Initializing computational device: {:?}", device);
+    device
+}
+
+/// 执行数值校验与反向传播管道验证
+#[test] pub fn verify_autodiff_pipeline() {
+    // 初始化测试日志，以便在测试失败时观察底层驱动输出
+    //tracing_subscriber::fmt().with_env_filter("info").init();
+
+    let device = init_device();
+
+    // 1. 创建前向张量（使用 Autodiff 包装的 Wgpu 后端）
+    // 注意：Burn 中可以直接使用 Tensor::from_data 传入多维数组
+    let x: Tensor<ModelAutodiffBackend, 2> =
+        Tensor::from_data([[1.0f32, 2.0], [3.0, 4.0]], &device);
+    let w: Tensor<ModelAutodiffBackend, 2> =
+        Tensor::from_data([[2.0f32, 0.0], [0.0, 2.0]], &device);
+
+    // 2. 显式要求追踪这两个张量的梯度
+    let x = x.require_grad();
+    let w = w.require_grad();
+
+    // 3. 执行前向计算：y = x * w (矩阵乘法)
+    let y = x.clone().matmul(w.clone());
+
+    // 4. 将输出规约为标量 Loss：loss = sum(y)
+    let loss = y.sum();
+
+    let epsilon = f32::EPSILON; // 1e-4
+
+    // Burn 中转换为标量的写法非常直接
+    let loss_val = loss.clone().into_scalar();
+    tracing::info!("Forward Pass Loss: {}", loss_val);
+    assert!((loss_val.to_f32() - 20.0).abs() < epsilon);
+
+    // 5. 触发反向传播
+    let grads = loss.backward();
+
+    // 6. 提取输入和权重的梯度
+    let x_grad = x.grad(&grads).expect("Failed to compute x gradient");
+    let w_grad = w.grad(&grads).expect("Failed to compute w gradient");
+
+    // 打印计算出来的梯度，验证 GPU 端与 CPU 端的数值闭环，预期数学结果：
+    //   y = [[2, 4], [6, 8]], loss = 20
+    // dy/dx = w^T => x_grad 应该为 [[2.0, 2.0], [2.0, 2.0]]
+    // dy/dw = x^T => w_grad 应该为 [[4.0, 4.0], [6.0, 6.0]]
+    tracing::info!("Gradient of x (dy/dx): \n{}", x_grad);
+    tracing::info!("Gradient of w (dy/dw): \n{}", w_grad);
+
+    let expected_x_grad = [2.0f32, 2.0, 2.0, 2.0];
+    for (act, exp) in x_grad.clone().into_data().iter()
+        .map(|v: f16| v.to_f32()).zip(expected_x_grad.iter()) {
+        assert!((act - exp).abs() < epsilon, "x 梯度不匹配! 实际: {:?}", x_grad);
+    }
+
+    let expected_w_grad = [4.0f32, 4.0, 6.0, 6.0];
+    for (act, exp) in w_grad.clone().into_data().iter()
+        .map(|v: f16| v.to_f32()).zip(expected_w_grad.iter()) {
+        assert!((act - exp).abs() < epsilon, "w 梯度不匹配! 实际: {:?}", w_grad);
+    }
+}

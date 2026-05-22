@@ -1,0 +1,42 @@
+
+[package]
+name = "nanochat-burn"
+version = "0.1.0"
+edition = "2021"
+authors = ["MeiHui FAN <mhfan@zepp.com>"]
+description = "A clean, idiomatic Rust port of nanochat using the Burn framework"
+
+[dependencies]
+# Burn 核心框架与自动微分支持
+burn = { version = "0.21", features = ["train", "wgpu", "dataset"] }
+
+# 使用全新的 burn-dispatch 简化后端管理
+burn-dispatch = "0.21"
+
+# 使用全新的 burn-flex 代替旧的 ndarray，作为极轻量、无标准库依赖的 CPU 后端
+burn-flex = "0.21"
+
+# 并行计算与异步运行时
+tokio = { version = "1.38", features = ["full"] }
+rayon = "1.10"
+
+# 高性能序列化/反序列化（对接 PyTorch 权重与本地 Checkpoint）
+serde = { version = "1.0", features = ["derive"] }
+safetensors = "0.7"
+serde_json = "1.0"
+
+# 日志与系统级 Profiling 诊断
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+
+# 命令行解析与实用工具
+clap = { version = "4.5", features = ["derive"] }
+memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
+rand = "0.10"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1 # 减少并行编译单元，最大化单线程优化效果
+panic = "abort"   # 避免跨 FFI 边界的 panic 展开，减小体积并提升性能
+debug = true      # 保留调试符号以便性能分析（如使用 Tracy 或 Flamegraph）
+lto = "fat"       # 开启全局链接期优化
