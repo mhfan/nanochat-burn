@@ -1,5 +1,7 @@
 pub mod common;
 pub mod tokenizer;
+pub mod dataset;
+pub mod dataloader;
 
 /*
     nanochat-burn/
