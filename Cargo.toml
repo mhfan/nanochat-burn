@@ -34,6 +34,9 @@ clap = { version = "4.5", features = ["derive"] }
 memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
 rand = "0.10"
 
+#regex = "1.12"
+fancy-regex = "0.11"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1 # 减少并行编译单元，最大化单线程优化效果
