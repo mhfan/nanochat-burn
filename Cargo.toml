@@ -34,6 +34,8 @@ clap = { version = "4.5", features = ["derive"] }
 memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
 rand = "0.10"
 
+axum = "0.8"
+futures-core = "0.3"
 #regex = "1.12"
 fancy-regex = "0.11"
 

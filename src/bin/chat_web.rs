@@ -1,0 +1,175 @@
+use axum::{routing::{get, post}, Router, Json,
+    response::{sse::{Event, KeepAlive, Sse}, Html, IntoResponse},
+};
+use std::{convert::Infallible, sync::Arc};
+use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use burn::backend::wgpu::Wgpu;
+use nanochat_burn::gpt::{Gpt, GptConfig};
+use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
+use nanochat_burn::engine::inference::InferenceEngine;
+
+#[derive(Debug, Deserialize)]
+struct ChatRequest {
+    messages: Vec<ConversationMessage>,
+    temperature: Option<f32>,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    device: String,
+}
+
+// Custom Stream wrapper to avoid tokio-stream dependency
+struct SseStream {
+    rx: mpsc::Receiver<Result<Event, Infallible>>,
+}
+
+impl futures_core::Stream for SseStream {
+    type Item = Result<Event, Infallible>;
+    
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+// Shared engine state wrapper
+struct AppState {
+    engine: InferenceEngine<Wgpu>,
+    device: burn::backend::wgpu::WgpuDevice,
+}
+
+#[tokio::main]
+async fn main() {
+    // Initialize logging
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .try_init();
+
+    let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
+    println!("Initializing computational device: {:?}", device);
+
+    // 1. Train BpeTokenizer
+    let corpus = vec![
+        "Hello! How can I help you today?",
+        "The planets of the solar system are: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
+        "The capital of France is Paris.",
+        "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / 5<|python_end|><|output_start|>2<|output_end|>.",
+        "System programming in Rust is extremely safe, concurrent, and high-performance."
+    ];
+    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
+    let vocab_size = tokenizer.get_vocab_size();
+
+    // 2. Initialize GPT on WGPU
+    let config = GptConfig {
+        sequence_len: 512,
+        vocab_size,
+        n_layer: 4,
+        n_head: 4,
+        n_kv_head: 2,
+        n_embd: 128,
+        window_pattern: "SSL".to_string(),
+    };
+    let gpt: Gpt<Wgpu> = Gpt::new(config, &device);
+    let engine = InferenceEngine::new(gpt, tokenizer);
+    
+    let shared_state = Arc::new(AppState { engine, device });
+
+    // 3. Build Axum Router
+    let app = Router::new()
+        .route("/", get(serve_ui))
+        .route("/health", get(health_check))
+        .route("/chat/completions", post(chat_completions))
+        .layer(axum::Extension(shared_state));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    println!("============================================================");
+    println!("  🚀 Server running at: http://127.0.0.1:8080 🚀            ");
+    println!("============================================================");
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn serve_ui() -> impl IntoResponse {
+    Html(include_str!("../../../nanochat/ui.html"))
+}
+
+async fn health_check(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    Json(HealthResponse {
+        status: "ok",
+        device: format!("{:?}", state.device),
+    })
+}
+
+async fn chat_completions(
+    axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(payload): Json<ChatRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = mpsc::channel(100);
+    let engine_ref = state.clone();
+
+    tokio::spawn(async move {
+        let mut conversation = Conversation {
+            messages: payload.messages,
+        };
+
+        // Add dummy assistant response to construct correct SFT prompt
+        conversation.messages.push(ConversationMessage {
+            role: "assistant".to_string(),
+            content: MessageContent::Simple(String::new()),
+        });
+
+        let tokenizer = &engine_ref.engine.tokenizer;
+        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
+
+        let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+        let mut clean_prompt = prompt_tokens;
+        if let Some(&last) = clean_prompt.last() {
+            if last == assistant_end || last == tokenizer.get_bos_token_id() {
+                clean_prompt.pop();
+            }
+        }
+
+        let temp = payload.temperature.unwrap_or(0.7);
+        let top_k = payload.top_k.or(Some(50));
+        let max_tok = payload.max_tokens.unwrap_or(256);
+
+        let (mut gen_state, mut cur_logits) = engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
+
+        for _ in 0..max_tok {
+            if gen_state.completed[0] {
+                break;
+            }
+            let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(
+                &mut gen_state,
+                cur_logits,
+                temp,
+                top_k,
+                1.2,
+                &engine_ref.device,
+            );
+            cur_logits = next_logits;
+
+            let token = next_tokens[0];
+            let text = tokenizer.decode(&[token]);
+
+            let event_data = serde_json::json!({ "token": text });
+            let event = Event::default().json_data(event_data).unwrap();
+            
+            if tx.send(Ok(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    Sse::new(SseStream { rx })
+        .keep_alive(KeepAlive::default())
+}

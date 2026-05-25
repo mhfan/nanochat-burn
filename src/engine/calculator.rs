@@ -1,0 +1,196 @@
+/// Safe handcrafted mathematical and string expression evaluator in pure Rust.
+/// Supports basic arithmetic (+, -, *, /, parentheses) and ".count()" string queries.
+pub fn use_calculator(expr: &str) -> Option<String> {
+    let expr_clean = expr.replace(",", "");
+    let expr_trimmed = expr_clean.trim();
+
+    // 1. String count matching: e.g. "strawberry".count("r")
+    if expr_trimmed.contains(".count(") {
+        if let Some(res) = parse_and_eval_count(expr_trimmed) {
+            return Some(res.to_string());
+        }
+    }
+
+    // 2. Arithmetic expression evaluation
+    if let Some(val) = parse_and_eval_arithmetic(expr_trimmed) {
+        // Return rounded/formatted values for neat token representation if integral
+        if val.fract() == 0.0 {
+            return Some(format!("{}", val as i64));
+        } else {
+            return Some(format!("{}", val));
+        }
+    }
+
+    None
+}
+
+fn parse_and_eval_count(s: &str) -> Option<usize> {
+    let count_marker = ".count(";
+    let idx = s.find(count_marker)?;
+    let prefix = s[..idx].trim();
+    let suffix = s[idx + count_marker.len()..].trim();
+    
+    if !suffix.ends_with(')') {
+        return None;
+    }
+    let arg = suffix[..suffix.len() - 1].trim();
+    
+    let main_str = extract_quoted_string(prefix)?;
+    let sub_str = extract_quoted_string(arg)?;
+    
+    if sub_str.is_empty() {
+        return Some(main_str.len() + 1);
+    }
+    
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(pos) = main_str[start..].find(&sub_str) {
+        count += 1;
+        start += pos + sub_str.len();
+    }
+    Some(count)
+}
+
+fn extract_quoted_string(s: &str) -> Option<String> {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        if s.len() >= 2 {
+            return Some(s[1..s.len() - 1].to_string());
+        }
+    }
+    None
+}
+
+struct Parser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(input: &'a str) -> Self {
+        Parser { input, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+
+    fn consume(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += c.len_utf8();
+        Some(c)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(c) = self.peek() {
+            if c.is_whitespace() {
+                self.consume();
+            } else { break; }
+        }
+    }
+
+    fn parse_expression(&mut self) -> Option<f64> {
+        self.skip_whitespace();
+        let mut val = self.parse_term()?;
+        
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Some('+') => {
+                    self.consume();
+                    let right = self.parse_term()?;
+                    val += right;
+                }
+                Some('-') => {
+                    self.consume();
+                    let right = self.parse_term()?;
+                    val -= right;
+                }
+                _ => break,
+            }
+        }
+        Some(val)
+    }
+
+    fn parse_term(&mut self) -> Option<f64> {
+        self.skip_whitespace();
+        let mut val = self.parse_factor()?;
+        
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Some('*') => {
+                    self.consume();
+                    let right = self.parse_factor()?;
+                    val *= right;
+                }
+                Some('/') => {
+                    self.consume();
+                    let right = self.parse_factor()?;
+                    if right == 0.0 {
+                        return None;
+                    }
+                    val /= right;
+                }
+                _ => break,
+            }
+        }
+        Some(val)
+    }
+
+    fn parse_factor(&mut self) -> Option<f64> {
+        self.skip_whitespace();
+        match self.peek()? {
+            '(' => {
+                self.consume();
+                let val = self.parse_expression()?;
+                self.skip_whitespace();
+                if self.peek() == Some(')') {
+                    self.consume();
+                    Some(val)
+                } else { None }
+            }
+            c if c.is_digit(10) || c == '.' || c == '-' || c == '+' => {
+                let start = self.pos;
+                if c == '-' || c == '+' {
+                    self.consume();
+                }
+                let mut has_digits = false;
+                while let Some(next_c) = self.peek() {
+                    if next_c.is_digit(10) {
+                        self.consume();
+                        has_digits = true;
+                    } else if next_c == '.' { self.consume(); } else { break; }
+                }
+                if !has_digits { return None; }
+                let num_str = &self.input[start..self.pos];
+                num_str.trim().parse::<f64>().ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+fn parse_and_eval_arithmetic(s: &str) -> Option<f64> {
+    if !s.chars().all(|c| c.is_digit(10) || "+-*/.() ".contains(c)) { return None; }
+    let mut parser = Parser::new(s);
+    let val = parser.parse_expression()?;
+    parser.skip_whitespace();
+    if parser.pos == s.len() { Some(val) } else { None }
+}
+
+//#[cfg(test)] mod tests { use super::*;
+
+    #[test] fn test_calculator_arithmetic() {
+        assert_eq!(use_calculator("5 + 3 * 2"), Some("11".to_string()));
+        assert_eq!(use_calculator("(5 + 3) * 2"), Some("16".to_string()));
+        assert_eq!(use_calculator("10 / 2"), Some("5".to_string()));
+        assert_eq!(use_calculator("10 / 0"), None);
+        assert_eq!(use_calculator("invalid_chars + 5"), None);
+    }
+
+    #[test] fn test_calculator_string_count() {
+        assert_eq!(use_calculator("\"strawberry\".count(\"r\")"), Some("3".to_string()));
+        assert_eq!(use_calculator("'banana'.count('an')"), Some("2".to_string()));
+        assert_eq!(use_calculator("\"hello\".count(\"l\")"), Some("2".to_string()));
+    }
+//}

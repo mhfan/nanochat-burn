@@ -1,3 +1,4 @@
+
 use burn::tensor::{Tensor, backend::{Backend, AutodiffBackend}, Int};
 use burn::prelude::ToElement;
 use std::time::Instant;
@@ -5,6 +6,9 @@ use crate::gpt::Gpt;
 use crate::tokenizer::BpeTokenizer;
 use crate::dataloader::DistributedDataLoader;
 use crate::optim::muon::MuonAdamW;
+
+pub mod calculator;
+pub mod inference;
 
 /// Training configuration hyperparameters
 #[derive(Debug, Clone)]

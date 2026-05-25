@@ -49,6 +49,21 @@ fn repeat_kv<B: Backend>(x: Tensor<B, 4>, group_size: usize) -> Tensor<B, 4> {
     Tensor::cat(repeated, 2)
 }
 
+#[derive(Clone, Debug)]
+pub struct KVCache<B: Backend> {
+    pub k_cache: Vec<Tensor<B, 4>>, // Layer -> [B, seq_len, n_kv_head, head_dim]
+    pub v_cache: Vec<Tensor<B, 4>>, // Layer -> [B, seq_len, n_kv_head, head_dim]
+}
+
+impl<B: Backend> KVCache<B> {
+    pub fn new(n_layer: usize) -> Self {
+        Self {
+            k_cache: Vec::with_capacity(n_layer),
+            v_cache: Vec::with_capacity(n_layer),
+        }
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct CausalSelfAttention<B: Backend> {
     pub c_q: Linear<B>,
@@ -63,6 +78,101 @@ pub struct CausalSelfAttention<B: Backend> {
 }
 
 impl<B: Backend> CausalSelfAttention<B> {
+    pub fn forward_with_cache(
+        &self,
+        x: Tensor<B, 3>,
+        ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>,
+        sin: Tensor<B, 4>,
+        window_size: i32,
+        layer_idx: usize,
+        cache: &mut KVCache<B>,
+        step: usize,
+    ) -> Tensor<B, 3> {
+        let shape: [usize; 3] = x.shape().dims();
+        let (b, t, _) = (shape[0], shape[1], shape[2]);
+        
+        let mut q = self.c_q.forward(x.clone()).reshape([b, t, self.n_head, self.head_dim]);
+        let mut k = self.c_k.forward(x.clone()).reshape([b, t, self.n_kv_head, self.head_dim]);
+        let mut v = self.c_v.forward(x.clone()).reshape([b, t, self.n_kv_head, self.head_dim]);
+        
+        if let Some(ve_tensor) = ve {
+            let ve_reshaped = ve_tensor.reshape([b, t, self.n_kv_head, self.head_dim]);
+            if let Some(ref ve_gate_linear) = self.ve_gate {
+                let x_slice = x.clone().slice([0..b, 0..t, 0..12]);
+                let gate_logits = ve_gate_linear.forward(x_slice);
+                let gate = ((gate_logits * -1.0).exp() + 1.0).recip() * 3.0; // range (0, 3)
+                let gate_unsqueezed = gate.reshape([b, t, self.n_kv_head, 1]);
+                v = v + gate_unsqueezed * ve_reshaped;
+            }
+        }
+        
+        q = apply_rotary_emb(q, cos.clone(), sin.clone());
+        k = apply_rotary_emb(k, cos, sin);
+        q = rms_norm(q, 1e-5) * 1.2;
+        k = rms_norm(k, 1e-5) * 1.2;
+        
+        let (mut full_k, mut full_v) = if step == 0 {
+            if cache.k_cache.len() <= layer_idx {
+                cache.k_cache.push(k.clone());
+                cache.v_cache.push(v.clone());
+            } else {
+                cache.k_cache[layer_idx] = k.clone();
+                cache.v_cache[layer_idx] = v.clone();
+            }
+            (k, v)
+        } else {
+            let cached_k = cache.k_cache[layer_idx].clone();
+            let cached_v = cache.v_cache[layer_idx].clone();
+            
+            let full_k = Tensor::cat(vec![cached_k, k], 1);
+            let full_v = Tensor::cat(vec![cached_v, v], 1);
+            
+            cache.k_cache[layer_idx] = full_k.clone();
+            cache.v_cache[layer_idx] = full_v.clone();
+            
+            (full_k, full_v)
+        };
+        
+        let full_k_dims: [usize; 4] = full_k.shape().dims();
+        let full_seq_len = full_k_dims[1];
+        
+        let group_size = self.n_head / self.n_kv_head;
+        full_k = repeat_kv(full_k, group_size);
+        full_v = repeat_kv(full_v, group_size);
+        
+        let q_trans = q.swap_dims(1, 2);
+        let k_trans = full_k.swap_dims(1, 2);
+        let v_trans = full_v.swap_dims(1, 2);
+        let k_t = k_trans.swap_dims(2, 3);
+        let mut scores = q_trans.matmul(k_t) * (1.0 / (self.head_dim as f32).sqrt());
+        
+        let mask = if step == 0 {
+            let mut mask_data = Vec::with_capacity(t * t);
+            for i in 0..t {
+                for j in 0..t {
+                    let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
+                    mask_data.push(if j > i || j < left_bound { -1e9f32 } else { 0.0f32 });
+                }
+            }
+            Tensor::<B, 4>::from_data(TensorData::new(mask_data, Shape::new([1, 1, t, t])), &x.device())
+        } else {
+            let p = step;
+            let mut mask_data = Vec::with_capacity(full_seq_len);
+            let left_bound = if window_size < 0 { 0 } else { p.saturating_sub(window_size as usize) };
+            for j in 0..full_seq_len {
+                mask_data.push(if j > p || j < left_bound { -1e9f32 } else { 0.0f32 });
+            }
+            Tensor::<B, 4>::from_data(TensorData::new(mask_data, Shape::new([1, 1, 1, full_seq_len])), &x.device())
+        };
+        
+        scores = scores + mask;
+        
+        let probs = burn::tensor::activation::softmax(scores, 3);
+        let y = probs.matmul(v_trans).swap_dims(1, 2).reshape([b, t, self.n_head * self.head_dim]);
+        self.c_proj.forward(y)
+    }
+
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
@@ -142,6 +252,21 @@ pub struct Block<B: Backend> {
 }
 
 impl<B: Backend> Block<B> {
+    pub fn forward_with_cache(
+        &self,
+        x: Tensor<B, 3>,
+        ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>,
+        sin: Tensor<B, 4>,
+        window_size: i32,
+        layer_idx: usize,
+        cache: &mut KVCache<B>,
+        step: usize,
+    ) -> Tensor<B, 3> {
+        let x = x.clone() + self.attn.forward_with_cache(rms_norm(x.clone(), 1e-5), ve, cos, sin, window_size, layer_idx, cache, step);
+        x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
+    }
+
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
@@ -257,6 +382,31 @@ impl<B: Backend> Gpt<B> {
         (cos, sin)
     }
 
+    fn precompute_rotary_embeddings_at_step(
+        &self,
+        step: usize,
+        head_dim: usize,
+        device: &B::Device,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let base = 100000.0f32;
+        let mut inv_freq = Vec::with_capacity(head_dim / 2);
+        for i in (0..head_dim).step_by(2) { inv_freq.push(1.0 / base.powf(i as f32 / head_dim as f32)); }
+        
+        let mut cos_data = Vec::with_capacity(head_dim / 2);
+        let mut sin_data = Vec::with_capacity(head_dim / 2);
+        
+        for &freq in &inv_freq {
+            let angle = step as f32 * freq;
+            cos_data.push(angle.cos());
+            sin_data.push(angle.sin());
+        }
+        
+        let cos = Tensor::<B, 4>::from_data(TensorData::new(cos_data, Shape::new([1, 1, 1, head_dim / 2])), device);
+        let sin = Tensor::<B, 4>::from_data(TensorData::new(sin_data, Shape::new([1, 1, 1, head_dim / 2])), device);
+        (cos, sin)
+    }
+
+
     fn compute_window_sizes(&self) -> Vec<i32> {
         let pattern = self.config.window_pattern.to_uppercase();
         let long_window = -1;
@@ -268,6 +418,69 @@ impl<B: Backend> Gpt<B> {
         }
         if let Some(w) = window_sizes.last_mut() { *w = long_window; }
         window_sizes
+    }
+
+    pub fn forward_with_cache(
+        &self,
+        idx: Tensor<B, 2, Int>,
+        cache: &mut KVCache<B>,
+        step: usize,
+    ) -> Tensor<B, 3> {
+        let shape: [usize; 2] = idx.shape().dims();
+        let (batch_size, seq_len) = (shape[0], shape[1]);
+        
+        let head_dim = self.config.n_embd / self.config.n_head;
+        let (cos, sin) = if seq_len > 1 {
+            self.precompute_rotary_embeddings(seq_len, head_dim, &idx.device())
+        } else {
+            self.precompute_rotary_embeddings_at_step(step, head_dim, &idx.device())
+        };
+        
+        let x = self.wte.forward(idx.clone());
+        let x_normed = rms_norm(x, 1e-5);
+        
+        let mut x = if seq_len > 1 {
+            let x_slice = x_normed.clone().slice([0..batch_size, 1..seq_len, 0..24]);
+            let gate_logits = self.smear_gate.forward(x_slice);
+            let gate = ((gate_logits * -1.0).exp() + 1.0).recip() * self.smear_lambda.clone().val().reshape([1, 1, 1]);
+            let x_prev = x_normed.clone().slice([0..batch_size, 0..seq_len - 1, 0..self.config.n_embd]);
+            let x_cur = x_normed.clone().slice([0..batch_size, 1..seq_len, 0..self.config.n_embd]);
+            let smeared = x_cur + gate * x_prev;
+            let x_first = x_normed.clone().slice([0..batch_size, 0..1, 0..self.config.n_embd]);
+            Tensor::cat(vec![x_first, smeared], 1)
+        } else { x_normed };
+        
+        let x0 = x.clone();
+        let backout_layer = self.config.n_layer / 2;
+        let mut x_backout = None;
+        let resid_val = self.resid_lambdas.clone().val();
+        let x0_val = self.x0_lambdas.clone().val();
+        let window_sizes = self.compute_window_sizes();
+        
+        let mut ve_cnt = 0;
+        for i in 0..self.config.n_layer {
+            let r_lambda = resid_val.clone().slice([i..i+1]).reshape([1, 1, 1]);
+            let x0_lambda = x0_val.clone().slice([i..i+1]).reshape([1, 1, 1]);
+            x = x * r_lambda + x0.clone() * x0_lambda;
+            
+            let ve = if has_ve(i, self.config.n_layer) {
+                let ve_embed = self.value_embeds[ve_cnt].forward(idx.clone());
+                ve_cnt += 1;
+                Some(ve_embed)
+            } else { None };
+            
+            x = self.h[i].forward_with_cache(x, ve, cos.clone(), sin.clone(), window_sizes[i], i, cache, step);
+            if i == backout_layer { x_backout = Some(x.clone()); }
+        }
+        
+        if let Some(xb) = x_backout {
+            x = x - xb * self.backout_lambda.clone().val().reshape([1, 1, 1]);
+        }
+        let x = rms_norm(x, 1e-5);
+        
+        let mut logits = self.lm_head.forward(x);
+        logits = logits.slice([0..batch_size, 0..seq_len, 0..self.config.vocab_size]);
+        logits.tanh() * 15.0
     }
 
     pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>) -> Tensor<B, 3> {
