@@ -4,6 +4,9 @@ pub mod dataset;
 pub mod dataloader;
 pub mod gpt;
 pub mod checkpoint;
+pub mod optim;
+pub mod engine;
+
 
 /*
     nanochat-burn/

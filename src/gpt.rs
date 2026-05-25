@@ -342,6 +342,23 @@ impl<B: Backend> Gpt<B> {
         let num_valid = valid_float.sum().clamp(1.0, 1e9);
         sum_loss / num_valid
     }
+
+    pub fn compute_unreduced_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
+        let shape: [usize; 3] = logits.shape().dims();
+        let (b, t, v) = (shape[0], shape[1], shape[2]);
+        let flat_logits = logits.reshape([b * t, v]);
+        let flat_targets = targets.reshape([b * t]);
+        
+        let log_probs = burn::tensor::activation::log_softmax(flat_logits, 1);
+        let mask_valid = flat_targets.clone().not_equal_elem(-1);
+        let clamped_targets = flat_targets.clamp(0, (v - 1) as i32);
+        
+        let one_hot = clamped_targets.one_hot(v);
+        let selected_log_probs = (log_probs * one_hot.float()).sum_dim(1).reshape([b * t]);
+        
+        let valid_float = mask_valid.float();
+        selected_log_probs * valid_float * -1.0
+    }
 }
 
 //#[cfg(test)] mod tests { use super::*;
