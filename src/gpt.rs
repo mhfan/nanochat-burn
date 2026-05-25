@@ -24,11 +24,8 @@ pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor
     x * inv_std
 }
 
-pub fn apply_rotary_emb<B: Backend>(
-    x: Tensor<B, 4>,
-    cos: Tensor<B, 4>,
-    sin: Tensor<B, 4>,
-) -> Tensor<B, 4> {
+pub fn apply_rotary_emb<B: Backend>(x: Tensor<B, 4>, cos: Tensor<B, 4>,
+    sin: Tensor<B, 4>,) -> Tensor<B, 4> {
     let shape: [usize; 4] = x.shape().dims();
     let d = shape[3] / 2;
     let x1 = x.clone().slice([0..shape[0], 0..shape[1], 0..shape[2], 0..d]);
@@ -78,17 +75,9 @@ pub struct CausalSelfAttention<B: Backend> {
 }
 
 impl<B: Backend> CausalSelfAttention<B> {
-    pub fn forward_with_cache(
-        &self,
-        x: Tensor<B, 3>,
-        ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>,
-        window_size: i32,
-        layer_idx: usize,
-        cache: &mut KVCache<B>,
-        step: usize,
-    ) -> Tensor<B, 3> {
+    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,
+        layer_idx: usize, cache: &mut KVCache<B>, step: usize,) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let (b, t, _) = (shape[0], shape[1], shape[2]);
         
@@ -173,14 +162,8 @@ impl<B: Backend> CausalSelfAttention<B> {
         self.c_proj.forward(y)
     }
 
-    pub fn forward(
-        &self,
-        x: Tensor<B, 3>,
-        ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>,
-        window_size: i32,
-    ) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let (b, t, _) = (shape[0], shape[1], shape[2]);
         
@@ -252,29 +235,15 @@ pub struct Block<B: Backend> {
 }
 
 impl<B: Backend> Block<B> {
-    pub fn forward_with_cache(
-        &self,
-        x: Tensor<B, 3>,
-        ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>,
-        window_size: i32,
-        layer_idx: usize,
-        cache: &mut KVCache<B>,
-        step: usize,
-    ) -> Tensor<B, 3> {
+    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,
+        layer_idx: usize, cache: &mut KVCache<B>, step: usize,) -> Tensor<B, 3> {
         let x = x.clone() + self.attn.forward_with_cache(rms_norm(x.clone(), 1e-5), ve, cos, sin, window_size, layer_idx, cache, step);
         x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
     }
 
-    pub fn forward(
-        &self,
-        x: Tensor<B, 3>,
-        ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>,
-        window_size: i32,
-    ) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,) -> Tensor<B, 3> {
         let x = x.clone() + self.attn.forward(rms_norm(x.clone(), 1e-5), ve, cos, sin, window_size);
         x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
     }
@@ -356,12 +325,8 @@ impl<B: Backend> Gpt<B> {
         }
     }
 
-    fn precompute_rotary_embeddings(
-        &self,
-        seq_len: usize,
-        head_dim: usize,
-        device: &B::Device,
-    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    fn precompute_rotary_embeddings(&self, seq_len: usize, head_dim: usize,
+        device: &B::Device,) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let base = 100000.0f32;
         let mut inv_freq = Vec::with_capacity(head_dim / 2);
         for i in (0..head_dim).step_by(2) { inv_freq.push(1.0 / base.powf(i as f32 / head_dim as f32)); }
@@ -382,12 +347,8 @@ impl<B: Backend> Gpt<B> {
         (cos, sin)
     }
 
-    fn precompute_rotary_embeddings_at_step(
-        &self,
-        step: usize,
-        head_dim: usize,
-        device: &B::Device,
-    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    fn precompute_rotary_embeddings_at_step(&self, step: usize, head_dim: usize,
+        device: &B::Device,) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let base = 100000.0f32;
         let mut inv_freq = Vec::with_capacity(head_dim / 2);
         for i in (0..head_dim).step_by(2) { inv_freq.push(1.0 / base.powf(i as f32 / head_dim as f32)); }
@@ -420,12 +381,8 @@ impl<B: Backend> Gpt<B> {
         window_sizes
     }
 
-    pub fn forward_with_cache(
-        &self,
-        idx: Tensor<B, 2, Int>,
-        cache: &mut KVCache<B>,
-        step: usize,
-    ) -> Tensor<B, 3> {
+    pub fn forward_with_cache(&self, idx: Tensor<B, 2, Int>,
+        cache: &mut KVCache<B>, step: usize,) -> Tensor<B, 3> {
         let shape: [usize; 2] = idx.shape().dims();
         let (batch_size, seq_len) = (shape[0], shape[1]);
         
@@ -577,7 +534,6 @@ impl<B: Backend> Gpt<B> {
 //#[cfg(test)] mod tests { use super::*;
 
     #[test] fn test_gpt_forward_and_loss() {
-        use burn::backend::wgpu::Wgpu;
         let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
         let config = GptConfig {
             sequence_len: 16,
@@ -589,6 +545,7 @@ impl<B: Backend> Gpt<B> {
             window_pattern: "SL".to_string(),
         };
         
+        use burn::backend::wgpu::Wgpu;
         let gpt: Gpt<Wgpu> = Gpt::new(config, &device);
         let idx = Tensor::<Wgpu, 2, Int>::from_data([[1, 2, 3, 4], [5, 6, 7, 8]], &device);
         let targets = Tensor::<Wgpu, 2, Int>::from_data([[2, 3, 4, -1], [6, 7, 8, -1]], &device);

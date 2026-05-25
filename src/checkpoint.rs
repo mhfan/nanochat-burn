@@ -14,8 +14,7 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>,
         let shape: Vec<usize> = view.shape().iter().map(|&x| x as usize).collect();
         let data = view.data();
         let f32_data = data.chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect();
         Ok((f32_data, shape))
     };
     

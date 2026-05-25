@@ -6,9 +6,7 @@ pub fn use_calculator(expr: &str) -> Option<String> {
 
     // 1. String count matching: e.g. "strawberry".count("r")
     if expr_trimmed.contains(".count(") {
-        if let Some(res) = parse_and_eval_count(expr_trimmed) {
-            return Some(res.to_string());
-        }
+        if let Some(res) = parse_and_eval_count(expr_trimmed) { return Some(res.to_string()); }
     }
 
     // 2. Arithmetic expression evaluation
@@ -30,32 +28,25 @@ fn parse_and_eval_count(s: &str) -> Option<usize> {
     let prefix = s[..idx].trim();
     let suffix = s[idx + count_marker.len()..].trim();
     
-    if !suffix.ends_with(')') {
-        return None;
-    }
+    if !suffix.ends_with(')') { return None; }
     let arg = suffix[..suffix.len() - 1].trim();
     
     let main_str = extract_quoted_string(prefix)?;
     let sub_str = extract_quoted_string(arg)?;
     
-    if sub_str.is_empty() {
-        return Some(main_str.len() + 1);
-    }
+    if sub_str.is_empty() { return Some(main_str.len() + 1); }
     
-    let mut count = 0;
-    let mut start = 0;
+    let (mut count, mut start) = (0, 0);
     while let Some(pos) = main_str[start..].find(&sub_str) {
-        count += 1;
         start += pos + sub_str.len();
+        count += 1;
     }
     Some(count)
 }
 
 fn extract_quoted_string(s: &str) -> Option<String> {
     if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        if s.len() >= 2 {
-            return Some(s[1..s.len() - 1].to_string());
-        }
+        if s.len() >= 2 { return Some(s[1..s.len() - 1].to_string()); }
     }
     None
 }
@@ -66,13 +57,9 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Parser { input, pos: 0 }
-    }
+    fn new(input: &'a str) -> Self { Parser { input, pos: 0 } }
 
-    fn peek(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
-    }
+    fn peek(&self) -> Option<char> { self.input[self.pos..].chars().next() }
 
     fn consume(&mut self) -> Option<char> {
         let c = self.peek()?;
@@ -82,9 +69,7 @@ impl<'a> Parser<'a> {
 
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
-            if c.is_whitespace() {
-                self.consume();
-            } else { break; }
+            if c.is_whitespace() { self.consume(); } else { break; }
         }
     }
 

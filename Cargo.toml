@@ -5,16 +5,34 @@ version = "0.1.0"
 edition = "2021"
 authors = ["MeiHui FAN <mhfan@zepp.com>"]
 description = "A clean, idiomatic Rust port of nanochat using the Burn framework"
+default-run = "chat"
+
+[features]
+default = []
+web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
+
+[[bin]]
+name = "chat"
+path = "src/bin/chat.rs"
+
+[[bin]]
+name = "chat_web"
+path = "src/bin/chat_web.rs"
+required-features = ["web"]
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
 
 [dependencies]
 # Burn 核心框架与自动微分支持
 burn = { version = "0.21", features = ["train", "wgpu", "dataset"] }
 
 # 使用全新的 burn-dispatch 简化后端管理
-burn-dispatch = "0.21"
+#burn-dispatch = "0.21"
 
 # 使用全新的 burn-flex 代替旧的 ndarray，作为极轻量、无标准库依赖的 CPU 后端
-burn-flex = "0.21"
+#burn-flex = "0.21"
 
 # 并行计算与异步运行时
 tokio = { version = "1.38", features = ["full"] }
@@ -30,14 +48,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 
 # 命令行解析与实用工具
-clap = { version = "4.5", features = ["derive"] }
+#clap = { version = "4.5", features = ["derive"] }
 memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
 rand = "0.10"
 
-axum = "0.8"
-futures-core = "0.3"
+# Web 服务框架（仅 chat_web 二进制需要，通过 'web' feature 按需编译）
+axum = { version = "0.8", optional = true }
+futures-core = { version = "0.3", optional = true }
+fancy-regex = "0.18"
 #regex = "1.12"
-fancy-regex = "0.11"
 
 [profile.release]
 opt-level = 3

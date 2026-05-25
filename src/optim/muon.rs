@@ -42,37 +42,17 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         let mut h = Vec::with_capacity(n_layer);
         for _ in 0..n_layer {
             value_embeds.push(None);
-            h.push(BlockMuonState {
-                c_q: None,
-                c_k: None,
-                c_v: None,
-                c_proj: None,
-                ve_gate: None,
-                c_fc: None,
-                c_proj_mlp: None,
+            h.push(BlockMuonState { c_q: None, c_k: None, c_v: None,
+                c_proj: None, ve_gate: None, c_fc: None, c_proj_mlp: None,
             });
         }
-        Self {
-            wte: None,
-            lm_head: None,
-            value_embeds,
-            resid_lambdas: None,
-            x0_lambdas: None,
-            smear_gate: None,
-            smear_lambda: None,
-            backout_lambda: None,
-            h,
+        Self { wte: None, lm_head: None, value_embeds, resid_lambdas: None,
+            x0_lambdas: None, smear_gate: None, smear_lambda: None, backout_lambda: None, h,
         }
     }
 
-    pub fn step(
-        &mut self,
-        gpt: &mut Gpt<B>,
-        grads: &B::Gradients,
-        lr: f32,
-        step: usize,
-        weight_decay: f32,
-    ) {
+    pub fn step(&mut self, gpt: &mut Gpt<B>, grads: &B::Gradients,
+        lr: f32, step: usize, weight_decay: f32,) {
         let model_dim = gpt.config.n_embd as f32;
         let dmodel_lr_scale = (model_dim / 768.0).powf(-0.5);
 
@@ -175,17 +155,9 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
     }
 }
 
-fn adamw_step<B: Backend, const D: usize>(
-    p: Tensor<B, D>,
-    grad: Tensor<B, D>,
-    state: &mut Option<AdamWState<B, D>>,
-    lr: f32,
-    wd: f32,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    step: usize,
-) -> Tensor<B, D> {
+fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
+    state: &mut Option<AdamWState<B, D>>, lr: f32, wd: f32, beta1: f32, beta2: f32,
+    eps: f32, step: usize,) -> Tensor<B, D> {
     let s = state.get_or_insert_with(|| {
         AdamWState {
             exp_avg: Tensor::zeros(p.shape(), &p.device()),
@@ -206,19 +178,11 @@ fn adamw_step<B: Backend, const D: usize>(
     p_decayed - (s.exp_avg.clone() / denom).mul_scalar(step_size)
 }
 
-fn muon_step<B: Backend>(
-    p: Tensor<B, 2>,
-    grad: Tensor<B, 2>,
-    state: &mut Option<MuonState<B, 2>>,
-    lr: f32,
-    wd: f32,
-    momentum: f32,
-    beta2: f32,
-    ns_steps: usize,
-) -> Tensor<B, 2> {
+fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
+    state: &mut Option<MuonState<B, 2>>, lr: f32, wd: f32, momentum: f32,
+    beta2: f32, ns_steps: usize,) -> Tensor<B, 2> {
     let shape: [usize; 2] = p.shape().dims();
-    let rows = shape[0];
-    let cols = shape[1];
+    let (rows, cols) = (shape[0], shape[1]);
     let red_dim = if rows >= cols { 1 } else { 0 };
 
     let s = state.get_or_insert_with(|| {

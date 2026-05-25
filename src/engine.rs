@@ -26,13 +26,8 @@ pub struct TrainingConfig {
 
 /// Compute the learning rate multiplier using a linear warmup followed by a constant phase
 /// and a cosine decay or linear warmdown to a final fraction of the initial learning rate.
-pub fn get_lr_multiplier(
-    step: usize,
-    num_iterations: usize,
-    warmup_steps: usize,
-    warmdown_ratio: f32,
-    final_lr_frac: f32,
-) -> f32 {
+pub fn get_lr_multiplier(step: usize, num_iterations: usize, warmup_steps: usize,
+    warmdown_ratio: f32, final_lr_frac: f32,) -> f32 {
     if step < warmup_steps {
         (step + 1) as f32 / warmup_steps.max(1) as f32
     } else {
@@ -47,11 +42,7 @@ pub fn get_lr_multiplier(
 }
 
 /// Compute the momentum value for the Muon optimizer dynamically over the training horizon.
-pub fn get_muon_momentum(
-    step: usize,
-    num_iterations: usize,
-    warmdown_ratio: f32,
-) -> f32 {
+pub fn get_muon_momentum(step: usize, num_iterations: usize, warmdown_ratio: f32,) -> f32 {
     let warmdown_iters = (warmdown_ratio * num_iterations as f32).round() as usize;
     let warmdown_start = num_iterations.saturating_sub(warmdown_iters);
     if step < 400 {
@@ -66,11 +57,7 @@ pub fn get_muon_momentum(
 }
 
 /// Compute the weight decay value dynamically over the training horizon.
-pub fn get_weight_decay(
-    step: usize,
-    num_iterations: usize,
-    weight_decay: f32,
-) -> f32 {
+pub fn get_weight_decay(step: usize, num_iterations: usize, weight_decay: f32,) -> f32 {
     weight_decay * 0.5 * (1.0 + ((std::f32::consts::PI * step as f32) / num_iterations.max(1) as f32).cos())
 }
 
@@ -82,31 +69,19 @@ pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
     
     // Normal BPE mergeable ranks
     for (bytes, &id) in &tokenizer.mergeable_ranks {
-        if id < vocab_size {
-            token_bytes[id] = bytes.len();
-        }
+        if id < vocab_size { token_bytes[id] = bytes.len(); }
     }
     
     // Single byte fallbacks
-    for i in 0..256 {
-        if i < vocab_size {
-            token_bytes[i] = 1;
-        }
-    }
+    for i in 0..256 { if i < vocab_size { token_bytes[i] = 1; } }
     
     token_bytes
 }
 
 /// Evaluate validation Bits Per Byte (BPB) on a given DataLoader.
-pub async fn evaluate_bpb<B: Backend>(
-    model: &Gpt<B>,
-    loader: &mut DistributedDataLoader,
-    steps: usize,
-    token_bytes: &[usize],
-    device: &B::Device,
-) -> f32 {
-    let mut total_nats = 0.0f32;
-    let mut total_bytes = 0;
+pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDataLoader,
+    steps: usize, token_bytes: &[usize], device: &B::Device,) -> f32 {
+    let (mut total_nats, mut total_bytes) = (0.0f32, 0);
     
     for _ in 0..steps {
         if let Some(batch) = loader.next_batch().await {
@@ -141,9 +116,7 @@ pub async fn evaluate_bpb<B: Backend>(
         }
     }
     
-    if total_bytes == 0 {
-        f32::INFINITY
-    } else {
+    if total_bytes == 0 { f32::INFINITY } else {
         total_nats / (2.0f32.ln() * total_bytes as f32)
     }
 }
@@ -163,23 +136,14 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     pub fn new(model: Gpt<B>, config: TrainingConfig, tokenizer: &BpeTokenizer) -> Self {
         let optimizer = MuonAdamW::new(model.config.n_layer);
         let token_bytes = get_token_bytes(tokenizer);
-        Self {
-            model,
-            optimizer,
-            config,
-            token_bytes,
-            step: 0,
-            smooth_train_loss: 0.0,
-            total_training_time_secs: 0.0,
+        Self { model, optimizer, config, token_bytes, step: 0,
+            smooth_train_loss: 0.0, total_training_time_secs: 0.0,
         }
     }
 
     /// Perform a single optimization step (with optional gradient accumulation steps)
-    pub async fn train_step(
-        &mut self,
-        loader: &mut DistributedDataLoader,
-        device: &B::Device,
-    ) -> f32 {
+    pub async fn train_step(&mut self, loader: &mut DistributedDataLoader,
+        device: &B::Device,) -> f32 {
         let start_time = Instant::now();
         let tokens_per_fwdbwd = self.config.device_batch_size * self.config.sequence_length;
         let world_tokens_per_fwdbwd = tokens_per_fwdbwd; // Single node / mock DDP
@@ -215,13 +179,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         // Apply optimizer update step
         if let Some(g) = grads {
-            let lrm = get_lr_multiplier(
-                self.step,
-                self.config.num_iterations,
-                self.config.warmup_steps,
-                self.config.warmdown_ratio,
-                self.config.final_lr_frac,
-            );
+            let lrm = get_lr_multiplier(self.step, self.config.num_iterations,
+                self.config.warmup_steps, self.config.warmdown_ratio, self.config.final_lr_frac,);
             let lr = self.config.learning_rate * lrm;
             let wd = get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
             
@@ -277,14 +236,9 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let token_bytes = get_token_bytes(&tokenizer);
         assert_eq!(token_bytes.len(), tokenizer.get_vocab_size());
         
-        let config = crate::gpt::GptConfig {
-            sequence_len: 8,
+        let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
             vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 1,
-            n_head: 2,
-            n_kv_head: 1,
-            n_embd: 16,
-            window_pattern: "L".to_string(),
         };
 
         use burn::backend::wgpu::Wgpu;

@@ -56,14 +56,8 @@ impl<B: Backend> InferenceEngine<B> {
         let python_expr_tokens = vec![Vec::new(); num_samples];
         let completed = vec![false; num_samples];
         
-        let state = GeneratorState {
-            cache,
-            current_tokens,
-            forced_tokens,
-            in_python_block,
-            python_expr_tokens,
-            completed,
-            step: prompt_len,
+        let state = GeneratorState { cache, current_tokens, forced_tokens,
+            in_python_block, python_expr_tokens, completed, step: prompt_len,
         };
         
         (state, last_logits)
@@ -100,9 +94,7 @@ impl<B: Backend> InferenceEngine<B> {
             let is_forced = !state.forced_tokens[i].is_empty();
             let next_tok = if is_forced {
                 state.forced_tokens[i].pop_front().unwrap()
-            } else {
-                sampled_tokens[i]
-            };
+            } else { sampled_tokens[i] };
             
             next_token_column.push(next_tok);
             is_sampled_mask.push(if is_forced { 0 } else { 1 });
@@ -158,9 +150,7 @@ impl<B: Backend> InferenceEngine<B> {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
         
         for _ in 0..max_tokens {
-            if state.completed.iter().all(|&c| c) {
-                break;
-            }
+            if state.completed.iter().all(|&c| c) { break; }
             let (_, _, next_logits) = self.step_generation(&mut state, cur_logits,
                 temperature, top_k, repetition_penalty, device,);
             cur_logits = next_logits;
@@ -175,8 +165,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
     top_k: Option<usize>, repetition_penalty: f32,
     generated_tokens: &[Vec<usize>],) -> Vec<usize> {
     let shape: [usize; 2] = logits.shape().dims();
-    let batch_size = shape[0];
-    let vocab_size = shape[1];
+    let (batch_size, vocab_size) = (shape[0], shape[1]);
     
     let logits_vec = logits.into_data().to_vec::<f32>().unwrap();
     let mut sampled_ids = Vec::with_capacity(batch_size);
@@ -188,9 +177,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         // 1. Repetition penalty
         if repetition_penalty != 1.0 {
             let mut unique_history = std::collections::HashSet::new();
-            for &t in &generated_tokens[b] {
-                unique_history.insert(t);
-            }
+            for &t in &generated_tokens[b] { unique_history.insert(t); }
             for &t in &unique_history {
                 if t < vocab_size {
                     let val = sample_logits[t];
@@ -218,27 +205,21 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         }
         
         // 3. Scale by temperature
-        for val in sample_logits.iter_mut() {
-            *val /= temperature;
-        }
+        for val in sample_logits.iter_mut() { *val /= temperature; }
         
         // 4. Top-K filtering
         let mut indices: Vec<usize> = (0..vocab_size).collect();
         if let Some(k) = top_k {
             let k = k.min(vocab_size);
             indices.sort_by(|&i, &j| sample_logits[j].partial_cmp(&sample_logits[i]).unwrap());
-            for &idx in &indices[k..] {
-                sample_logits[idx] = -1e9;
-            }
+            for &idx in &indices[k..] { sample_logits[idx] = -1e9; }
         }
         
         // 5. Stable Softmax & Multinomial sampling
         let max_logit = sample_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let mut exp_logits: Vec<f32> = sample_logits.iter().map(|&v| (v - max_logit).exp()).collect();
         let sum_exp: f32 = exp_logits.iter().sum();
-        for v in exp_logits.iter_mut() {
-            *v /= sum_exp;
-        }
+        for v in exp_logits.iter_mut() { *v /= sum_exp; }
         
         let mut cum_sum = 0.0f32;
         let r: f32 = rand::random();
@@ -263,14 +244,9 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let corpus = vec!["Interactive chat agent with Tool-Use integration."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
         
-        let config = crate::gpt::GptConfig {
-            sequence_len: 8,
-            vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 1,
-            n_head: 2,
-            n_kv_head: 1,
-            n_embd: 32,
-            window_pattern: "L".to_string(),
+        let config = crate::gpt::GptConfig { sequence_len: 8,
+            n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32,
+            window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
         };
 
         use burn::backend::wgpu::Wgpu;
