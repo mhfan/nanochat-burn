@@ -4,7 +4,7 @@ use axum::{routing::{get, post}, Router, Json,
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
-use burn::backend::wgpu::Wgpu;
+use nanochat_burn::common::{ModelBackend, ModelDevice, init_device};
 use nanochat_burn::gpt::{Gpt, GptConfig};
 use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
 use nanochat_burn::engine::inference::InferenceEngine;
@@ -30,7 +30,7 @@ struct SseStream {
 
 impl futures_core::Stream for SseStream {
     type Item = Result<Event, Infallible>;
-    
+
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -41,20 +41,16 @@ impl futures_core::Stream for SseStream {
 
 // Shared engine state wrapper
 struct AppState {
-    engine: InferenceEngine<Wgpu>,
-    device: burn::backend::wgpu::WgpuDevice,
+    engine: InferenceEngine<ModelBackend>,
+    device: ModelDevice,
 }
 
 #[tokio::main]
 async fn main() {
     // Initialize logging
     use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .try_init();
-
-    let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
-    println!("Initializing computational device: {:?}", device);
+    let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))).try_init();
 
     // 1. Train BpeTokenizer
     let corpus = vec![
@@ -68,18 +64,13 @@ async fn main() {
     let vocab_size = tokenizer.get_vocab_size();
 
     // 2. Initialize GPT on WGPU
-    let config = GptConfig {
-        sequence_len: 512,
-        vocab_size,
-        n_layer: 4,
-        n_head: 4,
-        n_kv_head: 2,
-        n_embd: 128,
-        window_pattern: "SSL".to_string(),
-    };
-    let gpt: Gpt<Wgpu> = Gpt::new(config, &device);
+    let config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4,
+        n_head: 4, n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), };
+
+    let device = init_device();
+    let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
     let engine = InferenceEngine::new(gpt, tokenizer);
-    
+
     let shared_state = Arc::new(AppState { engine, device });
 
     // 3. Build Axum Router
@@ -96,35 +87,24 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn serve_ui() -> impl IntoResponse {
-    Html(include_str!("../../../nanochat/ui.html"))
+async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../../nanochat/ui.html")) }
+
+async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>,) -> impl IntoResponse {
+    Json(HealthResponse { device: format!("{:?}", state.device), status: "ok", })
 }
 
-async fn health_check(
-    axum::Extension(state): axum::Extension<Arc<AppState>>,
-) -> impl IntoResponse {
-    Json(HealthResponse {
-        status: "ok",
-        device: format!("{:?}", state.device),
-    })
-}
-
-async fn chat_completions(
-    axum::Extension(state): axum::Extension<Arc<AppState>>,
-    Json(payload): Json<ChatRequest>,
-) -> impl IntoResponse {
+async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>,
+    Json(payload): Json<ChatRequest>,) -> impl IntoResponse {
     let (tx, rx) = mpsc::channel(100);
     let engine_ref = state.clone();
 
     tokio::spawn(async move {
-        let mut conversation = Conversation {
-            messages: payload.messages,
-        };
+        let mut conversation = Conversation { messages: payload.messages, };
 
         // Add dummy assistant response to construct correct SFT prompt
         conversation.messages.push(ConversationMessage {
-            role: "assistant".to_string(),
             content: MessageContent::Simple(String::new()),
+            role: "assistant".to_string(),
         });
 
         let tokenizer = &engine_ref.engine.tokenizer;
@@ -133,9 +113,7 @@ async fn chat_completions(
         let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
         let mut clean_prompt = prompt_tokens;
         if let Some(&last) = clean_prompt.last() {
-            if last == assistant_end || last == tokenizer.get_bos_token_id() {
-                clean_prompt.pop();
-            }
+            if last == assistant_end || last == tokenizer.get_bos_token_id() { clean_prompt.pop(); }
         }
 
         let temp = payload.temperature.unwrap_or(0.7);
@@ -145,16 +123,9 @@ async fn chat_completions(
         let (mut gen_state, mut cur_logits) = engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
 
         for _ in 0..max_tok {
-            if gen_state.completed[0] {
-                break;
-            }
+            if gen_state.completed[0] { break; }
             let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(
-                &mut gen_state,
-                cur_logits,
-                temp,
-                top_k,
-                1.2,
-                &engine_ref.device,
+                &mut gen_state, cur_logits, temp, top_k, 1.2, &engine_ref.device,
             );
             cur_logits = next_logits;
 
@@ -163,13 +134,10 @@ async fn chat_completions(
 
             let event_data = serde_json::json!({ "token": text });
             let event = Event::default().json_data(event_data).unwrap();
-            
-            if tx.send(Ok(event)).await.is_err() {
-                break;
-            }
+
+            if tx.send(Ok(event)).await.is_err() { break; }
         }
     });
 
-    Sse::new(SseStream { rx })
-        .keep_alive(KeepAlive::default())
+    Sse::new(SseStream { rx }).keep_alive(KeepAlive::default())
 }

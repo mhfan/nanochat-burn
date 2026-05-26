@@ -24,6 +24,10 @@ required-features = ["web"]
 name = "train"
 path = "src/bin/train.rs"
 
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"
+
 [dependencies]
 # Burn 核心框架与自动微分支持
 burn = { version = "0.21", features = ["train", "wgpu", "dataset"] }

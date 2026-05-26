@@ -1,16 +1,14 @@
-use std::io::{self, Write};
-use std::time::Instant;
-use burn::backend::wgpu::Wgpu;
-use nanochat_burn::gpt::{Gpt, GptConfig};
+
+use std::{io::{self, Write}, time::Instant};
+use nanochat_burn::common::{ModelBackend, init_device};
+use nanochat_burn::{gpt::{Gpt, GptConfig}, engine::inference::InferenceEngine};
 use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
-use nanochat_burn::engine::inference::InferenceEngine;
 
 fn main() {
     // Initialize logging
     use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))).try_init();
 
     println!("==================================================================");
     println!("   🔥 NanoChat Burn CLI Chat Client (WGPU Accelerated f16) 🔥    ");
@@ -19,9 +17,6 @@ fn main() {
     println!("* Built-in secure calculator tool-use state machine");
     println!("* Press Ctrl+C or type 'quit' / 'exit' to exit.");
     println!("==================================================================\n");
-
-    let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
-    println!("Initializing computational device: {:?}", device);
 
     // 1. Train a miniature tokenizer for mock CLI interaction
     // In a real SFT deployment, a pre-saved tokenizer JSON is loaded.
@@ -37,17 +32,13 @@ fn main() {
     println!("Vocabulary size: {}", vocab_size);
 
     // 2. Initialize a small Gpt model on WGPU
-    let config = GptConfig {
-        sequence_len: 512,
-        vocab_size,
-        n_layer: 4,
-        n_head: 4,
-        n_kv_head: 2,
-        n_embd: 128,
-        window_pattern: "SSL".to_string(),
+    let config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
+        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(),
     };
+
+    let device = init_device();
     println!("Constructing WGPU Transformer Model...");
-    let gpt: Gpt<Wgpu> = Gpt::new(config, &device);
+    let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
     let engine = InferenceEngine::new(gpt, tokenizer.clone());
 
     // Initialize conversation state
@@ -61,28 +52,24 @@ fn main() {
         let mut user_input = String::new();
         io::stdin().read_line(&mut user_input).unwrap();
         let trimmed = user_input.trim();
-        if trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("exit") {
-            break;
-        }
-        if trimmed.is_empty() {
-            continue;
-        }
+        if  trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("exit") { break; }
+        if  trimmed.is_empty() { continue; }
 
         // Add user message to conversation
         conversation.messages.push(ConversationMessage {
-            role: "user".to_string(),
             content: MessageContent::Simple(trimmed.to_string()),
+            role: "user".to_string(),
         });
 
         // Add dummy assistant response start
         conversation.messages.push(ConversationMessage {
-            role: "assistant".to_string(),
             content: MessageContent::Simple(String::new()),
+            role: "assistant".to_string(),
         });
 
         // Render multi-turn conversation into tokens
         let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
-        
+
         // Remove the trailing assistant end-of-text or bos tokens so we generate from the prompt end
         let mut clean_prompt = prompt_tokens;
         if let Some(&last) = clean_prompt.last() {
@@ -96,16 +83,14 @@ fn main() {
 
         let start_time = Instant::now();
         let (mut state, mut cur_logits) = engine.prefill(&clean_prompt, 1, &device);
-        
+
         let mut assistant_response_tokens = Vec::new();
         let mut first_token = true;
         let mut tft = start_time.elapsed().as_secs_f64();
         let mut token_count = 0;
 
         for _ in 0..256 {
-            if state.completed[0] {
-                break;
-            }
+            if state.completed[0] { break; }
             let (next_tokens, _, next_logits) = engine.step_generation(
                 &mut state,
                 cur_logits,
@@ -115,7 +100,7 @@ fn main() {
                 &device,
             );
             cur_logits = next_logits;
-            
+
             let token = next_tokens[0];
             assistant_response_tokens.push(token);
             token_count += 1;
