@@ -1,19 +1,44 @@
 
-fn main() {
-    // 初始化日志过滤，默认输出 info 级别信息
-    use tracing_subscriber::EnvFilter;
-    tracing_subscriber::fmt().with_env_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    ).init();
+use nanochat_burn::common::{ModelAutodiffBackend, init_device};
+use nanochat_burn::engine::{pretrain::run_pretraining, sft::run_sft_training, rl::run_rl_training};
+
+#[tokio::main] async fn main() {
+    // Initialize logging subscriber
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::INFO).finish();
+    tracing::subscriber::set_global_default(subscriber).ok();
+
+    let args: Vec<String> = std::env::args().collect();
+    let mode = if args.len() > 1 {
+        args[1].to_lowercase()
+    } else {
+        "pretrain".to_string()
+    };
+
+    let device = init_device();
 
     tracing::info!("=============================================");
-    tracing::info!("   Initializing nanochat-burn (Burn v0.21)   ");
+    tracing::info!("   Initializing nanochat-burn Training      ");
+    tracing::info!("   Mode: {}                                 ", mode);
     tracing::info!("=============================================");
 
-    // 运行 GPU 验证
-    //nanochat_burn::common::verify_autodiff_pipeline();
-
-    tracing::info!("=============================================");
-    tracing::info!("      Stage 0 Verification Completed!        ");
-    tracing::info!("=============================================");
+    match mode.as_str() {
+        "pretrain" => {
+            tracing::info!("Starting Foundational Pretraining...");
+            run_pretraining::<ModelAutodiffBackend>(&device).await;
+        }
+        "sft" => {
+            tracing::info!("Starting Supervised Fine-Tuning (SFT)...");
+            run_sft_training::<ModelAutodiffBackend>(&device);
+        }
+        "rl" => {
+            tracing::info!("Starting Reinforcement Learning (RL)...");
+            run_rl_training::<ModelAutodiffBackend>(&device);
+        }
+        _ => {
+            tracing::error!("Unknown training mode: {}", mode);
+            tracing::error!("Available modes: pretrain, sft, rl");
+            std::process::exit(1);
+        }
+    }
 }
