@@ -188,7 +188,7 @@
 * **对照 Python 文件**：`nanochat/flash_attention.py`, `nanochat/fp8.py`
 * **开发步骤**：
  * **阶段 7a：通用与 WGPU 系统级性能优化 (适用于跨平台与 Mac)**
-    1. **WGPU 算子融合与编译优化**：分析并调优 WGPU 后端自动生成的 WGSL 着色器算子，深入优化连续性 (Contiguity) 开销与缓冲区合并访问，最大化发挥 WGPU 在不同 GPU 硬件上的运行能效。
+    1. **WGPU 算子虚拟融合与 GQA 优化**：将 Group-Query Attention 中的 `repeat_kv` 算子由原本慢速的循环 `slice` 与多路 `Tensor::cat`（会引发数十次频繁的 WGPU 显存分配和 GPU kernel dispatch 延迟）重构为零拷贝的 `.reshape()` 和虚拟广播 `.expand()` 算子，实现 100% 内存连续性 (Contiguity) 并完全消除 WGPU 临时缓冲区碎片，大幅提升运行能效。
     2. **Profiling 诊断**：使用 Tracy 或是 native WebGPU/浏览器开发者工具深入排查 Rust 端推理和训练中的微小硬件开销，测量 CPU-GPU 通信开销，最大限度提高 MFU (Model FLOPS Utilization)。
  * **阶段 7b：专用与 CUDA 前沿优化 (明确标记仅限特定后端/硬件，Mac 暂不适用)**
     1. **硬件级 FlashAttention 集成**：在 LibTorch/CUDA 后端启用底层 FlashAttention-3，对比标准 SDPA 的速度提升与显存压缩。
