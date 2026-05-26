@@ -93,6 +93,23 @@ cargo run --bin train --release -- --sft
     BURN_DEVICE=cpu cargo run --bin train --release -- --rl
     ```
 
+### 5. 交互式对话体验 (Interactive Chat Experience)
+在模型预训练、监督微调（SFT）或强化学习（RL）对齐完成后，可直接启动交互式服务体验自回归生成与内置计算器 Tool-Use 状态机：
+
+*   **CLI 命令行对话客户端**：
+    启动基于终端的交互式多轮对话客户端，体验自回归流式生成与内置的 Safe Calculator Tool-Use 状态机：
+    ```bash
+    cargo run --bin chat --release
+    ```
+    *（在 CPU 下极速体验自回归生成：`BURN_DEVICE=cpu cargo run --bin chat --release`）*
+
+*   **Web 高端对话服务端**：
+    启动基于 Axum 的流式 (SSE) 高并发 Web 交互服务器：
+    ```bash
+    cargo run --bin chat_web --release
+    ```
+    启动后可直接在浏览器中访问 [http://127.0.0.1:8080](http://127.0.0.1:8080) 体验顺滑、高端的可视化流式聊天交互页面。
+
 ---
 
 ## 🛠️ 技术规范与开发准则
@@ -103,3 +120,24 @@ cargo run --bin train --release -- --sft
     不存在任何 `todo!()` 或静态 Mock，所有代码均采用生产级错误处理（`Result<T, E>`）并进行完整的资源管控。
 3.  **零 Host-GPU 同步**：
     除非进行必要的 Tensor 采样读取（如 BPE Decode），前向与反向梯度反传中绝不执行任何阻塞式的 `into_scalar()` 显存CPU回读，最大化 GPU Model FLOPS Utilization (MFU)。
+
+---
+
+## 🗺️ 未来展望与路线图 (Future Roadmap / TODO)
+
+面向未来，`nanochat-burn` 致力于从小巧、极简的学术复刻演进为**工业级端侧高性能 LLM 系统**。以下为项目的未来路线图规划：
+
+### 1. 🏎️ 系统级与 GPU 算子性能极限优化 (Systems & Kernel Optimization)
+*   **静态序列桶 (Static Sequence Bucketing)**：设计特化的输入 Padding 机制，前向传播序列对齐至 64/128 的倍数，保持计算图 Shape 稳定，**在 macOS WGPU/Metal 后端下完全消除运行时 JIT 编译温身延迟**。
+*   **CubeCL 手写融合算子**：利用 Burn 底层的 CubeCL 编写特化 GPU 算子（如 Fused RMSNorm, Fused RoPE 以及 Fused Softmax），最大化 GPU 硬件吞吐量 (MFU)。
+*   **FlashAttention 集成**：在 LibTorch/CUDA 后端下直接接入硬件级 FlashAttention-2/3 算子，实现企业级大吞吐训练。
+
+### 2. 🧠 前沿大模型算法升级 (Algorithmic & Modeling Features)
+*   **GRPO (Group Relative Policy Optimization) 强化对齐**：引入类似 DeepSeek-R1 的 GRPO 强化学习算法，单 Prompt 采样 $N$ 个回答组内相对归一化，省去庞大的 Critic 价值网络，大幅节省训练显存。
+*   **推测解码 (Speculative Decoding)**：利用 Rust 极低的系统开销，实现原生的推测解码双模型（Draft Model + Target Model）架构，在保持生成精度无损的同时实现 CPU 2x~3x 推理加速。
+*   **量化适配 (Weight Quantization)**：为 Linear 投影层和 Embedding 层开发 INT8/INT4/NF4 精度量化加载，极大压缩端侧部署模型大小。
+
+### 3. 🌐 高并发服务化与工程生态 (Serving & Ecosystem Integration)
+*   **连续批处理 (Continuous Batching)**：在 Axum Web 服务端支持请求的动态混入与实时剥离，最大化多用户并发吞吐。
+*   **PagedAttention 机制**：实现 Rust 原生的 PagedAttention，以物理 Page 映射非连续的 KV-Cache 内存，彻底告别显存碎片。
+*   **Safetensors 生态转换**：提供双向转换工具，支持将 Qwen、Llama 等社区主流小模型一键导出至 `nanochat-burn` 运行。
