@@ -53,7 +53,7 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
         let logits = model.forward(inputs, None);
         let vocab_size = model.config.vocab_size;
         let last_logits = logits.slice([0..1, (prompt_len - 1)..prompt_len, 0..vocab_size]).reshape([vocab_size]);
-        let logits_vec = last_logits.into_data().to_vec::<f32>().unwrap();
+        let logits_vec = crate::common::tensor_data_to_f32_vec(last_logits.into_data());
 
         let last_msg = item.messages.last().unwrap();
         let ground_truth = match &last_msg.content {
@@ -100,7 +100,7 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         let prompt_tokens = tokenizer.render_for_completion(&conv);
         let prompt_len = prompt_tokens.len();
 
-        let rollouts = inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device,);
+        let (rollouts, _) = inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device,);
 
         let rollout = &rollouts[0];
         let generated_tokens = &rollout[prompt_len..];
@@ -134,7 +134,7 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         let prompt_tokens = tokenizer.render_for_completion(&conv);
         let prompt_len = prompt_tokens.len();
 
-        let rollouts = inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device,);
+        let (rollouts, _) = inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device,);
 
         let rollout = &rollouts[0];
         let generated_tokens = &rollout[prompt_len..];

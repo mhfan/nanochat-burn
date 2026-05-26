@@ -7,12 +7,23 @@ pub type ModelBackend = Wgpu<f16, i32>;
 pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
 pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
 
-/// 初始化系统计算设备：如果有可用的 GPU，优先使用 WGPU；否则优雅回退
+/// 初始化系统计算设备：优先使用 WGPU GPU；如果环境变量 BURN_DEVICE=cpu，则强行使用 CPU 运行以规避 GPU JIT 编译开销
 pub fn init_device() -> ModelDevice {
-    let device = Default::default();
-    // Burn 会自动探查最佳的 WGPU 适配器 (Vulkan, Metal, DX12)
+    let device = if std::env::var("BURN_DEVICE").unwrap_or_default().to_lowercase() == "cpu" {
+        burn::backend::wgpu::WgpuDevice::Cpu
+    } else { Default::default() };
     tracing::info!("Initializing computational device: {:?}", device);
     device
+}
+
+pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
+    match data.to_vec::<f32>() {
+        Ok(v) => v,
+        Err(_) => {
+            let f16_vec = data.to_vec::<f16>().unwrap();
+            f16_vec.into_iter().map(|v| v.to_f32()).collect()
+        }
+    }
 }
 
 //#[cfg(test)] mod tests { use super::*;

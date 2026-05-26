@@ -143,20 +143,40 @@ impl<B: Backend> InferenceEngine<B> {
         (next_token_column, is_sampled_mask, next_logits)
     }
 
-    /// Non-streaming batch generation interface
+    /// Non-streaming batch generation interface returning (results, masks)
     pub fn generate_batch(&self, prompt_tokens: &[usize], num_samples: usize,
         max_tokens: usize, temperature: f32, top_k: Option<usize>,
-        repetition_penalty: f32, device: &B::Device,) -> Vec<Vec<usize>> {
+        repetition_penalty: f32, device: &B::Device,) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
 
+        let assistant_end = *self.tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+        let bos = self.tokenizer.get_bos_token_id();
+
+        let mut results = vec![prompt_tokens.to_vec(); num_samples];
+        let mut masks = vec![vec![0; prompt_tokens.len()]; num_samples];
+        let mut completed = vec![false; num_samples];
+
         for _ in 0..max_tokens {
-            if state.completed.iter().all(|&c| c) { break; }
-            let (_, _, next_logits) = self.step_generation(&mut state, cur_logits,
+            if completed.iter().all(|&c| c) { break; }
+            let (token_column, token_masks, next_logits) = self.step_generation(&mut state, cur_logits,
                 temperature, top_k, repetition_penalty, device,);
             cur_logits = next_logits;
+
+            for i in 0..num_samples {
+                if !completed[i] {
+                    let token = token_column[i];
+                    let mask = token_masks[i];
+                    if token == assistant_end || token == bos {
+                        completed[i] = true;
+                    } else {
+                        results[i].push(token);
+                        masks[i].push(mask);
+                    }
+                }
+            }
         }
 
-        state.current_tokens
+        (results, masks)
     }
 }
 
@@ -167,7 +187,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
     let shape: [usize; 2] = logits.shape().dims();
     let (batch_size, vocab_size) = (shape[0], shape[1]);
 
-    let logits_vec = logits.into_data().to_vec::<f32>().unwrap();
+    let logits_vec = crate::common::tensor_data_to_f32_vec(logits.into_data());
     let mut sampled_ids = Vec::with_capacity(batch_size);
 
     for b in 0..batch_size {

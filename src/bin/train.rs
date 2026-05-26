@@ -10,11 +10,8 @@ use nanochat_burn::engine::{pretrain::run_pretraining, sft::run_sft_training, rl
 
     let args: Vec<String> = std::env::args().collect();
     let mode = if args.len() > 1 {
-        args[1].to_lowercase()
-    } else {
-        "pretrain".to_string()
-    };
-
+        args[1].trim_start_matches('-').to_lowercase()
+    } else { "pretrain".to_string() };
     let device = init_device();
 
     tracing::info!("=============================================");

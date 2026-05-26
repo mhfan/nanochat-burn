@@ -47,8 +47,6 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 
-    let output_start = *tokenizer.get_special_tokens().get("<|output_start|>").unwrap_or(&50259);
-    let output_end = *tokenizer.get_special_tokens().get("<|output_end|>").unwrap_or(&50260);
     let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
 
     // 2. Initialize Model and Optimizer
@@ -62,7 +60,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let num_steps = 10;
     let batch_size = 2; // number of questions per step
     let num_samples = 4; // number of rollouts per question
-    let learning_rate = 1e-5;
+    let learning_rate = 1e-3;
 
     tracing::info!("Starting RL training loop for {} steps...", num_steps);
     let start_time = Instant::now();
@@ -88,8 +86,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             let prompt_tokens = tokenizer.render_for_completion(conversation);
             let prompt_len = prompt_tokens.len();
 
-            // Sample rollouts
-            let rollouts = inference_engine.generate_batch(&prompt_tokens,
+            // Sample rollouts (returns both results and precise masks)
+            let (rollouts, masks) = inference_engine.generate_batch(&prompt_tokens,
                 num_samples, 128, 1.0, Some(50), 1.0, device,);
 
             // Get ground truth answer from conversation
@@ -106,7 +104,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             let mut question_rollouts = Vec::with_capacity(num_samples);
             let mut question_masks = Vec::with_capacity(num_samples);
 
-            for rollout in rollouts {
+            for (r_idx, rollout) in rollouts.into_iter().enumerate() {
                 let generated_tokens = &rollout[prompt_len..];
                 let decoded_text = tokenizer.decode(generated_tokens);
                 let pred_ans = extract_answer(&decoded_text);
@@ -115,15 +113,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
                 let reward = if gt_ans.is_some() && pred_ans == gt_ans { 1.0f32 } else { 0.0f32 };
                 question_rewards.push(reward);
 
-                // Build target mask
-                let mut mask = vec![0; rollout.len()];
-                let mut in_output = false;
-                for i in prompt_len..rollout.len() {
-                    let t = rollout[i];
-                    if t == output_start { in_output = true; }
-                    if in_output { mask[i] = 0; } else { mask[i] = 1; }
-                    if t == output_end { in_output = false; }
-                }
+                // Use the precise token-level mask returned from InferenceEngine
+                let mask = masks[r_idx].clone();
 
                 question_rollouts.push(rollout);
                 question_masks.push(mask);

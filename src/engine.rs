@@ -101,7 +101,7 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
             let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
 
             let targets_vec = y_tensor.into_data().to_vec::<i32>().unwrap();
-            let loss_vec = unreduced_losses.into_data().to_vec::<f32>().unwrap();
+            let loss_vec = crate::common::tensor_data_to_f32_vec(unreduced_losses.into_data());
 
             for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec.into_iter()) {
                 if target_tok >= 0 {
