@@ -38,12 +38,10 @@ pub fn apply_rotary_emb<B: Backend>(x: Tensor<B, 4>, cos: Tensor<B, 4>,
 fn repeat_kv<B: Backend>(x: Tensor<B, 4>, group_size: usize) -> Tensor<B, 4> {
     if group_size == 1 { return x; }
     let shape: [usize; 4] = x.shape().dims();
-    let mut repeated = Vec::with_capacity(shape[2] * group_size);
-    for h in 0..shape[2] {
-        let head_slice = x.clone().slice([0..shape[0], 0..shape[1], h..h+1, 0..shape[3]]);
-        for _ in 0..group_size { repeated.push(head_slice.clone()); }
-    }
-    Tensor::cat(repeated, 2)
+    let (b, t, n_kv_head, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
+    let x_reshaped: Tensor<B, 5> = x.reshape([b, t, n_kv_head, 1, head_dim]);
+    let x_expanded = x_reshaped.expand([b, t, n_kv_head, group_size, head_dim]);
+    x_expanded.reshape([b, t, n_kv_head * group_size, head_dim])
 }
 
 #[derive(Clone, Debug)]
