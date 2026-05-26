@@ -1,14 +1,15 @@
 
-use burn::tensor::{Tensor, backend::{Backend, AutodiffBackend}, Int};
-use burn::prelude::ToElement;
 use std::time::Instant;
-use crate::gpt::Gpt;
-use crate::tokenizer::BpeTokenizer;
-use crate::dataloader::DistributedDataLoader;
-use crate::optim::muon::MuonAdamW;
+use burn::{prelude::ToElement, tensor::{Tensor, backend::{Backend, AutodiffBackend}, Int}};
+use crate::{gpt::Gpt, tokenizer::BpeTokenizer, dataloader::DistributedDataLoader, optim::MuonAdamW, };
 
 pub mod calculator;
 pub mod inference;
+pub mod pretrain;
+pub mod sft;
+pub mod rl;
+pub mod eval;
+pub mod sandbox;
 
 /// Training configuration hyperparameters
 #[derive(Debug, Clone)]
@@ -66,15 +67,15 @@ pub fn get_weight_decay(step: usize, num_iterations: usize, weight_decay: f32,) 
 pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
     let vocab_size = tokenizer.get_vocab_size();
     let mut token_bytes = vec![0; vocab_size];
-    
+
     // Normal BPE mergeable ranks
     for (bytes, &id) in &tokenizer.mergeable_ranks {
         if id < vocab_size { token_bytes[id] = bytes.len(); }
     }
-    
+
     // Single byte fallbacks
     for i in 0..256 { if i < vocab_size { token_bytes[i] = 1; } }
-    
+
     token_bytes
 }
 
@@ -82,7 +83,7 @@ pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
 pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDataLoader,
     steps: usize, token_bytes: &[usize], device: &B::Device,) -> f32 {
     let (mut total_nats, mut total_bytes) = (0.0f32, 0);
-    
+
     for _ in 0..steps {
         if let Some(batch) = loader.next_batch().await {
             let b = batch.x.len() / model.config.sequence_len;
@@ -95,13 +96,13 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
                 burn::tensor::TensorData::new(batch.y, burn::tensor::Shape::new([b, t])),
                 device,
             );
-            
+
             let logits = model.forward(x_tensor, None);
             let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
-            
+
             let targets_vec = y_tensor.into_data().to_vec::<i32>().unwrap();
             let loss_vec = unreduced_losses.into_data().to_vec::<f32>().unwrap();
-            
+
             for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec.into_iter()) {
                 if target_tok >= 0 {
                     let bytes_len = token_bytes.get(target_tok as usize).cloned().unwrap_or(0);
@@ -115,7 +116,7 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
             break;
         }
     }
-    
+
     if total_bytes == 0 { f32::INFINITY } else {
         total_nats / (2.0f32.ln() * total_bytes as f32)
     }
@@ -148,7 +149,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let tokens_per_fwdbwd = self.config.device_batch_size * self.config.sequence_length;
         let world_tokens_per_fwdbwd = tokens_per_fwdbwd; // Single node / mock DDP
         let grad_accum_steps = self.config.total_batch_size / world_tokens_per_fwdbwd;
-        
+
         let mut step_loss = 0.0f32;
         let mut grads = None;
 
@@ -183,7 +184,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
                 self.config.warmup_steps, self.config.warmdown_ratio, self.config.final_lr_frac,);
             let lr = self.config.learning_rate * lrm;
             let wd = get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
-            
+
             self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
         }
 
@@ -211,7 +212,6 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_schedulers() {
         let lr_mult = get_lr_multiplier(0, 100, 10, 0.5, 0.1);
         assert!(lr_mult > 0.0 && lr_mult <= 0.1);
@@ -230,19 +230,19 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     }
 
     #[tokio::test] async fn test_bpb_and_engine_instantiation() {
-        let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
+        let device = crate::common::init_device();
         let corpus = vec!["Rust is extremely elegant and high-performance."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
         let token_bytes = get_token_bytes(&tokenizer);
         assert_eq!(token_bytes.len(), tokenizer.get_vocab_size());
-        
+
         let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
             vocab_size: tokenizer.get_vocab_size(),
         };
 
-        use burn::backend::wgpu::Wgpu;
-        let gpt: Gpt<Wgpu> = Gpt::new(config.clone(), &device);
+        use crate::common::ModelBackend;
+        let gpt: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
         assert_eq!(gpt.config.sequence_len, 8);
     }
 //}

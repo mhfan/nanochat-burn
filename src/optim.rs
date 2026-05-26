@@ -1,7 +1,5 @@
-#![allow(non_snake_case)]
 
 use burn::tensor::{Tensor, backend::{Backend, AutodiffBackend}};
-use burn::module::Param;
 use crate::gpt::{Gpt, has_ve};
 
 pub struct AdamWState<B: Backend, const D: usize> {
@@ -61,6 +59,7 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         let value_embed_lr = embedding_lr * 0.5;
         let scalar_lr = lr * 25.0;
 
+        use burn::module::Param;
         // 1. Embeddings, lm_head, and scalars go into AdamW
         if let Some(grad) = gpt.wte.weight.val().grad(grads) {
             let new_w = Tensor::from_inner(adamw_step(gpt.wte.weight.val().inner(), grad, &mut self.wte, embedding_lr, 0.001, 0.8, 0.995, 1e-10, step));
@@ -173,12 +172,12 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
 
     let denom = (s.exp_avg_sq.clone() / bias2).sqrt().add_scalar(eps);
     let step_size = lr / bias1;
-    
+
     let p_decayed = p.mul_scalar(1.0 - lr * wd);
     p_decayed - (s.exp_avg.clone() / denom).mul_scalar(step_size)
 }
 
-fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
+#[allow(non_snake_case)] fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     state: &mut Option<MuonState<B, 2>>, lr: f32, wd: f32, momentum: f32,
     beta2: f32, ns_steps: usize,) -> Tensor<B, 2> {
     let shape: [usize; 2] = p.shape().dims();
@@ -200,12 +199,6 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     let norm_scaled = norm.mul_scalar(1.01).add_scalar(1e-6).reshape([1, 1]);
     let mut X = g / norm_scaled;
 
-    // These coefficients represent the optimal quintic iteration coefficients derived in
-    // the paper: "Polar Express: Efficient Orthogonalization for Gradient-Based Solvers" 
-    // (Noah Amsel et al., 2025). 
-    // They are computed using Chebyshev polynomials / semi-definite programming to maximize 
-    // convergence rate of Newton-Schulz-like iterations for calculating the polar decomposition
-    // under a given singular value bound, converging to orthogonal matrices extremely rapidly.
     let polar_express_coeffs = [
         (8.156554524902461, -22.48329292557795, 15.878769915207462),
         (4.042929935166739, -2.808917465908714, 0.5000178451051316),
@@ -213,7 +206,6 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
         (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
     ];
-
 
     let steps = ns_steps.min(5);
     if rows > cols {
@@ -256,12 +248,11 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_muon_orthogonalization() {
-        use burn::backend::wgpu::Wgpu;
-        let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
-        let p = Tensor::<Wgpu, 2>::from_data([[2.0, 0.0], [0.0, 3.0]], &device);
-        let grad = Tensor::<Wgpu, 2>::from_data([[0.1, 0.2], [0.3, 0.4]], &device);
+        use crate::common::ModelBackend;
+        let device = crate::common::init_device();
+        let p = Tensor::<ModelBackend, 2>::from_data([[2.0, 0.0], [0.0, 3.0]], &device);
+        let grad = Tensor::<ModelBackend, 2>::from_data([[0.1, 0.2], [0.3, 0.4]], &device);
         let mut state = None;
 
         let new_p = muon_step(p, grad, &mut state, 0.02, 0.0, 0.95, 0.9, 5);
