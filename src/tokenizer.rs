@@ -77,7 +77,7 @@ impl BpeTokenizer {
         // 1. Split into unique words with counts
         let mut word_counts = HashMap::<Vec<u8>, usize>::new();
         let regex = Self::get_split_regex();
-        
+
         for text in text_iterator {
             let text_ref = text.as_ref();
             for mat in regex.find_iter(text_ref) {
@@ -87,7 +87,7 @@ impl BpeTokenizer {
                 }
             }
         }
-        
+
         // 2. Initialize vocabulary with base bytes 0..=255
         let mut mergeable_ranks = HashMap::<Vec<u8>, usize>::new();
         let mut temp_inverse = HashMap::<usize, Vec<u8>>::new();
@@ -96,15 +96,15 @@ impl BpeTokenizer {
             mergeable_ranks.insert(byte_seq.clone(), b);
             temp_inverse.insert(b, byte_seq);
         }
-        
+
         // Represent words as a list of their token IDs
         // Initially, each byte is its own token
         let mut words: Vec<(Vec<u8>, Vec<usize>)> = word_counts.keys()
             .map(|w| (w.clone(), w.iter().map(|&b| b as usize).collect())).collect();
-            
+
         let vocab_size_no_special = vocab_size.saturating_sub(SPECIAL_TOKENS.len());
         let mut current_vocab_size = 256;
-        
+
         while current_vocab_size < vocab_size_no_special {
             // Count frequencies of adjacent pairs
             let mut pair_counts = HashMap::<(usize, usize), usize>::new();
@@ -115,7 +115,7 @@ impl BpeTokenizer {
                         .and_modify(|c| *c += count).or_insert(count);
                 }
             }
-            
+
             // Find the most frequent pair
             let mut best_pair = None;
             let mut max_count = 0;
@@ -125,17 +125,17 @@ impl BpeTokenizer {
                     best_pair = Some(*pair);
                 }
             }
-            
+
             if let Some(pair) = best_pair {
                 let new_token_id = current_vocab_size;
-                
+
                 // Get the merged byte sequence for this pair in O(1)
                 let mut merged_bytes = temp_inverse.get(&pair.0).unwrap().clone();
                 merged_bytes.extend(temp_inverse.get(&pair.1).unwrap());
-                
+
                 temp_inverse.insert(new_token_id, merged_bytes.clone());
                 mergeable_ranks.insert(merged_bytes, new_token_id);
-                
+
                 // Merge this pair in all word token lists
                 for (_, tokens) in &mut words {
                     let mut i = 0;
@@ -151,17 +151,17 @@ impl BpeTokenizer {
                     }
                     *tokens = merged_tokens;
                 }
-                
+
                 current_vocab_size += 1;
             } else { break; } // No more pairs to merge
         }
-        
+
         // Define special tokens starting from current_vocab_size
         let mut special_tokens = HashMap::new();
         for (i, &name) in SPECIAL_TOKENS.iter().enumerate() {
             special_tokens.insert(name.to_string(), current_vocab_size + i);
         }
-        
+
         let mut tokenizer = BpeTokenizer {
             mergeable_ranks, special_tokens,
             inverse_vocab: HashMap::new(),
@@ -175,14 +175,14 @@ impl BpeTokenizer {
     fn encode_piece(&self, piece: &[u8]) -> Vec<usize> {
         if piece.is_empty() { return Vec::new(); }
         if piece.len() == 1 { return vec![piece[0] as usize]; }
-        
+
         // Represent parts as (start_index, length)
         let mut parts: Vec<(usize, usize)> = (0..piece.len()).map(|i| (i, 1)).collect();
-        
+
         loop {
             let mut best_pair_idx = None;
             let mut best_rank = usize::MAX;
-            
+
             for i in 0..parts.len() - 1 {
                 let start = parts[i].0;
                 let len = parts[i].1 + parts[i + 1].1;
@@ -194,13 +194,13 @@ impl BpeTokenizer {
                     }
                 }
             }
-            
+
             if let Some(idx) = best_pair_idx {
                 parts[idx].1 += parts[idx + 1].1;
                 parts.remove(idx + 1);
             } else { break; }
         }
-        
+
         parts.into_iter().map(|(start, len)| {
             let seq = &piece[start..start + len];
             if seq.len() == 1 { seq[0] as usize } else {
@@ -213,7 +213,7 @@ impl BpeTokenizer {
     pub fn encode_ordinary(&self, text: &str) -> Vec<usize> {
         let regex = Self::get_split_regex();
         let mut ids = Vec::new();
-        
+
         for mat in regex.find_iter(text) {
             if let Ok(m) = mat {
                 let piece = m.as_str().as_bytes();
@@ -264,12 +264,12 @@ impl BpeTokenizer {
     /// Render a Chat conversation into sequence token IDs and attention target masks
     pub fn render_conversation(&self, conversation: &Conversation, max_tokens: usize) -> (Vec<usize>, Vec<i32>) {
         let (mut ids, mut mask) = (Vec::new(), Vec::new());
-        
+
         let mut add_tokens = |token_ids: &[usize], mask_val: i32| {
             ids.extend_from_slice(token_ids);
             mask.extend(std::iter::repeat(mask_val).take(token_ids.len()));
         };
-        
+
         // 1. Preprocess messages to handle system messages (merging them into first user message)
         let mut messages = conversation.messages.clone();
         if !messages.is_empty() && messages[0].role == "system" {
@@ -277,23 +277,23 @@ impl BpeTokenizer {
                 panic!("System message must be followed by a user message");
             }
             assert_eq!(messages[1].role, "user", "System message must be followed by a user message");
-            
+
             let system_content = match &messages[0].content {
                 MessageContent::Simple(s) => s.clone(),
                 MessageContent::Parts(_) => panic!("System message cannot have multipart content"),
             };
-            
+
             let user_content = match &messages[1].content {
                 MessageContent::Simple(s) => s.clone(),
                 MessageContent::Parts(_) => panic!("User message cannot have multipart content"),
             };
-            
+
             messages[1].content = MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
             messages.remove(0);
         }
-        
+
         assert!(!messages.is_empty(), "Conversation must have at least one message");
-        
+
         // 2. Fetch special token IDs
         let bos = self.get_bos_token_id();
         let user_start = self.encode_special("<|user_start|>").expect("Missing <|user_start|> token");
@@ -304,15 +304,15 @@ impl BpeTokenizer {
         let python_end = self.encode_special("<|python_end|>").expect("Missing <|python_end|> token");
         let output_start = self.encode_special("<|output_start|>").expect("Missing <|output_start|> token");
         let output_end = self.encode_special("<|output_end|>").expect("Missing <|output_end|> token");
-        
+
         // 3. Render conversation
         add_tokens(&[bos], 0);
-        
+
         for (i, message) in messages.iter().enumerate() {
             let expected_role = if i % 2 == 0 { "user" } else { "assistant" };
             assert_eq!(message.role, expected_role,
                 "Message {} is from {} but should be from {}", i, message.role, expected_role);
-            
+
             match &message.content {
                 MessageContent::Simple(text) => {
                     let value_ids = self.encode_ordinary(text);
@@ -329,7 +329,7 @@ impl BpeTokenizer {
                 MessageContent::Parts(parts) => {
                     assert_eq!(message.role, "assistant", "Only assistant messages can have multipart content");
                     add_tokens(&[assistant_start], 0);
-                    
+
                     for part in parts {
                         let value_ids = self.encode_ordinary(&part.text);
                         match part.part_type.as_str() {
@@ -349,17 +349,17 @@ impl BpeTokenizer {
                             _ => panic!("Unknown part type: {}", part.part_type),
                         }
                     }
-                    
+
                     add_tokens(&[assistant_end], 1);
                 }
             }
         }
-        
+
         // 4. Truncate to max_tokens
         let final_len = std::cmp::min(ids.len(), max_tokens);
          ids.truncate(final_len);
         mask.truncate(final_len);
-        
+
         (ids, mask)
     }
 
@@ -372,7 +372,7 @@ impl BpeTokenizer {
             "Last message must be from the Assistant"
         );
         conversation.messages.pop(); // Remove assistant message
-        
+
         let (mut ids, _) = self.render_conversation(&conversation, usize::MAX);
         let assistant_start = self.encode_special("<|assistant_start|>").expect("Missing <|assistant_start|> token");
         ids.push(assistant_start);
@@ -385,7 +385,7 @@ impl BpeTokenizer {
         serde_json::to_writer_pretty(file, self)?;
         Ok(())
     }
-    
+
     /// Load the tokenizer state from a JSON file
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
         let file = std::fs::File::open(path)?;
@@ -396,7 +396,6 @@ impl BpeTokenizer {
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_bpe_training_and_encoding_roundtrip() {
         let corpus = vec![
             "Hello world! Hello system programming.",
@@ -404,22 +403,22 @@ impl BpeTokenizer {
             "We are pair-programming to build nanochat-burn.",
             "Numbers: 123, 4567. Unicode: 你好世界 🌍."
         ];
-        
+
         // Train tokenizer with total vocabulary size 300 (which leaves 300 - 9 = 291 base tokens)
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 300);
         assert_eq!(tokenizer.get_vocab_size(), 300);
-        
+
         let test_text = "Hello world! Building nanochat-burn in Rust is fun. 12345. 你好世界!";
         let encoded = tokenizer.encode_ordinary(test_text);
         let decoded = tokenizer.decode(&encoded);
-        
+
         assert_eq!(decoded, test_text, "Roundtrip encoding/decoding did not match!");
     }
 
     #[test] fn test_chat_rendering() {
         let corpus = vec!["BOS user assistant python output system helpful result"];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 275);
-        
+
         let conversation = Conversation {
             messages: vec![
                 ConversationMessage {
@@ -449,23 +448,23 @@ impl BpeTokenizer {
                 },
             ],
         };
-        
+
         let (ids, mask) = tokenizer.render_conversation(&conversation, 1000);
         assert!(!ids.is_empty());
         assert_eq!(ids.len(), mask.len());
-        
+
         // Assert first token is BOS
         assert_eq!(ids[0], tokenizer.get_bos_token_id());
         assert_eq!(mask[0], 0);
-        
+
         // Check that assistant SFT target tokens are masked with 1, and user prompt tokens are masked with 0
         let decoded_tokens: Vec<(String, i32)> = ids.iter().zip(mask.iter())
             .map(|(&id, &m)| (tokenizer.decode(&[id]), m)).collect();
-            
+
         // The character 'C' is from user prompt ("Compute"), it should have mask = 0
         let c_mask = decoded_tokens.iter().find(|(s, _)| s.contains('C')).map(|(_, m)| *m);
         assert_eq!(c_mask, Some(0));
-        
+
         // The character 'T' is from assistant's text response ("The"), it should have mask = 1
         let t_mask = decoded_tokens.iter().find(|(s, _)| s.contains('T')).map(|(_, m)| *m);
         assert_eq!(t_mask, Some(1));

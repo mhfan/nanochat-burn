@@ -1,23 +1,21 @@
 
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::backend::autodiff::Autodiff;
-use burn::tensor::f16;
+use burn::{tensor::{f16, backend::BackendTypes}, backend::{wgpu::Wgpu, autodiff::Autodiff}};
 
 /// 定义默认的 GPU 后端与自动微分包装
 //pub type ModelBackend = Wgpu;
 pub type ModelBackend = Wgpu<f16, i32>;
 pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
+pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
 
 /// 初始化系统计算设备：如果有可用的 GPU，优先使用 WGPU；否则优雅回退
-pub fn init_device() -> WgpuDevice {
-    let device = WgpuDevice::DefaultDevice;
+pub fn init_device() -> ModelDevice {
+    let device = Default::default();
     // Burn 会自动探查最佳的 WGPU 适配器 (Vulkan, Metal, DX12)
     tracing::info!("Initializing computational device: {:?}", device);
     device
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     /// 执行数值校验与反向传播管道验证
     #[test] pub fn verify_autodiff_pipeline() {
         // 初始化测试日志，以便在测试失败时观察底层驱动输出

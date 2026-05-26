@@ -75,30 +75,29 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_bin_pretokenization_and_mmap_dataset() {
         let temp_dir = std::env::temp_dir();
         let text_path = temp_dir.join("test_pretrain.txt");
         let  bin_path = temp_dir.join("test_pretrain.bin");
-        
+
         std::fs::write(&text_path, "System programming in Rust is elegant and fast.").unwrap();
-        
+
         // Train tokenizer on the same corpus
         let corpus = vec!["System programming in Rust is elegant and fast."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
-        
+
         pretokenize_text_to_bin(&text_path, &bin_path, &tokenizer).unwrap();
-        
+
         let dataset = PretrainingDataset::new(&[bin_path.clone()]).unwrap();
         assert_eq!(dataset.shards.len(), 1);
-        
+
         let num_tokens = dataset.shards[0].num_tokens;
         assert!(num_tokens > 0);
-        
+
         let tokens = dataset.get_tokens(0, 0, num_tokens);
         let decoded = tokenizer.decode(&tokens.iter().map(|&t| t as usize).collect::<Vec<_>>());
         assert_eq!(decoded, "System programming in Rust is elegant and fast.");
-        
+
         // Clean up
         let _ = std::fs::remove_file(text_path);
         let _ = std::fs::remove_file(bin_path);

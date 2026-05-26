@@ -36,15 +36,15 @@ impl<B: Backend> InferenceEngine<B> {
                 batch_idx_data.push(t as i32);
             }
         }
-        
+
         let idx = Tensor::<B, 2, Int>::from_data(
             burn::tensor::TensorData::new(batch_idx_data, burn::tensor::Shape::new([num_samples, prompt_len])),
             device,
         );
-        
+
         let mut cache = KVCache::new(self.model.config.n_layer);
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
-        
+
         // Extract the logits at the last token position
         let last_logits = logits_3d
             .slice([0..num_samples, (prompt_len - 1)..prompt_len, 0..self.model.config.vocab_size])
@@ -55,11 +55,11 @@ impl<B: Backend> InferenceEngine<B> {
         let in_python_block = vec![false; num_samples];
         let python_expr_tokens = vec![Vec::new(); num_samples];
         let completed = vec![false; num_samples];
-        
+
         let state = GeneratorState { cache, current_tokens, forced_tokens,
             in_python_block, python_expr_tokens, completed, step: prompt_len,
         };
-        
+
         (state, last_logits)
     }
 
@@ -68,14 +68,14 @@ impl<B: Backend> InferenceEngine<B> {
         temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
         device: &B::Device,) -> (Vec<usize>, Vec<u8>, Tensor<B, 2>) {
         let num_samples = state.current_tokens.len();
-        
+
         let assistant_end = *self.tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
         let bos = self.tokenizer.get_bos_token_id();
-        
+
         // Sample candidate tokens
         let sampled_tokens = sample_next_token(logits, temperature, top_k,
             repetition_penalty, &state.current_tokens,);
-        
+
         let python_start = *self.tokenizer.get_special_tokens().get("<|python_start|>").unwrap_or(&50257);
         let python_end = *self.tokenizer.get_special_tokens().get("<|python_end|>").unwrap_or(&50258);
         let output_start = *self.tokenizer.get_special_tokens().get("<|output_start|>").unwrap_or(&50259);
@@ -90,21 +90,21 @@ impl<B: Backend> InferenceEngine<B> {
                 is_sampled_mask.push(0);
                 continue;
             }
-            
+
             let is_forced = !state.forced_tokens[i].is_empty();
             let next_tok = if is_forced {
                 state.forced_tokens[i].pop_front().unwrap()
             } else { sampled_tokens[i] };
-            
+
             next_token_column.push(next_tok);
             is_sampled_mask.push(if is_forced { 0 } else { 1 });
-            
+
             state.current_tokens[i].push(next_tok);
-            
+
             if next_tok == assistant_end || next_tok == bos {
                 state.completed[i] = true;
             }
-            
+
             // Built-in Tool-Use State Machine
             if next_tok == python_start {
                 state.in_python_block[i] = true;
@@ -124,7 +124,7 @@ impl<B: Backend> InferenceEngine<B> {
                 state.python_expr_tokens[i].push(next_tok);
             }
         }
-        
+
         let next_idx = Tensor::<B, 2, Int>::from_data(
             burn::tensor::TensorData::new(
                 next_token_column.iter().map(|&t| t as i32).collect::<Vec<_>>(),
@@ -132,14 +132,14 @@ impl<B: Backend> InferenceEngine<B> {
             ),
             device,
         );
-        
+
         let next_logits_3d = self.model.forward_with_cache(next_idx, &mut state.cache, state.step);
         state.step += 1;
-        
+
         let next_logits = next_logits_3d
             .slice([0..num_samples, 0..1, 0..self.model.config.vocab_size])
             .reshape([num_samples, self.model.config.vocab_size]);
-        
+
         (next_token_column, is_sampled_mask, next_logits)
     }
 
@@ -148,14 +148,14 @@ impl<B: Backend> InferenceEngine<B> {
         max_tokens: usize, temperature: f32, top_k: Option<usize>,
         repetition_penalty: f32, device: &B::Device,) -> Vec<Vec<usize>> {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
-        
+
         for _ in 0..max_tokens {
             if state.completed.iter().all(|&c| c) { break; }
             let (_, _, next_logits) = self.step_generation(&mut state, cur_logits,
                 temperature, top_k, repetition_penalty, device,);
             cur_logits = next_logits;
         }
-        
+
         state.current_tokens
     }
 }
@@ -166,14 +166,14 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
     generated_tokens: &[Vec<usize>],) -> Vec<usize> {
     let shape: [usize; 2] = logits.shape().dims();
     let (batch_size, vocab_size) = (shape[0], shape[1]);
-    
+
     let logits_vec = logits.into_data().to_vec::<f32>().unwrap();
     let mut sampled_ids = Vec::with_capacity(batch_size);
-    
+
     for b in 0..batch_size {
         let start = b * vocab_size;
         let mut sample_logits = logits_vec[start..start + vocab_size].to_vec();
-        
+
         // 1. Repetition penalty
         if repetition_penalty != 1.0 {
             let mut unique_history = std::collections::HashSet::new();
@@ -189,7 +189,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
                 }
             }
         }
-        
+
         // 2. Argmax if temperature is 0
         if temperature == 0.0 {
             let mut max_idx = 0;
@@ -203,10 +203,10 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
             sampled_ids.push(max_idx);
             continue;
         }
-        
+
         // 3. Scale by temperature
         for val in sample_logits.iter_mut() { *val /= temperature; }
-        
+
         // 4. Top-K filtering
         let mut indices: Vec<usize> = (0..vocab_size).collect();
         if let Some(k) = top_k {
@@ -214,13 +214,13 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
             indices.sort_by(|&i, &j| sample_logits[j].partial_cmp(&sample_logits[i]).unwrap());
             for &idx in &indices[k..] { sample_logits[idx] = -1e9; }
         }
-        
+
         // 5. Stable Softmax & Multinomial sampling
         let max_logit = sample_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let mut exp_logits: Vec<f32> = sample_logits.iter().map(|&v| (v - max_logit).exp()).collect();
         let sum_exp: f32 = exp_logits.iter().sum();
         for v in exp_logits.iter_mut() { *v /= sum_exp; }
-        
+
         let mut cum_sum = 0.0f32;
         let r: f32 = rand::random();
         let mut chosen_idx = indices[0];
@@ -233,29 +233,28 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         }
         sampled_ids.push(chosen_idx);
     }
-    
+
     sampled_ids
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_inference_engine_instantiation() {
-        let device = burn::backend::wgpu::WgpuDevice::DefaultDevice;
+        let device = crate::common::init_device();
         let corpus = vec!["Interactive chat agent with Tool-Use integration."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
-        
+
         let config = crate::gpt::GptConfig { sequence_len: 8,
             n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32,
             window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
         };
 
-        use burn::backend::wgpu::Wgpu;
-        let gpt: Gpt<Wgpu> = Gpt::new(config.clone(), &device);
+        use crate::common::ModelBackend;
+        let gpt: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
         let engine = InferenceEngine::new(gpt, tokenizer);
-        
+
         let prompt_tokens = vec![1, 2, 3];
         let (state, logits) = engine.prefill(&prompt_tokens, 2, &device);
-        
+
         assert_eq!(state.current_tokens[0], prompt_tokens);
         let dims: [usize; 2] = logits.shape().dims();
         assert_eq!(dims, [2, engine.model.config.vocab_size]);

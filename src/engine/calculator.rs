@@ -27,15 +27,15 @@ fn parse_and_eval_count(s: &str) -> Option<usize> {
     let idx = s.find(count_marker)?;
     let prefix = s[..idx].trim();
     let suffix = s[idx + count_marker.len()..].trim();
-    
+
     if !suffix.ends_with(')') { return None; }
     let arg = suffix[..suffix.len() - 1].trim();
-    
+
     let main_str = extract_quoted_string(prefix)?;
     let sub_str = extract_quoted_string(arg)?;
-    
+
     if sub_str.is_empty() { return Some(main_str.len() + 1); }
-    
+
     let (mut count, mut start) = (0, 0);
     while let Some(pos) = main_str[start..].find(&sub_str) {
         start += pos + sub_str.len();
@@ -76,7 +76,7 @@ impl<'a> Parser<'a> {
     fn parse_expression(&mut self) -> Option<f64> {
         self.skip_whitespace();
         let mut val = self.parse_term()?;
-        
+
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -99,7 +99,7 @@ impl<'a> Parser<'a> {
     fn parse_term(&mut self) -> Option<f64> {
         self.skip_whitespace();
         let mut val = self.parse_factor()?;
-        
+
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -164,7 +164,6 @@ fn parse_and_eval_arithmetic(s: &str) -> Option<f64> {
 }
 
 //#[cfg(test)] mod tests { use super::*;
-
     #[test] fn test_calculator_arithmetic() {
         assert_eq!(use_calculator("5 + 3 * 2"), Some("11".to_string()));
         assert_eq!(use_calculator("(5 + 3) * 2"), Some("16".to_string()));
