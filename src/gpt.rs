@@ -18,6 +18,32 @@ pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
     layer_idx % 2 == (n_layer - 1) % 2
 }
 
+pub fn get_window_size_for_layer(config: &GptConfig, layer_idx: usize) -> i32 {
+    let pattern = config.window_pattern.to_uppercase();
+    let long_window = -1;
+    let short_window = ((config.sequence_len as f32 / 4.0 / 128.0).ceil() * 128.0) as i32;
+    let mut window_sizes = Vec::new();
+    for i in 0..config.n_layer {
+        let ch = pattern.chars().nth(i % pattern.len()).unwrap_or('L');
+        window_sizes.push(if ch == 'S' { short_window } else { long_window });
+    }
+    if let Some(w) = window_sizes.last_mut() { *w = long_window; }
+    window_sizes[layer_idx]
+}
+
+fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize, device: &B::Device) -> Tensor<B, 4> {
+    let mut mask_data = Vec::with_capacity(sequence_len * sequence_len);
+    for i in 0..sequence_len {
+        for j in 0..sequence_len {
+            let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
+            mask_data.push(if j > i || j < left_bound { -1e9f32 } else { 0.0f32 });
+        }
+    }
+    Tensor::<B, 4>::from_data(
+        TensorData::new(mask_data, Shape::new([1, 1, sequence_len, sequence_len])), device,
+    )
+}
+
 pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, D> {
     let variance = (x.clone() * x.clone()).mean_dim(D - 1);
     let inv_std = (variance + eps).sqrt().recip();
@@ -70,11 +96,12 @@ pub struct CausalSelfAttention<B: Backend> {
     pub n_head: usize,
     pub n_kv_head: usize,
     pub head_dim: usize,
+    pub mask: Tensor<B, 4>,
 }
 
 impl<B: Backend> CausalSelfAttention<B> {
     pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, _window_size: i32,
         layer_idx: usize, cache: &mut KVCache<B>, step: usize,) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let (b, t, _) = (shape[0], shape[1], shape[2]);
@@ -135,22 +162,10 @@ impl<B: Backend> CausalSelfAttention<B> {
         let mut scores = q_trans.matmul(k_t) * (1.0 / (self.head_dim as f32).sqrt());
 
         let mask = if step == 0 {
-            let mut mask_data = Vec::with_capacity(t * t);
-            for i in 0..t {
-                for j in 0..t {
-                    let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
-                    mask_data.push(if j > i || j < left_bound { -1e9f32 } else { 0.0f32 });
-                }
-            }
-            Tensor::<B, 4>::from_data(TensorData::new(mask_data, Shape::new([1, 1, t, t])), &x.device())
+            self.mask.clone().slice([0..1, 0..1, 0..t, 0..t])
         } else {
             let p = step;
-            let mut mask_data = Vec::with_capacity(full_seq_len);
-            let left_bound = if window_size < 0 { 0 } else { p.saturating_sub(window_size as usize) };
-            for j in 0..full_seq_len {
-                mask_data.push(if j > p || j < left_bound { -1e9f32 } else { 0.0f32 });
-            }
-            Tensor::<B, 4>::from_data(TensorData::new(mask_data, Shape::new([1, 1, 1, full_seq_len])), &x.device())
+            self.mask.clone().slice([0..1, 0..1, p..p+1, 0..full_seq_len])
         };
 
         scores = scores + mask;
@@ -161,7 +176,7 @@ impl<B: Backend> CausalSelfAttention<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, window_size: i32,) -> Tensor<B, 3> {
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, _window_size: i32,) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let (b, t, _) = (shape[0], shape[1], shape[2]);
 
@@ -195,14 +210,7 @@ impl<B: Backend> CausalSelfAttention<B> {
         let k_t = k_trans.swap_dims(2, 3);
         let mut scores = q_trans.matmul(k_t) * (1.0 / (self.head_dim as f32).sqrt());
 
-        let mut mask_data = Vec::with_capacity(t * t);
-        for i in 0..t {
-            for j in 0..t {
-                let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
-                mask_data.push(if j > i || j < left_bound { -1e9f32 } else { 0.0f32 });
-            }
-        }
-        let mask = Tensor::<B, 4>::from_data(TensorData::new(mask_data, Shape::new([1, 1, t, t])), &x.device());
+        let mask = self.mask.clone().slice([0..1, 0..1, 0..t, 0..t]);
         scores = scores + mask;
 
         let probs = burn::tensor::activation::softmax(scores, 3);
@@ -290,8 +298,10 @@ impl<B: Backend> Gpt<B> {
                 Some(Linear { weight: Param::from_tensor(Tensor::random([12, config.n_kv_head], Distribution::Uniform(0.0, 0.02), device)), bias: None })
             } else { None };
 
+            let window_size = get_window_size_for_layer(&config, i);
+            let mask = precompute_window_mask::<B>(window_size, config.sequence_len, device);
             let attn = CausalSelfAttention {
-                c_q, c_k, c_v, c_proj, ve_gate, layer_idx: i, n_head: config.n_head, n_kv_head: config.n_kv_head, head_dim,
+                c_q, c_k, c_v, c_proj, ve_gate, layer_idx: i, n_head: config.n_head, n_kv_head: config.n_kv_head, head_dim, mask,
             };
 
             let c_fc = Linear { weight: Param::from_tensor(Tensor::random([n_embd, 4 * n_embd], Distribution::Uniform((-s * 0.4) as f64, (s * 0.4) as f64), device)), bias: None };
@@ -435,7 +445,7 @@ impl<B: Backend> Gpt<B> {
 
         let mut logits = self.lm_head.forward(x);
         logits = logits.slice([0..batch_size, 0..seq_len, 0..self.config.vocab_size]);
-        logits.tanh() * 15.0
+        (logits / 15.0).tanh() * 15.0
     }
 
     pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>) -> Tensor<B, 3> {
@@ -489,13 +499,13 @@ impl<B: Backend> Gpt<B> {
 
         let mut logits = self.lm_head.forward(x);
         logits = logits.slice([0..batch_size, 0..seq_len, 0..self.config.vocab_size]);
-        logits.tanh() * 15.0
+        (logits / 15.0).tanh() * 15.0
     }
 
     pub fn compute_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
         let shape: [usize; 3] = logits.shape().dims();
         let (b, t, v) = (shape[0], shape[1], shape[2]);
-        let flat_logits = logits.reshape([b * t, v]);
+        let flat_logits = logits.reshape([b * t, v]).clamp(-50.0, 50.0);
         let flat_targets = targets.reshape([b * t]);
 
         let log_probs = burn::tensor::activation::log_softmax(flat_logits, 1);
@@ -514,7 +524,7 @@ impl<B: Backend> Gpt<B> {
     pub fn compute_unreduced_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
         let shape: [usize; 3] = logits.shape().dims();
         let (b, t, v) = (shape[0], shape[1], shape[2]);
-        let flat_logits = logits.reshape([b * t, v]);
+        let flat_logits = logits.reshape([b * t, v]).clamp(-50.0, 50.0);
         let flat_targets = targets.reshape([b * t]);
 
         let log_probs = burn::tensor::activation::log_softmax(flat_logits, 1);
