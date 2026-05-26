@@ -20,6 +20,40 @@
 
 ---
 
+## 📂 目录结构与架构设计 (Project Directory Layout & Architecture)
+
+以下为 `nanochat-burn` 经过极致扁平化与设备统一化重构后的完整生产级文件目录布局：
+
+```text
+    nanochat-burn/
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs              # 导出所有子模块
+        ├── common.rs           # 阶段 0: 设备检测（ModelDevice）、通用类型与 verify_autodiff_pipeline 验证
+        ├── tokenizer.rs        # 阶段 1: 工业级 BPE 分词器
+        ├── dataset.rs          # 阶段 2: 数据集载入 (PretrainingDataset, SftDataset)
+        ├── dataloader.rs       # 阶段 2: 批处理器 (DistributedDataLoader)
+        ├── gpt.rs              # 阶段 3: GPT 架构实现 (Rotary Embeddings, Sliding Window, GQA 等)
+        ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 转换
+        ├── optim.rs            # 阶段 4: 新一代正交优化器 (MuonAdamW, Polar Express 正交化算法实现)
+        ├── engine.rs           # 阶段 4/5: 训练与推理引擎、学习率余弦退火调度
+        ├── engine/
+        │   ├── calculator.rs   # 内置 Tool-Use 计算器状态机算子
+        │   ├── eval.rs         # 阶段 6: 评测子系统及各测试基准评估 (gsm8k, spellingbee 等)
+        │   ├── inference.rs    # 阶段 5: 支持 KV-Cache 的采样生成推理引擎
+        │   ├── pretrain.rs     # 阶段 4/5: 异步预训练工作流
+        │   ├── rl.rs           # 阶段 6: 强化学习 (GRPO-style REINFORCE 对齐) 工作流
+        │   ├── sandbox.rs      # 阶段 6: 隔离 Python 子进程安全代码沙箱
+        │   └── sft.rs          # 阶段 6: 监督微调 (packed SFT) 工作流
+        └── bin/
+            ├── train.rs        # 训练及对齐入口 (支持 pretrain, sft, rl 参数切换)
+            ├── eval.rs         # 评测与 DCLM CORE / ChatCORE 整合评估程序
+            ├── chat.rs         # CLI 命令行多轮流式对话客户端
+            └── chat_web.rs     # Web AXUM 高端对话服务器
+```
+
+---
+
 ## 🗺️ 7大阶段开发路线图 (Milestones & Roadmap)
 
 ### 💻 平台能力与精度矩阵 (Platform Capabilities & Precision Matrix)
