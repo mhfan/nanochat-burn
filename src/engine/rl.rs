@@ -124,9 +124,13 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
                 question_masks.push(mask);
             }
 
-            // Calculate advantages
+            // Calculate advantages using GRPO formulation: (r - mean) / (std_dev + eps)
             let mean_reward = question_rewards.iter().sum::<f32>() / (num_samples as f32);
-            let advantages: Vec<f32> = question_rewards.iter().map(|&r| r - mean_reward).collect();
+            let variance = question_rewards.iter()
+                .map(|&r| (r - mean_reward).powi(2)) .sum::<f32>() / (num_samples as f32);
+            let (std_dev, eps) = (variance.sqrt(), 1e-4f32);
+            let advantages: Vec<f32> = question_rewards.iter()
+                .map(|&r| (r - mean_reward) / (std_dev + eps)).collect();
 
             all_rollouts.extend(question_rollouts);
             all_masks.extend(question_masks);
@@ -180,15 +184,13 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         // Broadcast advantages to [num_sequences, max_len - 1] and multiply
         let mut flat_adv_seq = Vec::with_capacity(num_sequences * (max_len - 1));
         for i in 0..num_sequences {
-            let adv = all_advantages[i];
-            flat_adv_seq.extend(std::iter::repeat(adv).take(max_len - 1));
+            flat_adv_seq.extend(std::iter::repeat(all_advantages[i]).take(max_len - 1));
         }
         let advantages_tensor = Tensor::<B, 1>::from_data(flat_adv_seq.as_slice(), device)
             .reshape([num_sequences, max_len - 1]);
 
-        let pg_loss = (unreduced_2d * advantages_tensor).sum();
         let num_valid_val = targets_tensor.clone().not_equal_elem(-1).float().sum().into_scalar().to_f32().max(1.0);
-        let loss = pg_loss / num_valid_val;
+        let loss = (unreduced_2d * advantages_tensor).sum() / num_valid_val;
 
         tracing::info!("  Running training backward pass...");
         let grads = loss.backward();
