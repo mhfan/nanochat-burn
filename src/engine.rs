@@ -1,6 +1,6 @@
 
 use std::time::Instant;
-use burn::{prelude::ToElement, tensor::{Tensor, backend::{Backend, AutodiffBackend}, Int}};
+use burn::{prelude::ToElement, tensor::{Tensor, TensorData, Shape, backend::{Backend, AutodiffBackend}, Int}};
 use crate::{gpt::Gpt, tokenizer::BpeTokenizer, dataloader::DistributedDataLoader, optim::MuonAdamW, };
 
 pub mod calculator;
@@ -29,13 +29,9 @@ pub struct TrainingConfig {
 /// and a cosine decay or linear warmdown to a final fraction of the initial learning rate.
 pub fn get_lr_multiplier(step: usize, num_iterations: usize, warmup_steps: usize,
     warmdown_ratio: f32, final_lr_frac: f32,) -> f32 {
-    if step < warmup_steps {
-        (step + 1) as f32 / warmup_steps.max(1) as f32
-    } else {
+    if step < warmup_steps { (step + 1) as f32 / warmup_steps.max(1) as f32 } else {
         let warmdown_iters = (warmdown_ratio * num_iterations as f32).round() as usize;
-        if step <= num_iterations.saturating_sub(warmdown_iters) {
-            1.0
-        } else {
+        if step <= num_iterations.saturating_sub(warmdown_iters) { 1.0 } else {
             let progress = (num_iterations - step) as f32 / warmdown_iters.max(1) as f32;
             progress * 1.0 + (1.0 - progress) * final_lr_frac
         }
@@ -52,9 +48,7 @@ pub fn get_muon_momentum(step: usize, num_iterations: usize, warmdown_ratio: f32
     } else if step >= warmdown_start {
         let progress = (step - warmdown_start) as f32 / warmdown_iters.max(1) as f32;
         0.97 * (1.0 - progress) + 0.90 * progress
-    } else {
-        0.97
-    }
+    } else { 0.97 }
 }
 
 /// Compute the weight decay value dynamically over the training horizon.
@@ -89,13 +83,9 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
             let b = batch.x.len() / model.config.sequence_len;
             let t = model.config.sequence_len;
             let x_tensor = Tensor::<B, 2, Int>::from_data(
-                burn::tensor::TensorData::new(batch.x, burn::tensor::Shape::new([b, t])),
-                device,
-            );
+                TensorData::new(batch.x, Shape::new([b, t])), device,);
             let y_tensor = Tensor::<B, 2, Int>::from_data(
-                burn::tensor::TensorData::new(batch.y, burn::tensor::Shape::new([b, t])),
-                device,
-            );
+                TensorData::new(batch.y, Shape::new([b, t])), device,);
 
             let logits = model.forward(x_tensor, None);
             let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
@@ -112,9 +102,7 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
                     }
                 }
             }
-        } else {
-            break;
-        }
+        } else { break; }
     }
 
     if total_bytes == 0 { f32::INFINITY } else {
@@ -156,11 +144,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         for _ in 0..grad_accum_steps {
             if let Some(batch) = loader.next_batch().await {
                 let x_tensor = Tensor::<B, 2, Int>::from_data(
-                    burn::tensor::TensorData::new(batch.x, burn::tensor::Shape::new([self.config.device_batch_size, self.config.sequence_length])),
+                    TensorData::new(batch.x, Shape::new([self.config.device_batch_size, self.config.sequence_length])),
                     device,
                 );
                 let y_tensor = Tensor::<B, 2, Int>::from_data(
-                    burn::tensor::TensorData::new(batch.y, burn::tensor::Shape::new([self.config.device_batch_size, self.config.sequence_length])),
+                    TensorData::new(batch.y, Shape::new([self.config.device_batch_size, self.config.sequence_length])),
                     device,
                 );
 
@@ -169,9 +157,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
                 step_loss += loss.clone().into_scalar().to_f32();
 
                 let step_grads = loss.backward();
-                if grads.is_none() {
-                    grads = Some(step_grads);
-                } else {
+                if grads.is_none() { grads = Some(step_grads); } else {
                     // Accumulate gradients manually in the container
                     // Note: In typical autodiff, backprop automatically updates the grad registers
                 }
@@ -193,15 +179,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         // we don't need to manually zero grad registers as they are newly allocated each backward pass.
 
         let elapsed = start_time.elapsed().as_secs_f64();
-        if self.step > 10 {
-            self.total_training_time_secs += elapsed;
-        }
+        if self.step > 10 { self.total_training_time_secs += elapsed; }
 
         // Compute debiased smoothed loss
         let ema_beta = 0.9f32;
-        if self.step == 0 {
-            self.smooth_train_loss = step_loss;
-        } else {
+        if self.step == 0 { self.smooth_train_loss = step_loss; } else {
             self.smooth_train_loss = ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss;
         }
         let debiased_loss = self.smooth_train_loss / (1.0 - ema_beta.powi((self.step + 1) as i32));

@@ -87,6 +87,10 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             let prompt_len = prompt_tokens.len();
 
             // Sample rollouts (returns both results and precise masks)
+            tracing::info!(
+                "  Rollout for question {}/{} (conv {}), prompt len = {}...",
+                q_idx + 1, batch_size, conv_idx, prompt_len
+            );
             let (rollouts, masks) = inference_engine.generate_batch(&prompt_tokens,
                 num_samples, 128, 1.0, Some(50), 1.0, device,);
 
@@ -130,8 +134,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             all_advantages.extend(advantages);
         }
 
-        // Collate and pad rollouts to maximum length
-        let max_len = all_rollouts.iter().map(|r| r.len()).max().unwrap_or(0);
+        // Collate and pad rollouts to static maximum context length to eliminate JIT compiles during backprop
+        let max_len = model.config.sequence_len;
         let num_sequences = all_rollouts.len();
 
         let mut flat_inputs = Vec::with_capacity(num_sequences * (max_len - 1));
@@ -141,7 +145,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             let mut padded_rollout = rollout.clone();
             let mut padded_mask = all_masks[i].clone();
 
-            let pad_len = max_len - rollout.len();
+            let pad_len = max_len.saturating_sub(rollout.len());
             padded_rollout.extend(std::iter::repeat(assistant_end).take(pad_len));
             padded_mask.extend(std::iter::repeat(0).take(pad_len));
 
@@ -166,6 +170,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             .reshape([num_sequences, max_len - 1]);
 
         // Forward and backward passes
+        tracing::info!("  Running training forward pass...");
         let logits = model.forward(inputs_tensor, None);
         let unreduced = model.compute_unreduced_loss(logits, targets_tensor.clone());
 
@@ -182,15 +187,18 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             .reshape([num_sequences, max_len - 1]);
 
         let pg_loss = (unreduced_2d * advantages_tensor).sum();
-        let num_valid = targets_tensor.clone().not_equal_elem(-1).float().sum().clamp(1.0, 1e9);
-        let loss = pg_loss / num_valid;
+        let num_valid_val = targets_tensor.clone().not_equal_elem(-1).float().sum().into_scalar().to_f32().max(1.0);
+        let loss = pg_loss / num_valid_val;
 
+        tracing::info!("  Running training backward pass...");
         let grads = loss.backward();
 
         // Update parameters
         let lrm = 1.0 - (step as f32 / num_steps as f32);
         let lr = learning_rate * lrm;
+        tracing::info!("  Running optimizer update...");
         optimizer.step(&mut model, &grads, lr, step, 0.0);
+        tracing::info!("  Optimizer update completed!");
 
         let loss_val = loss.into_scalar().to_f32();
         let avg_reward = all_rewards.iter().sum::<f32>() / (all_rewards.len() as f32);
@@ -206,3 +214,14 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   RL Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 }
+
+//#[cfg(test)] mod tests { use super::*;
+    #[test] fn test_rl_training_loop() {
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::INFO).finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+
+        let device = crate::common::init_device();
+        run_rl_training::<crate::common::ModelAutodiffBackend>(&device);
+    }
+//}

@@ -1,8 +1,7 @@
-use burn::tensor::{Tensor, backend::Backend, Int};
+
 use std::collections::VecDeque;
-use crate::gpt::{Gpt, KVCache};
-use crate::tokenizer::BpeTokenizer;
-use crate::engine::calculator::use_calculator;
+use burn::tensor::{Tensor, TensorData, Shape, backend::Backend, Int};
+use crate::{gpt::{Gpt, KVCache}, tokenizer::BpeTokenizer, engine::calculator::use_calculator};
 
 /// Tracks self-regressive token generation state per sample
 pub struct GeneratorState<B: Backend> {
@@ -22,27 +21,23 @@ pub struct InferenceEngine<B: Backend> {
 }
 
 impl<B: Backend> InferenceEngine<B> {
-    pub fn new(model: Gpt<B>, tokenizer: BpeTokenizer) -> Self {
-        Self { model, tokenizer }
-    }
+    pub fn new(model: Gpt<B>, tokenizer: BpeTokenizer) -> Self { Self { model, tokenizer } }
 
     /// Run prefill phase over the prompt sequence across all batch items
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
         device: &B::Device,) -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
         let mut batch_idx_data = Vec::with_capacity(num_samples * prompt_len);
-        for _ in 0..num_samples {
-            for &t in prompt_tokens {
-                batch_idx_data.push(t as i32);
-            }
-        }
+        for _ in 0..num_samples { for &t in prompt_tokens { batch_idx_data.push(t as i32); } }
 
         let idx = Tensor::<B, 2, Int>::from_data(
-            burn::tensor::TensorData::new(batch_idx_data, burn::tensor::Shape::new([num_samples, prompt_len])),
+            TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])),
             device,
         );
 
-        let mut cache = KVCache::new(self.model.config.n_layer);
+        let head_dim = self.model.config.n_embd / self.model.config.n_head;
+        let mut cache = KVCache::new_allocated(self.model.config.n_layer, num_samples,
+            self.model.config.sequence_len, self.model.config.n_kv_head, head_dim, device,);
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
 
         // Extract the logits at the last token position
@@ -97,9 +92,8 @@ impl<B: Backend> InferenceEngine<B> {
             } else { sampled_tokens[i] };
 
             next_token_column.push(next_tok);
-            is_sampled_mask.push(if is_forced { 0 } else { 1 });
-
             state.current_tokens[i].push(next_tok);
+            is_sampled_mask.push(if is_forced { 0 } else { 1 });
 
             if next_tok == assistant_end || next_tok == bos {
                 state.completed[i] = true;
@@ -115,9 +109,7 @@ impl<B: Backend> InferenceEngine<B> {
                 if let Some(res) = use_calculator(&expr_str) {
                     let res_tokens = self.tokenizer.encode_ordinary(&res);
                     state.forced_tokens[i].push_back(output_start);
-                    for &t in &res_tokens {
-                        state.forced_tokens[i].push_back(t);
-                    }
+                    for &t in &res_tokens { state.forced_tokens[i].push_back(t); }
                     state.forced_tokens[i].push_back(output_end);
                 }
             } else if state.in_python_block[i] {
@@ -126,9 +118,9 @@ impl<B: Backend> InferenceEngine<B> {
         }
 
         let next_idx = Tensor::<B, 2, Int>::from_data(
-            burn::tensor::TensorData::new(
+            TensorData::new(
                 next_token_column.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                burn::tensor::Shape::new([num_samples, 1]),
+                Shape::new([num_samples, 1]),
             ),
             device,
         );
@@ -156,8 +148,11 @@ impl<B: Backend> InferenceEngine<B> {
         let mut masks = vec![vec![0; prompt_tokens.len()]; num_samples];
         let mut completed = vec![false; num_samples];
 
-        for _ in 0..max_tokens {
+        for step_idx in 0..max_tokens {
             if completed.iter().all(|&c| c) { break; }
+            if step_idx > 0 && step_idx % 20 == 0 {
+                tracing::info!("    Generated {}/{} tokens...", step_idx, max_tokens);
+            }
             let (token_column, token_masks, next_logits) = self.step_generation(&mut state, cur_logits,
                 temperature, top_k, repetition_penalty, device,);
             cur_logits = next_logits;
@@ -212,13 +207,9 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
 
         // 2. Argmax if temperature is 0
         if temperature == 0.0 {
-            let mut max_idx = 0;
-            let mut max_val = sample_logits[0];
+            let (mut max_val, mut max_idx) = (sample_logits[0], 0);
             for (idx, &val) in sample_logits.iter().enumerate() {
-                if val > max_val {
-                    max_val = val;
-                    max_idx = idx;
-                }
+                if val > max_val { (max_val, max_idx) = (val, idx); }
             }
             sampled_ids.push(max_idx);
             continue;
@@ -246,10 +237,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let mut chosen_idx = indices[0];
         for &idx in &indices {
             cum_sum += exp_logits[idx];
-            if r <= cum_sum {
-                chosen_idx = idx;
-                break;
-            }
+            if r <= cum_sum { chosen_idx = idx; break; }
         }
         sampled_ids.push(chosen_idx);
     }
@@ -278,5 +266,27 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         assert_eq!(state.current_tokens[0], prompt_tokens);
         let dims: [usize; 2] = logits.shape().dims();
         assert_eq!(dims, [2, engine.model.config.vocab_size]);
+    }
+
+    #[test] fn test_inference_step_generation() {
+        let device = crate::common::init_device();
+        let corpus = vec!["Interactive chat agent with Tool-Use integration."];
+        let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
+
+        let config = crate::gpt::GptConfig { sequence_len: 32,
+            n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32,
+            window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
+        };
+
+        use crate::common::ModelBackend;
+        let gpt: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
+        let engine = InferenceEngine::new(gpt, tokenizer);
+
+        let prompt_tokens = vec![1, 2, 3];
+        let (results, masks) = engine.generate_batch(&prompt_tokens, 2, 5, 1.0, Some(5), 1.0, &device);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(masks.len(), 2);
+        assert!(results[0].len() >= 3);
     }
 //}

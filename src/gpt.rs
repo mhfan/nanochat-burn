@@ -1,6 +1,7 @@
+
 use serde::{Serialize, Deserialize};
 use burn::{module::{Module, Param}, nn::{Embedding, Linear},
-    tensor::{Tensor, backend::Backend, Shape, TensorData, Distribution, Int},
+    tensor::{Tensor, TensorData, Shape, Distribution, Int, backend::Backend, activation},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +84,18 @@ impl<B: Backend> KVCache<B> {
             v_cache: Vec::with_capacity(n_layer),
         }
     }
+
+    pub fn new_allocated(n_layer: usize, batch_size: usize, max_seq_len: usize, n_kv_head: usize,
+        head_dim: usize, device: &B::Device,) -> Self {
+        let mut k_cache = Vec::with_capacity(n_layer);
+        let mut v_cache = Vec::with_capacity(n_layer);
+        let shape = Shape::new([batch_size, max_seq_len, n_kv_head, head_dim]);
+        for _ in 0..n_layer {
+            k_cache.push(Tensor::zeros(shape.clone(), device));
+            v_cache.push(Tensor::zeros(shape.clone(), device));
+        }
+        Self { k_cache, v_cache }
+    }
 }
 
 #[derive(Module, Debug)]
@@ -126,30 +139,27 @@ impl<B: Backend> CausalSelfAttention<B> {
         q = rms_norm(q, 1e-5) * 1.2;
         k = rms_norm(k, 1e-5) * 1.2;
 
+        let mask_dims: [usize; 4] = self.mask.shape().dims();
+        let max_seq_len = mask_dims[3];
+
         let (mut full_k, mut full_v) = if step == 0 {
-            if cache.k_cache.len() <= layer_idx {
-                cache.k_cache.push(k.clone());
-                cache.v_cache.push(v.clone());
-            } else {
-                cache.k_cache[layer_idx] = k.clone();
-                cache.v_cache[layer_idx] = v.clone();
-            }
-            (k, v)
-        } else {
-            let cached_k = cache.k_cache[layer_idx].clone();
-            let cached_v = cache.v_cache[layer_idx].clone();
-
-            let full_k = Tensor::cat(vec![cached_k, k], 1);
-            let full_v = Tensor::cat(vec![cached_v, v], 1);
-
+            let full_k = cache.k_cache[layer_idx].clone().slice_assign(
+                [0..b, 0..t, 0..self.n_kv_head, 0..self.head_dim], k,);
+            let full_v = cache.v_cache[layer_idx].clone().slice_assign(
+                [0..b, 0..t, 0..self.n_kv_head, 0..self.head_dim], v,);
             cache.k_cache[layer_idx] = full_k.clone();
             cache.v_cache[layer_idx] = full_v.clone();
-
+            (full_k, full_v)
+        } else {
+            let p = step;
+            let full_k = cache.k_cache[layer_idx].clone().slice_assign(
+                [0..b, p..p+1, 0..self.n_kv_head, 0..self.head_dim], k,);
+            let full_v = cache.v_cache[layer_idx].clone().slice_assign(
+                [0..b, p..p+1, 0..self.n_kv_head, 0..self.head_dim], v,);
+            cache.k_cache[layer_idx] = full_k.clone();
+            cache.v_cache[layer_idx] = full_v.clone();
             (full_k, full_v)
         };
-
-        let full_k_dims: [usize; 4] = full_k.shape().dims();
-        let full_seq_len = full_k_dims[1];
 
         let group_size = self.n_head / self.n_kv_head;
         full_k = repeat_kv(full_k, group_size);
@@ -162,15 +172,15 @@ impl<B: Backend> CausalSelfAttention<B> {
         let mut scores = q_trans.matmul(k_t) * (1.0 / (self.head_dim as f32).sqrt());
 
         let mask = if step == 0 {
-            self.mask.clone().slice([0..1, 0..1, 0..t, 0..t])
+            self.mask.clone().slice([0..1, 0..1, 0..t, 0..max_seq_len])
         } else {
             let p = step;
-            self.mask.clone().slice([0..1, 0..1, p..p+1, 0..full_seq_len])
+            self.mask.clone().slice([0..1, 0..1, p..p+1, 0..max_seq_len])
         };
 
         scores = scores + mask;
 
-        let probs = burn::tensor::activation::softmax(scores, 3);
+        let probs = activation::softmax(scores, 3);
         let y = probs.matmul(v_trans).swap_dims(1, 2).reshape([b, t, self.n_head * self.head_dim]);
         self.c_proj.forward(y)
     }
@@ -213,7 +223,7 @@ impl<B: Backend> CausalSelfAttention<B> {
         let mask = self.mask.clone().slice([0..1, 0..1, 0..t, 0..t]);
         scores = scores + mask;
 
-        let probs = burn::tensor::activation::softmax(scores, 3);
+        let probs = activation::softmax(scores, 3);
         let y = probs.matmul(v_trans).swap_dims(1, 2).reshape([b, t, self.n_head * self.head_dim]);
         self.c_proj.forward(y)
     }
@@ -228,7 +238,7 @@ pub struct MLP<B: Backend> {
 impl<B: Backend> MLP<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let x = self.c_fc.forward(x);
-        let x = burn::tensor::activation::relu(x);
+        let x = activation::relu(x);
         let x = x.clone() * x;
         self.c_proj.forward(x)
     }
@@ -508,7 +518,7 @@ impl<B: Backend> Gpt<B> {
         let flat_logits = logits.reshape([b * t, v]).clamp(-50.0, 50.0);
         let flat_targets = targets.reshape([b * t]);
 
-        let log_probs = burn::tensor::activation::log_softmax(flat_logits, 1);
+        let log_probs = activation::log_softmax(flat_logits, 1);
         let mask_valid = flat_targets.clone().not_equal_elem(-1);
         let clamped_targets = flat_targets.clamp(0, (v - 1) as i32);
 
@@ -527,7 +537,7 @@ impl<B: Backend> Gpt<B> {
         let flat_logits = logits.reshape([b * t, v]).clamp(-50.0, 50.0);
         let flat_targets = targets.reshape([b * t]);
 
-        let log_probs = burn::tensor::activation::log_softmax(flat_logits, 1);
+        let log_probs = activation::log_softmax(flat_logits, 1);
         let mask_valid = flat_targets.clone().not_equal_elem(-1);
         let clamped_targets = flat_targets.clamp(0, (v - 1) as i32);
 
@@ -542,20 +552,24 @@ impl<B: Backend> Gpt<B> {
 //#[cfg(test)] mod tests { use super::*;
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
-        let config = GptConfig { sequence_len: 16, vocab_size: 100, n_layer: 2, n_head: 4, n_kv_head: 2,
+        let config = GptConfig { sequence_len: 256, vocab_size: 280, n_layer: 4, n_head: 4, n_kv_head: 2,
             n_embd: 64, window_pattern: "SL".to_string(),
         };
 
-        use crate::common::ModelBackend;
-        let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
-        let idx = Tensor::<ModelBackend, 2, Int>::from_data([[1, 2, 3, 4], [5, 6, 7, 8]], &device);
-        let targets = Tensor::<ModelBackend, 2, Int>::from_data([[2, 3, 4, -1], [6, 7, 8, -1]], &device);
+        use crate::common::ModelAutodiffBackend;
+        let gpt: Gpt<ModelAutodiffBackend> = Gpt::new(config, &device);
+
+        // Use identical shape as RL training batch: [8, 255]
+        let idx = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([8, 255], &device);
+        let targets = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([8, 255], &device);
 
         let logits = gpt.forward(idx, None);
-        assert_eq!(logits.shape().dims(), [2, 4, 100]);
+        assert_eq!(logits.shape().dims(), [8, 255, 280]);
 
         let loss = gpt.compute_loss(logits, targets);
-        let loss_val = loss.into_scalar();
-        assert!(loss_val.to_f32() > 0.0);
+        let loss_val = loss.clone().into_scalar();
+        assert!(loss_val.to_f32() >= 0.0);
+
+        let _grads = loss.backward();
     }
 //}

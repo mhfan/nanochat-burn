@@ -64,7 +64,7 @@ fancy-regex = "0.18"
 
 [profile.release]
 opt-level = 3
-codegen-units = 1 # 减少并行编译单元，最大化单线程优化效果
-panic = "abort"   # 避免跨 FFI 边界的 panic 展开，减小体积并提升性能
-debug = true      # 保留调试符号以便性能分析（如使用 Tracy 或 Flamegraph）
-lto = "fat"       # 开启全局链接期优化
+codegen-units = 8
+panic = "abort"
+debug = false
+lto = true
