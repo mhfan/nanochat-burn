@@ -10,6 +10,7 @@ pub mod sft;
 pub mod rl;
 pub mod eval;
 pub mod sandbox;
+pub mod speculative;
 
 /// Training configuration hyperparameters
 #[derive(Debug, Clone)]

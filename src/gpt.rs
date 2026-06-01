@@ -153,9 +153,9 @@ impl<B: Backend> CausalSelfAttention<B> {
         } else {
             let p = step;
             let full_k = cache.k_cache[layer_idx].clone().slice_assign(
-                [0..b, p..p+1, 0..self.n_kv_head, 0..self.head_dim], k,);
+                [0..b, p..p+t, 0..self.n_kv_head, 0..self.head_dim], k,);
             let full_v = cache.v_cache[layer_idx].clone().slice_assign(
-                [0..b, p..p+1, 0..self.n_kv_head, 0..self.head_dim], v,);
+                [0..b, p..p+t, 0..self.n_kv_head, 0..self.head_dim], v,);
             cache.k_cache[layer_idx] = full_k.clone();
             cache.v_cache[layer_idx] = full_v.clone();
             (full_k, full_v)
