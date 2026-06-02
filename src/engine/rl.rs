@@ -215,6 +215,14 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
     tracing::info!("   RL Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
+
+    let checkpoint_path = std::path::Path::new("data/rl_checkpoint.safetensors");
+    tracing::info!("Saving RL checkpoint to {:?}...", checkpoint_path);
+    if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
+        tracing::error!("Failed to save RL checkpoint: {}", e);
+    } else {
+        tracing::info!("RL checkpoint saved successfully!");
+    }
 }
 
 //#[cfg(test)] mod tests { use super::*;

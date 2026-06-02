@@ -196,6 +196,14 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
     tracing::info!("   SFT Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
+
+    let checkpoint_path = std::path::Path::new("data/sft_checkpoint.safetensors");
+    tracing::info!("Saving SFT checkpoint to {:?}...", checkpoint_path);
+    if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
+        tracing::error!("Failed to save SFT checkpoint: {}", e);
+    } else {
+        tracing::info!("SFT checkpoint saved successfully!");
+    }
 }
 
 //#[cfg(test)] mod tests { use super::*;
