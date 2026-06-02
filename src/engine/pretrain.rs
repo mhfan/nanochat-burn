@@ -55,26 +55,16 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     let bin_path = generate_pretrain_dataset(&tokenizer);
 
     // 3. Configure training
-    let config = GptConfig {
-        sequence_len: 16,
+    let config = GptConfig { sequence_len: 16,
         vocab_size: tokenizer.get_vocab_size(),
-        n_layer: 2,
-        n_head: 2,
-        n_kv_head: 1,
-        n_embd: 16,
-        window_pattern: "L".to_string(),
+        n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
+        window_pattern: "L".to_string(), quantization: None,
     };
 
     let training_config = TrainingConfig {
-        num_iterations: 15,
-        warmup_steps: 3,
-        warmdown_ratio: 0.3,
-        final_lr_frac: 0.1,
-        learning_rate: 1e-3,
-        weight_decay: 0.1,
-        device_batch_size: 2,
-        sequence_length: config.sequence_len,
-        total_batch_size: 4,
+        num_iterations: 15, warmup_steps: 3, warmdown_ratio: 0.3, final_lr_frac: 0.1,
+        learning_rate: 1e-3, weight_decay: 0.1, device_batch_size: 2,
+        sequence_length: config.sequence_len, total_batch_size: 4,
     };
 
     let model = Gpt::<B>::new(config, device);

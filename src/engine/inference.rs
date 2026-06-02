@@ -1,7 +1,7 @@
 
 use std::collections::VecDeque;
 use burn::tensor::{Tensor, TensorData, Shape, backend::Backend, Int};
-use crate::{gpt::{Gpt, KVCache}, tokenizer::BpeTokenizer, engine::calculator::use_calculator};
+use crate::{gpt::{Gpt, KVCache, ForwardLayer}, tokenizer::BpeTokenizer, engine::calculator::use_calculator};
 
 /// Tracks self-regressive token generation state per sample
 pub struct GeneratorState<B: Backend> {
@@ -15,13 +15,13 @@ pub struct GeneratorState<B: Backend> {
 }
 
 /// High-performance self-regressive inference engine
-pub struct InferenceEngine<B: Backend> {
-    pub model: Gpt<B>,
+pub struct InferenceEngine<B: Backend, L: ForwardLayer<B> = burn::nn::Linear<B>> {
+    pub model: Gpt<B, L>,
     pub tokenizer: BpeTokenizer,
 }
 
-impl<B: Backend> InferenceEngine<B> {
-    pub fn new(model: Gpt<B>, tokenizer: BpeTokenizer) -> Self { Self { model, tokenizer } }
+impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
+    pub fn new(model: Gpt<B, L>, tokenizer: BpeTokenizer) -> Self { Self { model, tokenizer } }
 
     /// Run prefill phase over the prompt sequence across all batch items
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
@@ -252,7 +252,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
         let config = crate::gpt::GptConfig { sequence_len: 8,
-            n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32,
+            n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32, quantization: None,
             window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
         };
 
@@ -276,6 +276,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let config = crate::gpt::GptConfig { sequence_len: 32,
             n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32,
             window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
+            quantization: None,
         };
 
         use crate::common::ModelBackend;

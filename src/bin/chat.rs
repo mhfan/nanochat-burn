@@ -31,14 +31,48 @@ fn main() {
     let vocab_size = tokenizer.get_vocab_size();
     println!("Vocabulary size: {}", vocab_size);
 
+    // Parse CLI parameters and Environment Variables for quantization
+    let args: Vec<String> = std::env::args().collect();
+    let mut quantize_bits = std::env::var("NANOCHAT_QUANTIZE")
+        .ok().and_then(|v| v.parse::<usize>().ok());
+    let mut quantize_block = std::env::var("NANOCHAT_QUANTIZE_BLOCK")
+        .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+
+    for i in 0..args.len() {
+        if args[i] == "--quantize" && i + 1 < args.len() {
+            if let Ok(bits) = args[i+1].parse::<usize>() {
+                quantize_bits = Some(bits);
+            }
+        }
+        if args[i] == "--quantize-block" && i + 1 < args.len() {
+            if let Ok(block) = args[i+1].parse::<usize>() {
+                quantize_block = block;
+            }
+        }
+    }
+
     // 2. Initialize a small Gpt model on WGPU
-    let config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
-        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(),
+    let mut config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
+        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), quantization: None,
     };
+
+    if let Some(bits) = quantize_bits {
+        config.quantization = Some(nanochat_burn::gpt::QuantizationConfig {
+            bits, block_size: quantize_block,
+        });
+    }
 
     let device = init_device();
     println!("Constructing WGPU Transformer Model...");
-    let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
+    let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
+
+    let gpt = if let Some(q_config) = config.quantization {
+        println!("Dynamically quantizing model to INT{} (block_size = {})...", q_config.bits, q_config.block_size);
+        gpt_fp.quantize(q_config.bits, q_config.block_size)
+    } else {
+        gpt_fp.into_linear_or_quantized()
+    };
+
     let engine = InferenceEngine::new(gpt, tokenizer.clone());
 
     // Initialize conversation state

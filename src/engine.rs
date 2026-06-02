@@ -11,6 +11,7 @@ pub mod rl;
 pub mod eval;
 pub mod sandbox;
 pub mod speculative;
+pub mod quant;
 
 /// Training configuration hyperparameters
 #[derive(Debug, Clone)]
@@ -221,7 +222,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(),
+            vocab_size: tokenizer.get_vocab_size(), quantization: None,
         };
 
         use crate::common::ModelBackend;

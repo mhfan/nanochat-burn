@@ -1,13 +1,15 @@
+
 use axum::{routing::{get, post}, Router, Json,
     response::{sse::{Event, KeepAlive, Sse}, Html, IntoResponse},
 };
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
-use nanochat_burn::common::{ModelBackend, ModelDevice, init_device};
-use nanochat_burn::gpt::{Gpt, GptConfig};
-use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
-use nanochat_burn::engine::inference::InferenceEngine;
+use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
+    engine::{inference::InferenceEngine, quant::LinearOrQuantized},
+    tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
+    common::{ModelBackend, ModelDevice, init_device},
+};
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
@@ -24,29 +26,23 @@ struct HealthResponse {
 }
 
 // Custom Stream wrapper to avoid tokio-stream dependency
-struct SseStream {
-    rx: mpsc::Receiver<Result<Event, Infallible>>,
-}
+struct SseStream { rx: mpsc::Receiver<Result<Event, Infallible>>, }
 
 impl futures_core::Stream for SseStream {
     type Item = Result<Event, Infallible>;
 
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>,)
+        -> std::task::Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
 // Shared engine state wrapper
-struct AppState {
-    engine: InferenceEngine<ModelBackend>,
-    device: ModelDevice,
+struct AppState { device: ModelDevice,
+    engine: InferenceEngine<ModelBackend, LinearOrQuantized<ModelBackend>>,
 }
 
-#[tokio::main]
-async fn main() {
+#[tokio::main] async fn main() {
     // Initialize logging
     use tracing_subscriber::EnvFilter;
     let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()
@@ -63,12 +59,38 @@ async fn main() {
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
     let vocab_size = tokenizer.get_vocab_size();
 
+    // Parse CLI parameters and Environment Variables for quantization
+    let mut quantize_bits = std::env::var("NANOCHAT_QUANTIZE")
+        .ok().and_then(|v| v.parse::<usize>().ok());
+    let quantize_block = std::env::var("NANOCHAT_QUANTIZE_BLOCK")
+        .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--quantize" && i + 1 < args.len() {
+            if let Ok(bits) = args[i+1].parse::<usize>() { quantize_bits = Some(bits); }
+        }
+    }
+
     // 2. Initialize GPT on WGPU
-    let config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4,
-        n_head: 4, n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), };
+    let mut config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
+        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), quantization: None,
+    };
+
+    if let Some(bits) = quantize_bits {
+        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block, });
+    }
 
     let device = init_device();
-    let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
+    let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
+
+    let gpt = if let Some(q_config) = config.quantization {
+        println!("Dynamically quantizing web server model to INT{} (block = {})...", q_config.bits, q_config.block_size);
+        gpt_fp.quantize(q_config.bits, q_config.block_size)
+    } else {
+        gpt_fp.into_linear_or_quantized()
+    };
+
     let engine = InferenceEngine::new(gpt, tokenizer);
 
     let shared_state = Arc::new(AppState { engine, device });

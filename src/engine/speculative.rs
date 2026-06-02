@@ -1,6 +1,6 @@
 
 use burn::tensor::{Tensor, TensorData, Shape, backend::Backend, Int};
-use crate::{gpt::Gpt, tokenizer::BpeTokenizer,
+use crate::{gpt::{Gpt, ForwardLayer}, tokenizer::BpeTokenizer,
     engine::inference::{InferenceEngine, GeneratorState, sample_next_token},
 };
 
@@ -12,14 +12,15 @@ pub struct SpeculativeState<B: Backend> {
     pub step: usize,
 }
 
-pub struct SpeculativeInferenceEngine<B: Backend> {
-    pub target_engine: InferenceEngine<B>,
-    pub draft_engine: InferenceEngine<B>,
+pub struct SpeculativeInferenceEngine<B: Backend, LTarget: ForwardLayer<B> = burn::nn::Linear<B>,
+    LDraft: ForwardLayer<B> = burn::nn::Linear<B>> {
+    pub target_engine: InferenceEngine<B, LTarget>,
+    pub draft_engine: InferenceEngine<B, LDraft>,
     pub tokenizer: BpeTokenizer,
 }
 
-impl<B: Backend> SpeculativeInferenceEngine<B> {
-    pub fn new(target_model: Gpt<B>, draft_model: Gpt<B>, tokenizer: BpeTokenizer) -> Self {
+impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>> SpeculativeInferenceEngine<B, LTarget, LDraft> {
+    pub fn new(target_model: Gpt<B, LTarget>, draft_model: Gpt<B, LDraft>, tokenizer: BpeTokenizer) -> Self {
         Self {
             target_engine: InferenceEngine::new(target_model, tokenizer.clone()),
             draft_engine: InferenceEngine::new(draft_model, tokenizer.clone()),
@@ -220,11 +221,11 @@ impl<B: Backend> SpeculativeInferenceEngine<B> {
 
         let target_config = crate::gpt::GptConfig { sequence_len: 64,
             vocab_size: tokenizer.get_vocab_size(), n_layer: 2, n_head: 4,
-            n_kv_head: 2, n_embd: 32, window_pattern: "L".to_string(),
+            n_kv_head: 2, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
         let draft_config = crate::gpt::GptConfig { sequence_len: 64,
             vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4,
-            n_kv_head: 2, n_embd: 32, window_pattern: "L".to_string(),
+            n_kv_head: 2, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
         use crate::common::ModelBackend;

@@ -50,8 +50,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
 
     // 2. Initialize Model and Optimizer
-    let config = GptConfig { sequence_len: 256, n_layer: 4, n_head: 4, n_kv_head: 2,
-        n_embd: 64, window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
+    let config = GptConfig { sequence_len: 256, n_layer: 4, n_head: 4, n_kv_head: 2, n_embd: 64,
+        window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(), quantization: None,
     };
 
     let mut model: Gpt<B> = Gpt::new(config.clone(), device);
