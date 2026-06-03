@@ -36,8 +36,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         );
 
         let head_dim = self.model.config.n_embd / self.model.config.n_head;
-        let mut cache = KVCache::new_allocated(self.model.config.n_layer, num_samples,
-            self.model.config.sequence_len, self.model.config.n_kv_head, head_dim, device,);
+        let mut cache = KVCache::new_paged(self.model.config.n_layer, num_samples,
+            self.model.config.sequence_len, self.model.config.n_kv_head, head_dim, 8, device,);
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
 
         // Extract the logits at the last token position

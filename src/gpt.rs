@@ -1,3 +1,4 @@
+
 use serde::{Serialize, Deserialize};
 use crate::engine::quant::LinearOrQuantized;
 use burn::{module::{Module, Param}, nn::{Embedding, Linear},
@@ -91,28 +92,53 @@ fn repeat_kv<B: Backend>(x: Tensor<B, 4>, group_size: usize) -> Tensor<B, 4> {
 
 #[derive(Clone, Debug)]
 pub struct KVCache<B: Backend> {
-    pub k_cache: Vec<Tensor<B, 4>>, // Layer -> [B, seq_len, n_kv_head, head_dim]
-    pub v_cache: Vec<Tensor<B, 4>>, // Layer -> [B, seq_len, n_kv_head, head_dim]
+    pub k_page_pool: Vec<Tensor<B, 4>>, // Layer -> [max_num_pages, page_size, n_kv_head, head_dim]
+    pub v_page_pool: Vec<Tensor<B, 4>>, // Layer -> [max_num_pages, page_size, n_kv_head, head_dim]
+    pub block_table: Tensor<B, 2, Int>, // [B, max_pages_per_seq]
+    pub page_size: usize,
+    pub max_pages_per_seq: usize,
 }
 
 impl<B: Backend> KVCache<B> {
-    pub fn new(n_layer: usize) -> Self {
+    pub fn new(n_layer: usize, device: &B::Device) -> Self {
+        let block_table = Tensor::<B, 2, Int>::zeros([1, 1], device);
         Self {
-            k_cache: Vec::with_capacity(n_layer),
-            v_cache: Vec::with_capacity(n_layer),
+            k_page_pool: Vec::with_capacity(n_layer),
+            v_page_pool: Vec::with_capacity(n_layer),
+            block_table, page_size: 8, max_pages_per_seq: 1,
         }
     }
 
     pub fn new_allocated(n_layer: usize, batch_size: usize, max_seq_len: usize, n_kv_head: usize,
         head_dim: usize, device: &B::Device,) -> Self {
-        let mut k_cache = Vec::with_capacity(n_layer);
-        let mut v_cache = Vec::with_capacity(n_layer);
-        let shape = Shape::new([batch_size, max_seq_len, n_kv_head, head_dim]);
+        Self::new_paged(n_layer, batch_size, max_seq_len, n_kv_head, head_dim, 8, device)
+    }
+
+    pub fn new_paged(n_layer: usize, batch_size: usize, max_seq_len: usize, n_kv_head: usize,
+        head_dim: usize, page_size: usize, device: &B::Device,) -> Self {
+        let max_pages_per_seq = (max_seq_len + page_size - 1) / page_size;
+        let max_num_pages = batch_size * max_pages_per_seq;
+
+        let mut k_page_pool = Vec::with_capacity(n_layer);
+        let mut v_page_pool = Vec::with_capacity(n_layer);
+        let pool_shape = Shape::new([max_num_pages, page_size, n_kv_head, head_dim]);
+
         for _ in 0..n_layer {
-            k_cache.push(Tensor::zeros(shape.clone(), device));
-            v_cache.push(Tensor::zeros(shape.clone(), device));
+            k_page_pool.push(Tensor::zeros(pool_shape.clone(), device));
+            v_page_pool.push(Tensor::zeros(pool_shape.clone(), device));
         }
-        Self { k_cache, v_cache }
+
+        let mut data = Vec::with_capacity(batch_size * max_pages_per_seq);
+        for b in 0..batch_size {
+            for p in 0..max_pages_per_seq {
+                data.push((b * max_pages_per_seq + p) as i32);
+            }
+        }
+        let block_table = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(data, Shape::new([batch_size, max_pages_per_seq])), device,
+        );
+
+        Self { k_page_pool, v_page_pool, block_table, page_size, max_pages_per_seq, }
     }
 }
 
@@ -157,26 +183,61 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         q = rms_norm(q, 1e-5) * 1.2;
         k = rms_norm(k, 1e-5) * 1.2;
 
-        let mask_dims: [usize; 4] = self.mask.shape().dims();
-        let max_seq_len = mask_dims[3];
+        let (mut full_k, mut full_v) = {
+            // 1. Write the new keys and values into the physical page pools
+            for b_idx in 0..b {
+                for i in 0..t {
+                    let pos = step + i;
+                    let logical_page = pos / cache.page_size;
+                    let offset = pos % cache.page_size;
+                    let physical_page_id = b_idx * cache.max_pages_per_seq + logical_page;
 
-        let (mut full_k, mut full_v) = if step == 0 {
-            let full_k = cache.k_cache[layer_idx].clone().slice_assign(
-                [0..b, 0..t, 0..self.n_kv_head, 0..self.head_dim], k,);
-            let full_v = cache.v_cache[layer_idx].clone().slice_assign(
-                [0..b, 0..t, 0..self.n_kv_head, 0..self.head_dim], v,);
-            cache.k_cache[layer_idx] = full_k.clone();
-            cache.v_cache[layer_idx] = full_v.clone();
-            (full_k, full_v)
-        } else {
-            let p = step;
-            let full_k = cache.k_cache[layer_idx].clone().slice_assign(
-                [0..b, p..p+t, 0..self.n_kv_head, 0..self.head_dim], k,);
-            let full_v = cache.v_cache[layer_idx].clone().slice_assign(
-                [0..b, p..p+t, 0..self.n_kv_head, 0..self.head_dim], v,);
-            cache.k_cache[layer_idx] = full_k.clone();
-            cache.v_cache[layer_idx] = full_v.clone();
-            (full_k, full_v)
+                    let k_token = k.clone().slice([b_idx..b_idx+1, i..i+1, 0..self.n_kv_head, 0..self.head_dim])
+                        .reshape([1, 1, self.n_kv_head, self.head_dim]);
+                    let v_token = v.clone().slice([b_idx..b_idx+1, i..i+1, 0..self.n_kv_head, 0..self.head_dim])
+                        .reshape([1, 1, self.n_kv_head, self.head_dim]);
+
+                    cache.k_page_pool[layer_idx] = cache.k_page_pool[layer_idx].clone().slice_assign(
+                        [physical_page_id..physical_page_id+1, offset..offset+1, 0..self.n_kv_head, 0..self.head_dim],
+                        k_token,
+                    );
+                    cache.v_page_pool[layer_idx] = cache.v_page_pool[layer_idx].clone().slice_assign(
+                        [physical_page_id..physical_page_id+1, offset..offset+1, 0..self.n_kv_head, 0..self.head_dim],
+                        v_token,
+                    );
+                }
+            }
+
+            // 2. Reconstruct contiguous history for attention
+            let num_tokens = step + t;
+            let num_pages = (num_tokens + cache.page_size - 1) / cache.page_size;
+
+            let (mut k_seqs, mut v_seqs) = (Vec::with_capacity(b), Vec::with_capacity(b));
+
+            for b_idx in 0..b {
+                let mut k_pages = Vec::with_capacity(num_pages);
+                let mut v_pages = Vec::with_capacity(num_pages);
+                for logical_page in 0..num_pages {
+                    let physical_page_id = b_idx * cache.max_pages_per_seq + logical_page;
+                    let k_page = cache.k_page_pool[layer_idx].clone().slice([
+                        physical_page_id..physical_page_id+1,
+                        0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
+                    ]);
+                    let v_page = cache.v_page_pool[layer_idx].clone().slice([
+                        physical_page_id..physical_page_id+1,
+                        0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
+                    ]);
+                    k_pages.push(k_page);
+                    v_pages.push(v_page);
+                }
+                let (k_pages_cat, v_pages_cat) = (Tensor::cat(k_pages, 1), Tensor::cat(v_pages, 1));
+                let k_seq = k_pages_cat.slice([0..1, 0..num_tokens, 0..self.n_kv_head, 0..self.head_dim]);
+                let v_seq = v_pages_cat.slice([0..1, 0..num_tokens, 0..self.n_kv_head, 0..self.head_dim]);
+                k_seqs.push(k_seq);
+                v_seqs.push(v_seq);
+            }
+
+            (Tensor::cat(k_seqs, 0), Tensor::cat(v_seqs, 0))
         };
 
         let group_size = self.n_head / self.n_kv_head;
@@ -189,12 +250,7 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         let k_t = k_trans.swap_dims(2, 3);
         let mut scores = q_trans.matmul(k_t) * (1.0 / (self.head_dim as f32).sqrt());
 
-        let mask = if step == 0 {
-            self.mask.clone().slice([0..1, 0..1, 0..t, 0..max_seq_len])
-        } else {
-            let p = step;
-            self.mask.clone().slice([0..1, 0..1, p..p+1, 0..max_seq_len])
-        };
+        let mask = self.mask.clone().slice([0..1, 0..1, step..step+t, 0..step+t]);
 
         scores = scores + mask;
 
@@ -686,5 +742,75 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         assert!(loss_val.to_f32() >= 0.0);
 
         let _grads = loss.backward();
+    }
+
+    #[test] fn test_paged_attention_roundtrip() {
+        let device = crate::common::init_device();
+        let config = GptConfig { sequence_len: 256, vocab_size: 280, n_layer: 2, n_head: 4,
+            n_kv_head: 2, n_embd: 64, window_pattern: "SL".to_string(), quantization: None,
+        };
+
+        use crate::common::ModelAutodiffBackend;
+        let gpt: Gpt<ModelAutodiffBackend> = Gpt::new(config, &device);
+
+        let prompt = vec![12, 45, 67, 89, 90];
+        let prompt_len = prompt.len();
+        let num_samples = 2;
+
+        let mut idx_data = Vec::new();
+        for _ in 0..num_samples { idx_data.extend(prompt.iter().map(|&x| x as i32)); }
+
+        // Prefill index tensor
+        let prefill_idx = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
+            TensorData::new(idx_data, Shape::new([num_samples, prompt_len])), &device,
+        );
+
+        let head_dim = gpt.config.n_embd / gpt.config.n_head;
+
+        // Run prefill and 5 steps of autoregressive generation for different page sizes
+        let page_sizes = vec![4, 8, 16];
+        let mut outputs = Vec::new();
+
+        for &page_size in &page_sizes {
+            let mut cache = KVCache::new_paged(gpt.config.n_layer, num_samples,
+                gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, page_size, &device,
+            );
+
+            // 1. Prefill
+            let logits = gpt.forward_with_cache(prefill_idx.clone(), &mut cache, 0);
+            let mut step_logits = vec![logits.clone()];
+
+            // 2. Autoregressive steps
+            let mut current_token = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
+                TensorData::new(vec![90i32; num_samples], Shape::new([num_samples, 1])),
+                &device,
+            );
+
+            for step_idx in 0..5 {
+                let step = prompt_len + step_idx;
+                let logits_step = gpt.forward_with_cache(current_token.clone(), &mut cache, step);
+                step_logits.push(logits_step.clone());
+
+                current_token = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
+                    TensorData::new(vec![91i32; num_samples], Shape::new([num_samples, 1])),
+                    &device,
+                );
+            }
+
+            outputs.push(step_logits);
+        }
+
+        // Assert that the logits are mathematically identical across all page sizes
+        for step in 0..outputs[0].len() {
+            let logits_4 = &outputs[0][step];
+            let logits_8 = &outputs[1][step];
+            let logits_16 = &outputs[2][step];
+
+            let diff_8 = (logits_4.clone() - logits_8.clone()).abs().max().into_scalar().to_f32();
+            let diff_16 = (logits_4.clone() - logits_16.clone()).abs().max().into_scalar().to_f32();
+
+            assert_eq!(diff_8, 0.0, "Logits differ between page_size=4 and page_size=8 at step {}", step);
+            assert_eq!(diff_16, 0.0, "Logits differ between page_size=4 and page_size=16 at step {}", step);
+        }
     }
 //}

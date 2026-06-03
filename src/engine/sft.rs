@@ -171,18 +171,13 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let grads = loss.backward();
 
         let lrm = get_lr_multiplier(step, num_iterations, warmup_steps, 0.5, 0.0);
-        let lr = learning_rate * lrm;
         let wd = get_weight_decay(step, num_iterations, weight_decay);
 
+        let lr = learning_rate * lrm;
         optimizer.step(&mut model, &grads, lr, step, wd);
 
         let loss_val = loss.into_scalar().to_f32();
-
-        if step == 1 {
-            smooth_loss = loss_val;
-        } else {
-            smooth_loss = 0.9 * smooth_loss + 0.1 * loss_val;
-        }
+        smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
 
         if step % 5 == 0 || step == num_iterations {
             tracing::info!(
@@ -214,8 +209,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 512);
         let mut packer = SftPacker::new(&dataset, &tokenizer);
 
-        let batch_size = 2;
-        let max_seq_len = 32;
+        let (batch_size, max_seq_len) = (2, 32);
         let bos_token = tokenizer.get_bos_token_id();
 
         let (rows, mask_rows, row_lengths) = packer.next_batch(batch_size, max_seq_len, bos_token);
