@@ -1,0 +1,7 @@
+# Ignore generated datasets and caches
+*.jsonl
+eval/
+downloads/
+
+# Ignore checkpoints
+*.safetensors
