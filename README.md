@@ -25,6 +25,13 @@
     *   **静态度 attention 掩码**：在模型初始化时直接在 GPU 显存预计算 Attention 掩码并就地 slice 访问，完全消除 Host-to-Device 显存复制。
     *   **零拷贝 GQA 重构**：将 `repeat_kv` 算子重构为 `.reshape()` 和虚拟广播 `.expand()`，实现 100% 内存连续性并消除了显存碎片。
     *   **动态设备切换**：在 `common.rs` 中支持 `BURN_DEVICE=cpu` 环境监测，可在 CPU 后端下以 0.1 秒/步的速度执行无 JIT 开销的极速验证。
+*   **低比特量化与生态对接 (Quantization & Serialization)**：
+    *   **低比特权重量化 (W8/W4 Quantization)**：实现了针对 Linear 投影层的 INT8/INT4 低比特权重只量化（W8A16/W4A16），支持通道行/块对称缩放，通过 Euclidean 移位进行 GPU 端的高性能自适应解包。
+    *   **双向 Safetensors 序列化**：实现了零拷贝的 `.safetensors` 模型参数导出与载入，支持权重转置还原（将 Burn Layout 转换回 PyTorch Layout `[O, I]`），与 HuggingFace 开源生态直接无缝对接。
+*   **高并发推理引擎特性 (Advanced Inference System)**：
+    *   **无损推测解码 (Speculative Decoding)**：基于双模型（Draft + Target）并发并行验证机制，搭配零拷贝 KV-Cache 回滚覆盖（Zero-Overhead KV-Cache Rollback），在 WGPU Metal 硬件加速下实现 100% 数学无损的推理加速。
+    *   **原生 PagedAttention 机制**：实现了基于物理页表（Block Table）的物理内存 KV 页缓存池（`PagedKVCache`），支持在自回归解码步骤中动态写入与按需重构，完全消除端侧部署下的显存碎片。
+    *   **GRPO 强化学习对齐**：整合了 DeepSeek-R1 风格的 GRPO 强化学习框架，无需 Critic 价值网络，使用组内相对奖励归一化计算优势函数，适配 WGPU f16 的半精度稳定性。
 
 ---
 
@@ -129,23 +136,13 @@ cargo run --bin train --release -- --sft
 面向未来，`nanochat-burn` 致力于从小巧、极简的学术复刻演进为**工业级端侧高性能 LLM 系统**。以下为项目的未来路线图规划与最新进展：
 
 ### 1. 🏎️ 系统级与 GPU 算子性能极限优化 (Systems & Kernel Optimization)
-*   **✅ [已实现] 静态 KV-Cache 预分配与算子优化**：
-    *   在 [gpt.rs](file:///Users/mhfan/Devel/nanochat/burn/src/gpt.rs) 中实现了静态 `KVCache` 预分配与就地切片赋值算子 (`slice_assign`)，并将自注意力计算和掩码全面对齐至最大长度。
-    *   在 macOS WGPU/Metal 后端下实现了 **100% 静态 Shape 前向与反向传播计算图**，**完全消除了动态自回归导致的 GPU JIT 编译温身延迟**。
 *   **CubeCL 手写融合算子**：利用 Burn 底层的 CubeCL 编写特化 GPU 算子（如 Fused RMSNorm, Fused RoPE 以及 Fused Softmax），最大化 GPU 硬件吞吐量 (MFU)。
 *   **FlashAttention 集成**：在 LibTorch/CUDA 后端下直接接入硬件级 FlashAttention-2/3 算子，实现企业级大吞吐训练。
 
 ### 2. 🧠 前沿大模型算法升级 (Algorithmic & Modeling Features)
-*   **✅ [已实现] GRPO (Group Relative Policy Optimization) 强化对齐**：
-    *   引入了 DeepSeek-R1 风格的 GRPO 强化学习算法，支持单 Prompt 采样 $N$ 个回答，并在组内以无偏标准差归一化计算 Advantage。
-    *   省去了庞大的 Critic 价值网络，实现了超低显存开销下的在线对齐，全自动适应 GPU 的半精度 $f16$ 稳定性。
-*   **✅ [已实现] 无损推测解码 (Lossless Speculative Decoding)**：
-    *   设计了地道的 `SpeculativeInferenceEngine` 与双模型（Draft Model + Target Model）并发验证架构，支持并行对 $K$ 个草稿 token 进行无损验证。
-    *   实现了 **零开销 KV-Cache 回滚机制**：在 draft token 被拒绝时，仅通过重置 Generator 指针进行 zero-overhead 覆盖，完美规避了显存拷贝与重建开销。
-    *   在 WGPU Metal 硬件加速测试下验证了 **100% token 级的无损一致性 (Mathematical Lossless Parity)**！
-*   **量化适配 (Weight Quantization)**：为 Linear 投影层和 Embedding 层开发 INT8/INT4/NF4 精度量化加载，极大压缩端侧部署模型大小。
+*   **多头投机解码 (Medusa-style Speculative Decoding)**：在主模型上引入预测未来多 Token 的 Draft Heads 结构替代独立小模型，配合验证树算法，在无需额外模型的情况下成倍提升生成吞吐。
+*   **动态 RoPE 旋转位置编码插值 (Dynamic RoPE Scaling)**：引入 NTK-aware RoPE 或 YaRN 频率插值机制，支持模型在推理时动态扩展上下文长度限制。
 
 ### 3. 🌐 高并发服务化与工程生态 (Serving & Ecosystem Integration)
-*   **连续批处理 (Continuous Batching)**：在 Axum Web 服务端支持请求的动态混入与实时剥离，最大化多用户并发吞吐。
-*   **PagedAttention 机制**：实现 Rust 原生的 PagedAttention，以物理 Page 映射非连续 KV-Cache 内存，彻底告别显存碎片。
-*   **Safetensors 生态转换**：提供双向转换工具，支持将 Qwen、Llama 等社区主流小模型一键导出至 `nanochat-burn` 运行。
+*   **连续批处理与迭代级调度 (Continuous Batching & Iteration-level Scheduling)**：在推理服务端打通 PagedAttention，支持在自回归迭代级别动态并入新请求和移除已完成请求，彻底消除了静态批处理的气泡。
+*   **流式注意力与 KV 页驱逐 (StreamingLLM & KV Page Eviction)**：实现 Attention Sinks + 滑动窗口的页缓存淘汰机制，以恒定的物理页池显存支持无限轮对话流。
