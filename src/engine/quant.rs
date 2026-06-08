@@ -234,13 +234,10 @@ pub fn quantize_linear<B: Backend>(linear: burn::nn::Linear<B>, bits: usize,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(test)] mod tests { use super::*;
     use burn::tensor::Distribution;
 
-    #[test]
-    fn test_quantization_w8_rowwise() {
+    #[test] fn test_quantization_w8_rowwise() {
         let device = crate::common::init_device();
         use crate::common::ModelBackend;
 
@@ -268,8 +265,7 @@ mod tests {
         assert!(diff < 0.02, "Error too high: {}", diff);
     }
 
-    #[test]
-    fn test_quantization_w4_blockwise() {
+    #[test] fn test_quantization_w4_blockwise() {
         let device = crate::common::init_device();
         use crate::common::ModelBackend;
 
@@ -297,8 +293,7 @@ mod tests {
         assert!(diff < 0.25, "Error too high: {}", diff);
     }
 
-    #[test]
-    fn test_quantized_linear_forward() {
+    #[test] fn test_quantized_linear_forward() {
         let device = crate::common::init_device();
         use crate::common::ModelBackend;
 

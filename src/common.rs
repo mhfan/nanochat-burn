@@ -12,7 +12,7 @@ pub fn init_device() -> ModelDevice {
     let device = if std::env::var("BURN_DEVICE").unwrap_or_default().to_lowercase() == "cpu" {
         burn::backend::wgpu::WgpuDevice::Cpu
     } else { Default::default() };
-    tracing::info!("Initializing computational device: {:?}", device);
+    //tracing::info!("Initializing computational device: {:?}", device);
     device
 }
 
@@ -56,7 +56,7 @@ pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
 
         // Burn 中转换为标量的写法非常直接
         let loss_val = loss.clone().into_scalar();
-        tracing::info!("Forward Pass Loss: {}", loss_val);
+        tracing::debug!("Forward Pass Loss: {}", loss_val);
         assert!((loss_val.to_f32() - 20.0).abs() < epsilon);
 
         // 5. 触发反向传播
@@ -70,8 +70,8 @@ pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
         //   y = [[2, 4], [6, 8]], loss = 20
         // dy/dx = w^T => x_grad 应该为 [[2.0, 2.0], [2.0, 2.0]]
         // dy/dw = x^T => w_grad 应该为 [[4.0, 4.0], [6.0, 6.0]]
-        tracing::info!("Gradient of x (dy/dx): \n{}", x_grad);
-        tracing::info!("Gradient of w (dy/dw): \n{}", w_grad);
+        tracing::debug!("Gradient of x (dy/dx): \n{}", x_grad);
+        tracing::debug!("Gradient of w (dy/dw): \n{}", w_grad);
 
         let expected_x_grad = [2.0f32, 2.0, 2.0, 2.0];
         for (act, exp) in x_grad.clone().into_data().iter()

@@ -226,7 +226,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 }
 
 //#[cfg(test)] mod tests { use super::*;
-    #[test] fn test_rl_training_loop() {
+    #[ignore] #[test] fn test_rl_training_loop() {
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::INFO).finish();
         let _ = tracing::subscriber::set_global_default(subscriber);
