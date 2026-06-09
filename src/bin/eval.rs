@@ -6,7 +6,7 @@ fn main() {
     tracing::subscriber::set_global_default(subscriber).ok();
 
     use nanochat_burn::common::{ModelBackend, init_device};
-    use nanochat_burn::tokenizer::{MessageContent, BpeTokenizer};
+    use nanochat_burn::tokenizer::BpeTokenizer;
     use nanochat_burn::{gpt::{Gpt, GptConfig}, dataset::SftDataset};
 
     let device = init_device();
@@ -14,20 +14,7 @@ fn main() {
     let sft_dataset_path = "data/sft_train.jsonl";
     let dataset = SftDataset::new(sft_dataset_path).expect("Failed to load SFT dataset");
 
-    let mut corpus = Vec::new();
-    for conv in &dataset.conversations {
-        for msg in &conv.messages {
-            match &msg.content {
-                MessageContent::Simple(s) => corpus.push(s.clone()),
-                MessageContent::Parts(parts) => {
-                    for part in parts {
-                        corpus.push(part.text.clone());
-                    }
-                }
-            }
-        }
-    }
-
+    let corpus = dataset.get_corpus();
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 

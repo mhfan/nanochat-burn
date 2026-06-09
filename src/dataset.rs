@@ -1,6 +1,6 @@
 
 use crate::tokenizer::{Conversation, BpeTokenizer};
-use std::{fs::File, path::{Path, PathBuf}};
+use std::{io, fs::{self, File}, path::{Path, PathBuf}};
 use memmap2::Mmap;
 
 pub struct Shard {
@@ -12,7 +12,7 @@ pub struct Shard {
 pub struct PretrainingDataset { pub shards: Vec<Shard>, }
 
 impl PretrainingDataset {
-    pub fn new<P: AsRef<Path>>(paths: &[P]) -> std::io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
         let mut shards = Vec::new();
         for p in paths {
             let path = p.as_ref().to_path_buf();
@@ -36,22 +36,27 @@ impl PretrainingDataset {
         let byte_start = token_offset * 4;
         let byte_end = (token_offset + len) * 4;
         let bytes = &shard.mmap[byte_start..byte_end];
-        let mut tokens = Vec::with_capacity(len);
-        for chunk in bytes.chunks_exact(4) {
-            tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        match bytemuck::try_cast_slice::<u8, u32>(bytes) {
+            Ok(tokens_u32) => tokens_u32.to_vec(),
+            Err(_) => {
+                let mut tokens = Vec::with_capacity(len);
+                for chunk in bytes.chunks_exact(4) {
+                    tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                tokens
+            }
         }
-        tokens
     }
 }
 
 pub struct SftDataset { pub conversations: Vec<Conversation>, }
 
 impl SftDataset {
-    pub fn new<P: AsRef<Path>>(jsonl_path: P) -> std::io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(jsonl_path: P) -> io::Result<Self> {
         let file = File::open(jsonl_path)?;
-        let reader = std::io::BufReader::new(file);
+        let reader = io::BufReader::new(file);
         let mut conversations = Vec::new();
-        use std::io::BufRead;
+        use io::BufRead;
         for line in reader.lines() {
             let line_str = line?;
             if  line_str.trim().is_empty() { continue; }
@@ -60,17 +65,34 @@ impl SftDataset {
         }
         Ok(SftDataset { conversations })
     }
+
+    pub fn get_corpus(&self) -> Vec<String> {
+        let mut corpus = Vec::new();
+        for conv in &self.conversations {
+            for msg in &conv.messages {
+                match &msg.content {
+                    crate::tokenizer::MessageContent::Simple(s) => corpus.push(s.clone()),
+                    crate::tokenizer::MessageContent::Parts(parts) => {
+                        for part in parts {
+                            corpus.push(part.text.clone());
+                        }
+                    }
+                }
+            }
+        }
+        corpus
+    }
 }
 
 pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
-    text_path: P, bin_path: Q, tokenizer: &BpeTokenizer,) -> std::io::Result<()> {
-    let content = std::fs::read_to_string(text_path)?;
+    text_path: P, bin_path: Q, tokenizer: &BpeTokenizer,) -> io::Result<()> {
+    let content = fs::read_to_string(text_path)?;
     let tokens = tokenizer.encode_ordinary(&content);
     let mut file = File::create(bin_path)?;
-    let mut buf = Vec::with_capacity(tokens.len() * 4);
-    for &tok in &tokens { buf.extend_from_slice(&(tok as u32).to_le_bytes()); }
-    use std::io::Write;
-    file.write_all(&buf)?;
+    let tokens_u32: Vec<u32> = tokens.iter().map(|&tok| tok as u32).collect();
+    let bytes = bytemuck::cast_slice::<u32, u8>(&tokens_u32);
+    use io::Write;
+    file.write_all(bytes)?;
     Ok(())
 }
 
@@ -80,7 +102,7 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
         let text_path = temp_dir.join("test_pretrain.txt");
         let  bin_path = temp_dir.join("test_pretrain.bin");
 
-        std::fs::write(&text_path, "System programming in Rust is elegant and fast.").unwrap();
+        fs::write(&text_path, "System programming in Rust is elegant and fast.").unwrap();
 
         // Train tokenizer on the same corpus
         let corpus = vec!["System programming in Rust is elegant and fast."];
@@ -99,7 +121,7 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
         assert_eq!(decoded, "System programming in Rust is elegant and fast.");
 
         // Clean up
-        let _ = std::fs::remove_file(text_path);
-        let _ = std::fs::remove_file(bin_path);
+        let _ = fs::remove_file(text_path);
+        let _ = fs::remove_file(bin_path);
     }
 //}

@@ -1,6 +1,6 @@
 
 use safetensors::SafeTensors;
-use std::{path::Path, collections::HashMap};
+use std::{path::Path, collections::HashMap, marker::PhantomData};
 use burn::{module::Param, tensor::{Tensor, backend::Backend, TensorData, Shape}};
 use crate::gpt::{Gpt, has_ve};
 
@@ -18,130 +18,139 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>,
         Ok((f32_data, shape))
     };
 
-    let (wte_data, wte_shape) = get_f32_data("transformer.wte.weight")?;
-    let wte_tensor = Tensor::<B, 2>::from_data(TensorData::new(wte_data, Shape::from(wte_shape)), device);
-    gpt.wte.weight = Param::from_tensor(wte_tensor);
+    let load_param = |name: &str| -> Result<Tensor<B, 2>, String> {
+        let (data, shape) = get_f32_data(name)?;
+        Ok(Tensor::<B, 2>::from_data(TensorData::new(data, Shape::from(shape)), device))
+    };
 
-    let (lm_data, lm_shape) = get_f32_data("lm_head.weight")?;
-    let lm_tensor = Tensor::<B, 2>::from_data(TensorData::new(lm_data, Shape::from(lm_shape)), device).transpose();
-    gpt.lm_head.weight = Param::from_tensor(lm_tensor);
+    let load_transposed_param = |name: &str| -> Result<Tensor<B, 2>, String> {
+        Ok(load_param(name)?.transpose())
+    };
+
+    let load_vector = |name: &str| -> Result<Tensor<B, 1>, String> {
+        let (data, shape) = get_f32_data(name)?;
+        Ok(Tensor::<B, 1>::from_data(TensorData::new(data, Shape::from(shape)), device))
+    };
+
+    gpt.wte.weight = Param::from_tensor(load_param("transformer.wte.weight")?);
+    gpt.lm_head.weight = Param::from_tensor(load_transposed_param("lm_head.weight")?);
 
     for i in 0..gpt.config.n_layer {
         let block = &mut gpt.h[i];
 
-        let (q_data, q_shape) = get_f32_data(&format!("transformer.h.{}.attn.c_q.weight", i))?;
-        block.attn.c_q.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(q_data, Shape::from(q_shape)), device).transpose());
-
-        let (k_data, k_shape) = get_f32_data(&format!("transformer.h.{}.attn.c_k.weight", i))?;
-        block.attn.c_k.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(k_data, Shape::from(k_shape)), device).transpose());
-
-        let (v_data, v_shape) = get_f32_data(&format!("transformer.h.{}.attn.c_v.weight", i))?;
-        block.attn.c_v.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(v_data, Shape::from(v_shape)), device).transpose());
-
-        let (proj_data, proj_shape) = get_f32_data(&format!("transformer.h.{}.attn.c_proj.weight", i))?;
-        block.attn.c_proj.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(proj_data, Shape::from(proj_shape)), device).transpose());
+        block.attn.c_q.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.attn.c_q.weight", i))?);
+        block.attn.c_k.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.attn.c_k.weight", i))?);
+        block.attn.c_v.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.attn.c_v.weight", i))?);
+        block.attn.c_proj.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.attn.c_proj.weight", i))?);
 
         if has_ve(i, gpt.config.n_layer) {
-            let (gate_data, gate_shape) = get_f32_data(&format!("transformer.h.{}.attn.ve_gate.weight", i))?;
             if let Some(ref mut gate_linear) = block.attn.ve_gate {
-                gate_linear.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(gate_data, Shape::from(gate_shape)), device).transpose());
+                gate_linear.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.attn.ve_gate.weight", i))?);
             }
         }
 
-        let (fc_data, fc_shape) = get_f32_data(&format!("transformer.h.{}.mlp.c_fc.weight", i))?;
-        block.mlp.c_fc.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(fc_data, Shape::from(fc_shape)), device).transpose());
-
-        let (p_data, p_shape) = get_f32_data(&format!("transformer.h.{}.mlp.c_proj.weight", i))?;
-        block.mlp.c_proj.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(p_data, Shape::from(p_shape)), device).transpose());
+        block.mlp.c_fc.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.mlp.c_fc.weight", i))?);
+        block.mlp.c_proj.weight = Param::from_tensor(load_transposed_param(&format!("transformer.h.{}.mlp.c_proj.weight", i))?);
     }
 
     let mut ve_cnt = 0;
     for i in 0..gpt.config.n_layer {
         if has_ve(i, gpt.config.n_layer) {
-            let (ve_data, ve_shape) = get_f32_data(&format!("value_embeds.{}.weight", i))?;
-            gpt.value_embeds[ve_cnt].weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(ve_data, Shape::from(ve_shape)), device));
+            gpt.value_embeds[ve_cnt].weight = Param::from_tensor(load_param(&format!("value_embeds.{}.weight", i))?);
             ve_cnt += 1;
         }
     }
 
-    let (res_data, res_shape) = get_f32_data("resid_lambdas")?;
-    gpt.resid_lambdas = Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(res_data, Shape::from(res_shape)), device));
-
-    let (x0_data, x0_shape) = get_f32_data("x0_lambdas")?;
-    gpt.x0_lambdas = Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(x0_data, Shape::from(x0_shape)), device));
-
-    let (smear_gate_data, smear_gate_shape) = get_f32_data("smear_gate.weight")?;
-    gpt.smear_gate.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(smear_gate_data, Shape::from(smear_gate_shape)), device).transpose());
-
-    let (smear_lam_data, smear_lam_shape) = get_f32_data("smear_lambda")?;
-    gpt.smear_lambda = Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(smear_lam_data, Shape::from(smear_lam_shape)), device));
-
-    let (back_data, back_shape) = get_f32_data("backout_lambda")?;
-    gpt.backout_lambda = Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(back_data, Shape::from(back_shape)), device));
+    gpt.resid_lambdas = Param::from_tensor(load_vector("resid_lambdas")?);
+    gpt.x0_lambdas = Param::from_tensor(load_vector("x0_lambdas")?);
+    gpt.smear_gate.weight = Param::from_tensor(load_transposed_param("smear_gate.weight")?);
+    gpt.smear_lambda = Param::from_tensor(load_vector("smear_lambda")?);
+    gpt.backout_lambda = Param::from_tensor(load_vector("backout_lambda")?);
 
     Ok(())
 }
 
-fn save_tensor<B: Backend, const D: usize>(name: &str, tensor: Tensor<B, D>,
-    buffers: &mut HashMap<String, Vec<u8>>, shapes: &mut HashMap<String, Vec<usize>>,) {
-    let f32_data = crate::common::tensor_data_to_f32_vec(tensor.clone().into_data());
-    let shape = tensor.shape().dims::<D>().to_vec();
-    let mut u8_data = Vec::with_capacity(f32_data.len() * 4);
-    for &val in &f32_data {
-        u8_data.extend_from_slice(&val.to_le_bytes());
+struct ParamSaver<B: Backend> {
+    buffers: HashMap<String, Vec<u8>>,
+    shapes: HashMap<String, Vec<usize>>,
+    _phantom: PhantomData<B>,
+}
+
+impl<B: Backend> ParamSaver<B> {
+    fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            shapes: HashMap::new(),
+            _phantom: PhantomData,
+        }
     }
-    buffers.insert(name.to_string(), u8_data);
-    shapes.insert(name.to_string(), shape);
+
+    fn save_tensor<const D: usize>(&mut self, name: &str, tensor: Tensor<B, D>) {
+        let f32_data = crate::common::tensor_data_to_f32_vec(tensor.clone().into_data());
+        let shape = tensor.shape().dims::<D>().to_vec();
+        let mut u8_data = Vec::with_capacity(f32_data.len() * 4);
+        for &val in &f32_data {
+            u8_data.extend_from_slice(&val.to_le_bytes());
+        }
+        self.buffers.insert(name.to_string(), u8_data);
+        self.shapes.insert(name.to_string(), shape);
+    }
+
+    fn save_param(&mut self, name: &str, tensor: Tensor<B, 2>) {
+        self.save_tensor(name, tensor);
+    }
+
+    fn save_transposed_param(&mut self, name: &str, tensor: Tensor<B, 2>) {
+        self.save_tensor(name, tensor.transpose());
+    }
+
+    fn save_vector(&mut self, name: &str, tensor: Tensor<B, 1>) {
+        self.save_tensor(name, tensor);
+    }
 }
 
 pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path,) -> Result<(), String> {
-    let (mut buffers, mut shapes) = (HashMap::new(), HashMap::new());
+    let mut saver = ParamSaver::new();
 
-    // 1. Embedding weight
-    save_tensor("transformer.wte.weight", gpt.wte.weight.val(), &mut buffers, &mut shapes);
+    saver.save_param("transformer.wte.weight", gpt.wte.weight.val());
+    saver.save_transposed_param("lm_head.weight", gpt.lm_head.weight.val());
 
-    // 2. LM Head (Transposed back to [O, I])
-    save_tensor("lm_head.weight", gpt.lm_head.weight.val().transpose(), &mut buffers, &mut shapes);
-
-    // 3. Blocks
     for i in 0..gpt.config.n_layer {
         let block = &gpt.h[i];
 
-        save_tensor(&format!("transformer.h.{}.attn.c_q.weight", i), block.attn.c_q.weight.val().transpose(), &mut buffers, &mut shapes);
-        save_tensor(&format!("transformer.h.{}.attn.c_k.weight", i), block.attn.c_k.weight.val().transpose(), &mut buffers, &mut shapes);
-        save_tensor(&format!("transformer.h.{}.attn.c_v.weight", i), block.attn.c_v.weight.val().transpose(), &mut buffers, &mut shapes);
-        save_tensor(&format!("transformer.h.{}.attn.c_proj.weight", i), block.attn.c_proj.weight.val().transpose(), &mut buffers, &mut shapes);
+        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_q.weight", i), block.attn.c_q.weight.val());
+        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_k.weight", i), block.attn.c_k.weight.val());
+        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_v.weight", i), block.attn.c_v.weight.val());
+        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_proj.weight", i), block.attn.c_proj.weight.val());
 
         if has_ve(i, gpt.config.n_layer) {
             if let Some(ref gate_linear) = block.attn.ve_gate {
-                save_tensor(&format!("transformer.h.{}.attn.ve_gate.weight", i), gate_linear.weight.val().transpose(), &mut buffers, &mut shapes);
+                saver.save_transposed_param(&format!("transformer.h.{}.attn.ve_gate.weight", i), gate_linear.weight.val());
             }
         }
 
-        save_tensor(&format!("transformer.h.{}.mlp.c_fc.weight", i), block.mlp.c_fc.weight.val().transpose(), &mut buffers, &mut shapes);
-        save_tensor(&format!("transformer.h.{}.mlp.c_proj.weight", i), block.mlp.c_proj.weight.val().transpose(), &mut buffers, &mut shapes);
+        saver.save_transposed_param(&format!("transformer.h.{}.mlp.c_fc.weight", i), block.mlp.c_fc.weight.val());
+        saver.save_transposed_param(&format!("transformer.h.{}.mlp.c_proj.weight", i), block.mlp.c_proj.weight.val());
     }
 
-    // 4. Value Embeddings
     let mut ve_cnt = 0;
     for i in 0..gpt.config.n_layer {
         if has_ve(i, gpt.config.n_layer) {
-            save_tensor(&format!("value_embeds.{}.weight", i), gpt.value_embeds[ve_cnt].weight.val(), &mut buffers, &mut shapes);
+            saver.save_param(&format!("value_embeds.{}.weight", i), gpt.value_embeds[ve_cnt].weight.val());
             ve_cnt += 1;
         }
     }
 
-    // 5. Global parameters
-    save_tensor("resid_lambdas", gpt.resid_lambdas.val(), &mut buffers, &mut shapes);
-    save_tensor("x0_lambdas", gpt.x0_lambdas.val(), &mut buffers, &mut shapes);
-    save_tensor("smear_gate.weight", gpt.smear_gate.weight.val().transpose(), &mut buffers, &mut shapes);
-    save_tensor("smear_lambda", gpt.smear_lambda.val(), &mut buffers, &mut shapes);
-    save_tensor("backout_lambda", gpt.backout_lambda.val(), &mut buffers, &mut shapes);
+    saver.save_vector("resid_lambdas", gpt.resid_lambdas.val());
+    saver.save_vector("x0_lambdas", gpt.x0_lambdas.val());
+    saver.save_transposed_param("smear_gate.weight", gpt.smear_gate.weight.val());
+    saver.save_vector("smear_lambda", gpt.smear_lambda.val());
+    saver.save_vector("backout_lambda", gpt.backout_lambda.val());
 
     // 6. Serialize to BTreeMap of TensorViews and write to file
     let mut tensors_map = std::collections::BTreeMap::new();
-    for (name, buffer) in &buffers {
-        let shape = &shapes[name];
+    for (name, buffer) in &saver.buffers {
+        let shape = &saver.shapes[name];
         let view = safetensors::tensor::TensorView::new(
             safetensors::tensor::Dtype::F32, shape.clone(), buffer,
         ).map_err(|e| format!("Failed to create TensorView for '{}': {:?}", name, e))?;

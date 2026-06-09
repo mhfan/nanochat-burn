@@ -64,10 +64,8 @@ impl DistributedDataLoader {
                 for row in 0..batch_size {
                     let start = row * (sequence_length + 1);
                     let row_tokens = &tokens[start..start + (sequence_length + 1)];
-                    for i in 0..sequence_length {
-                        x.push(row_tokens[i] as i32);
-                        y.push(row_tokens[i + 1] as i32);
-                    }
+                    x.extend(row_tokens[..sequence_length].iter().map(|&t| t as i32));
+                    y.extend(row_tokens[1..sequence_length + 1].iter().map(|&t| t as i32));
                 }
 
                 let batch = Batch { x, y, shard_idx: active_shard_idx, token_offset: offset, epoch };
@@ -120,11 +118,9 @@ impl SftDataLoader {
                 m.extend(std::iter::repeat(0).take(pad_len));
             }
 
-            for i in 0..self.sequence_length {
-                x.push(ids[i] as i32);
-                y.push(ids[i + 1] as i32);
-                mask.push(m[i + 1]);
-            }
+            x.extend(ids[..self.sequence_length].iter().map(|&id| id as i32));
+            y.extend(ids[1..self.sequence_length + 1].iter().map(|&id| id as i32));
+            mask.extend(m[1..self.sequence_length + 1].iter().copied());
         }
         Some(SftBatch { x, y, mask })
     }
@@ -139,8 +135,9 @@ impl SftDataLoader {
         let t2_txt = temp_dir.join("t2.txt");
         let t2_bin = temp_dir.join("t2.bin");
 
-        std::fs::write(&t1_txt, "Hello world! Contiguous tokens representation.").unwrap();
-        std::fs::write(&t2_txt, "Rust is high throughput and safe memory management.").unwrap();
+        use std::fs;
+        fs::write(&t1_txt, "Hello world! Contiguous tokens representation.").unwrap();
+        fs::write(&t2_txt, "Rust is high throughput and safe memory management.").unwrap();
 
         let corpus = vec![
             "Hello world! Contiguous tokens representation.",
@@ -163,9 +160,9 @@ impl SftDataLoader {
         assert_eq!(batch.x.len(), 4); // B * T = 2 * 2 = 4
 
         // Clean up
-        let _ = std::fs::remove_file(t1_txt);
-        let _ = std::fs::remove_file(t1_bin);
-        let _ = std::fs::remove_file(t2_txt);
-        let _ = std::fs::remove_file(t2_bin);
+        let _ = fs::remove_file(t1_txt);
+        let _ = fs::remove_file(t1_bin);
+        let _ = fs::remove_file(t2_txt);
+        let _ = fs::remove_file(t2_bin);
     }
 //}

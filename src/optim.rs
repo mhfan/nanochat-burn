@@ -1,6 +1,13 @@
 
 use burn::tensor::{Tensor, backend::{Backend, AutodiffBackend}};
+use burn::optim::GradientsParams;
 use crate::gpt::{Gpt, has_ve};
+
+const ADAMW_LR_SCALE: f32 = 0.2;
+const EMBEDDING_LR_SCALE: f32 = 10.0;
+const VALUE_EMBED_LR_SCALE: f32 = 0.5;
+const SCALAR_LR_SCALE: f32 = 25.0;
+const SMEAR_LR_SCALE: f32 = 10.0;
 
 pub struct AdamWState<B: Backend, const D: usize> {
     pub exp_avg: Tensor<B, D>,
@@ -49,24 +56,24 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         }
     }
 
-    pub fn step(&mut self, gpt: &mut Gpt<B>, grads: &B::Gradients,
+    pub fn step(&mut self, gpt: &mut Gpt<B>, grads: &GradientsParams,
         lr: f32, step: usize, weight_decay: f32,) {
         let model_dim = gpt.config.n_embd as f32;
         let dmodel_lr_scale = (model_dim / 768.0).powf(-0.5);
 
-        let adamw_lr = lr * dmodel_lr_scale * 0.2;
-        let embedding_lr = lr * dmodel_lr_scale * 10.0;
-        let value_embed_lr = embedding_lr * 0.5;
-        let scalar_lr = lr * 25.0;
+        let adamw_lr = lr * dmodel_lr_scale * ADAMW_LR_SCALE;
+        let embedding_lr = lr * dmodel_lr_scale * EMBEDDING_LR_SCALE;
+        let value_embed_lr = embedding_lr * VALUE_EMBED_LR_SCALE;
+        let scalar_lr = lr * SCALAR_LR_SCALE;
 
         use burn::module::Param;
         // 1. Embeddings, lm_head, and scalars go into AdamW
-        if let Some(grad) = gpt.wte.weight.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.wte.weight.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.wte.weight.val().inner(), grad, &mut self.wte, embedding_lr, 0.001, 0.8, 0.995, 1e-4, step));
             gpt.wte.weight = Param::from_tensor(new_w);
         }
 
-        if let Some(grad) = gpt.lm_head.weight.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.lm_head.weight.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.lm_head.weight.val().inner(), grad, &mut self.lm_head, adamw_lr, 0.01, 0.8, 0.96, 1e-4, step));
             gpt.lm_head.weight = Param::from_tensor(new_w);
         }
@@ -74,7 +81,7 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         let mut ve_cnt = 0;
         for i in 0..gpt.config.n_layer {
             if has_ve(i, gpt.config.n_layer) {
-                if let Some(grad) = gpt.value_embeds[ve_cnt].weight.val().grad(grads) {
+                if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.value_embeds[ve_cnt].weight.id) {
                     let new_w = Tensor::from_inner(adamw_step(gpt.value_embeds[ve_cnt].weight.val().inner(), grad, &mut self.value_embeds[ve_cnt], value_embed_lr, 0.01, 0.8, 0.995, 1e-4, step));
                     gpt.value_embeds[ve_cnt].weight = Param::from_tensor(new_w);
                 }
@@ -82,29 +89,29 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             }
         }
 
-        if let Some(grad) = gpt.resid_lambdas.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.resid_lambdas.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.resid_lambdas.val().inner(), grad, &mut self.resid_lambdas, scalar_lr * 0.01, 0.05, 0.8, 0.95, 1e-4, step));
             gpt.resid_lambdas = Param::from_tensor(new_w);
         }
 
-        if let Some(grad) = gpt.x0_lambdas.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.x0_lambdas.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.x0_lambdas.val().inner(), grad, &mut self.x0_lambdas, scalar_lr, 0.0, 0.96, 0.95, 1e-4, step));
             gpt.x0_lambdas = Param::from_tensor(new_w);
         }
 
-        let smear_lr = lr * 10.0;
+        let smear_lr = lr * SMEAR_LR_SCALE;
 
-        if let Some(grad) = gpt.smear_gate.weight.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.smear_gate.weight.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.smear_gate.weight.val().inner(), grad, &mut self.smear_gate, smear_lr, 0.0, 0.8, 0.95, 1e-4, step));
             gpt.smear_gate.weight = Param::from_tensor(new_w);
         }
 
-        if let Some(grad) = gpt.smear_lambda.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.smear_lambda.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.smear_lambda.val().inner(), grad, &mut self.smear_lambda, smear_lr, 0.0, 0.8, 0.95, 1e-4, step));
             gpt.smear_lambda = Param::from_tensor(new_w);
         }
 
-        if let Some(grad) = gpt.backout_lambda.val().grad(grads) {
+        if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.backout_lambda.id) {
             let new_w = Tensor::from_inner(adamw_step(gpt.backout_lambda.val().inner(), grad, &mut self.backout_lambda, smear_lr, 0.0, 0.8, 0.95, 1e-4, step));
             gpt.backout_lambda = Param::from_tensor(new_w);
         }
@@ -114,41 +121,41 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             let block = &mut gpt.h[i];
             let state = &mut self.h[i];
 
-            if let Some(grad) = block.attn.c_q.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_q.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.attn.c_q.weight.val().inner(), grad, &mut state.c_q, lr, weight_decay, 0.95, 0.9, 5));
                 block.attn.c_q.weight = Param::from_tensor(new_w);
             }
 
-            if let Some(grad) = block.attn.c_k.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_k.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.attn.c_k.weight.val().inner(), grad, &mut state.c_k, lr, weight_decay, 0.95, 0.9, 5));
                 block.attn.c_k.weight = Param::from_tensor(new_w);
             }
 
-            if let Some(grad) = block.attn.c_v.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_v.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.attn.c_v.weight.val().inner(), grad, &mut state.c_v, lr, weight_decay, 0.95, 0.9, 5));
                 block.attn.c_v.weight = Param::from_tensor(new_w);
             }
 
-            if let Some(grad) = block.attn.c_proj.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_proj.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.attn.c_proj.weight.val().inner(), grad, &mut state.c_proj, lr, weight_decay, 0.95, 0.9, 5));
                 block.attn.c_proj.weight = Param::from_tensor(new_w);
             }
 
             if has_ve(i, gpt.config.n_layer) {
                 if let Some(ref mut gate_linear) = block.attn.ve_gate {
-                    if let Some(grad) = gate_linear.weight.val().grad(grads) {
+                    if let Some(grad) = grads.get::<B::InnerBackend, 2>(gate_linear.weight.id) {
                         let new_w = Tensor::from_inner(muon_step(gate_linear.weight.val().inner(), grad, &mut state.ve_gate, lr, weight_decay, 0.95, 0.9, 5));
                         gate_linear.weight = Param::from_tensor(new_w);
                     }
                 }
             }
 
-            if let Some(grad) = block.mlp.c_fc.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.mlp.c_fc.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.mlp.c_fc.weight.val().inner(), grad, &mut state.c_fc, lr, weight_decay, 0.95, 0.9, 5));
                 block.mlp.c_fc.weight = Param::from_tensor(new_w);
             }
 
-            if let Some(grad) = block.mlp.c_proj.weight.val().grad(grads) {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.mlp.c_proj.weight.id) {
                 let new_w = Tensor::from_inner(muon_step(block.mlp.c_proj.weight.val().inner(), grad, &mut state.c_proj_mlp, lr, weight_decay, 0.95, 0.9, 5));
                 block.mlp.c_proj.weight = Param::from_tensor(new_w);
             }
@@ -167,7 +174,7 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
     });
 
     s.exp_avg = s.exp_avg.clone().mul_scalar(beta1) + grad.clone().mul_scalar(1.0 - beta1);
-    s.exp_avg_sq = s.exp_avg_sq.clone().mul_scalar(beta2) + grad.clone().powf_scalar(2.0).mul_scalar(1.0 - beta2);
+    s.exp_avg_sq = s.exp_avg_sq.clone().mul_scalar(beta2) + grad.powf_scalar(2.0).mul_scalar(1.0 - beta2);
 
     let bias1 = 1.0 - beta1.powi(step as i32);
     let bias2 = 1.0 - beta2.powi(step as i32);
@@ -194,8 +201,8 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
         }
     });
 
-    s.momentum_buffer = s.momentum_buffer.clone().mul_scalar(momentum) + grad.clone().mul_scalar(1.0 - momentum);
-    let g = grad.mul_scalar(1.0 - momentum) + s.momentum_buffer.clone().mul_scalar(momentum);
+    s.momentum_buffer = s.momentum_buffer.clone().mul_scalar(momentum) + grad.mul_scalar(1.0 - momentum);
+    let g = s.momentum_buffer.clone();
 
     let g_scaled = g.clone().mul_scalar(10000.0);
     let norm = g_scaled.powf_scalar(2.0).sum().clamp(0.0, 1e10).sqrt().mul_scalar(0.0001);
@@ -215,15 +222,17 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
         for i in 0..steps {
             let (a, b, c) = polar_express_coeffs[i];
             let A = X.clone().transpose().matmul(X.clone());
-            let B = A.clone().mul_scalar(b) + A.clone().matmul(A.clone()).mul_scalar(c);
-            X = X.clone().mul_scalar(a) + X.clone().matmul(B);
+            let A_sq = A.clone().matmul(A.clone());
+            let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
+            X = X.clone().mul_scalar(a) + X.matmul(B);
         }
     } else {
         for i in 0..steps {
             let (a, b, c) = polar_express_coeffs[i];
             let A = X.clone().matmul(X.clone().transpose());
-            let B = A.clone().mul_scalar(b) + A.clone().matmul(A.clone()).mul_scalar(c);
-            X = X.clone().mul_scalar(a) + B.matmul(X.clone());
+            let A_sq = A.clone().matmul(A.clone());
+            let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
+            X = X.clone().mul_scalar(a) + B.matmul(X);
         }
     }
     let mut g_ortho = X;

@@ -1,5 +1,5 @@
 
-use std::{path::Path, time::Instant};
+use std::{path::Path, time::Instant, iter};
 use burn::{prelude::ToElement, tensor::{Tensor, Int, backend::AutodiffBackend}};
 use crate::{gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
     dataset::SftDataset, optim::MuonAdamW, engine::{get_lr_multiplier, get_weight_decay},
@@ -17,6 +17,7 @@ impl SftPacker {
             let (ids, mask) = tokenizer.render_conversation(conv, usize::MAX);
             conversations.push((ids, mask));
         }
+        conversations.sort_by_key(|(conv, _)| conv.len());
         SftPacker { conversations, cursor: 0 }
     }
 
@@ -36,25 +37,17 @@ impl SftPacker {
             while row.len() < row_capacity {
                 let remaining = row_capacity - row.len();
 
-                let mut best_idx = None;
-                let mut best_len = 0;
+                let idx_limit = self.conversations.partition_point(|(conv, _)| conv.len() <= remaining);
 
-                for (idx, (conv, _)) in self.conversations.iter().enumerate() {
-                    let conv_len = conv.len();
-                    if conv_len <= remaining && conv_len > best_len {
-                        best_idx = Some(idx);
-                        best_len = conv_len;
-                    }
-                }
-
-                if let Some(idx) = best_idx {
-                    let (conv, conv_mask) = self.conversations.remove(idx);
+                if idx_limit > 0 {
+                    let best_idx = idx_limit - 1;
+                    let (conv, conv_mask) = self.conversations.remove(best_idx);
                     row.extend(conv);
                     mask_row.extend(conv_mask);
                 } else {
                     content_len = row.len();
-                    row.extend(std::iter::repeat(bos_token).take(remaining));
-                    mask_row.extend(std::iter::repeat(0).take(remaining));
+                    row.extend(iter::repeat(bos_token).take(remaining));
+                    mask_row.extend(iter::repeat(0).take(remaining));
                     padded = true;
                     break;
                 }
@@ -93,19 +86,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     let dataset = SftDataset::new(sft_dataset_path).expect("Failed to load SFT dataset");
     tracing::info!("Loaded SFT dataset with {} conversations", dataset.conversations.len());
 
-    let mut corpus = Vec::new();
-    for conv in &dataset.conversations {
-        for msg in &conv.messages {
-            match &msg.content {
-                crate::tokenizer::MessageContent::Simple(s) => corpus.push(s.clone()),
-                crate::tokenizer::MessageContent::Parts(parts) => {
-                    for part in parts {
-                        corpus.push(part.text.clone());
-                    }
-                }
-            }
-        }
-    }
+    let corpus = dataset.get_corpus();
 
     tracing::info!("Training BpeTokenizer on {} SFT text fragments...", corpus.len());
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
@@ -146,19 +127,17 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
             let content_len = row_lengths[i];
             let row_mask = &mask_rows[i];
 
-            for j in 0..max_seq_len {
-                flat_inputs.push(row[j] as i32);
-            }
+            flat_inputs.extend(row[..max_seq_len].iter().map(|&x| x as i32));
 
-            for j in 1..=max_seq_len {
+            flat_targets.extend((1..=max_seq_len).map(|j| {
                 let mask_val = row_mask[j];
                 let is_padding = j >= content_len;
                 if mask_val == 0 || is_padding {
-                    flat_targets.push(-1);
+                    -1
                 } else {
-                    flat_targets.push(row[j] as i32);
+                    row[j] as i32
                 }
-            }
+            }));
         }
 
         let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)
@@ -172,9 +151,10 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
 
         let lrm = get_lr_multiplier(step, num_iterations, warmup_steps, 0.5, 0.0);
         let wd = get_weight_decay(step, num_iterations, weight_decay);
-
         let lr = learning_rate * lrm;
-        optimizer.step(&mut model, &grads, lr, step, wd);
+
+        let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
+        optimizer.step(&mut model, &grads_params, lr, step, wd);
 
         let loss_val = loss.into_scalar().to_f32();
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
@@ -192,7 +172,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   SFT Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    let checkpoint_path = std::path::Path::new("data/sft_checkpoint.safetensors");
+    let checkpoint_path = Path::new("data/sft_checkpoint.safetensors");
     tracing::info!("Saving SFT checkpoint to {:?}...", checkpoint_path);
     if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
         tracing::error!("Failed to save SFT checkpoint: {}", e);

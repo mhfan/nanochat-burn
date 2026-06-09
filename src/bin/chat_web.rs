@@ -2,7 +2,7 @@
 use axum::{routing::{get, post}, Router, Json,
     response::{sse::{Event, KeepAlive, Sse}, Html, IntoResponse},
 };
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::Arc, env};
 use tokio::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
@@ -60,12 +60,12 @@ struct AppState { device: ModelDevice,
     let vocab_size = tokenizer.get_vocab_size();
 
     // Parse CLI parameters and Environment Variables for quantization
-    let mut quantize_bits = std::env::var("NANOCHAT_QUANTIZE")
+    let mut quantize_bits = env::var("NANOCHAT_QUANTIZE")
         .ok().and_then(|v| v.parse::<usize>().ok());
-    let quantize_block = std::env::var("NANOCHAT_QUANTIZE_BLOCK")
+    let quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
         .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = env::args().collect();
     for i in 0..args.len() {
         if args[i] == "--quantize" && i + 1 < args.len() {
             if let Ok(bits) = args[i+1].parse::<usize>() { quantize_bits = Some(bits); }

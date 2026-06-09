@@ -1,20 +1,11 @@
 
-use std::{path::Path, time::Instant};
+use std::{path::Path, time::Instant, iter};
 use burn::{prelude::ToElement, tensor::{Tensor, Int, backend::AutodiffBackend}};
 use crate::{gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer, dataset::SftDataset,
     optim::MuonAdamW, engine::inference::InferenceEngine,
 };
 
-fn extract_answer(text: &str) -> Option<i32> {
-    // Find "#### " marker and parse the number following it
-    let marker = "#### ";
-    if let Some(idx) = text.rfind(marker) {
-        let num_part = text[idx + marker.len()..].trim();
-        // Remove commas or other non-digit chars
-        let clean_num: String = num_part.chars().filter(|c| c.is_digit(10) || *c == '-').collect();
-        clean_num.parse::<i32>().ok()
-    } else { None }
-}
+use crate::common::extract_answer;
 
 pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
@@ -31,19 +22,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("Loaded RL dataset with {} questions", dataset.conversations.len());
 
     // 1. Train/load tokenizer
-    let mut corpus = Vec::new();
-    for conv in &dataset.conversations {
-        for msg in &conv.messages {
-            match &msg.content {
-                crate::tokenizer::MessageContent::Simple(s) => corpus.push(s.clone()),
-                crate::tokenizer::MessageContent::Parts(parts) => {
-                    for part in parts {
-                        corpus.push(part.text.clone());
-                    }
-                }
-            }
-        }
-    }
+    let corpus = dataset.get_corpus();
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 
@@ -146,26 +125,31 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let mut flat_targets = Vec::with_capacity(num_sequences * (max_len - 1));
 
         for (i, rollout) in all_rollouts.iter().enumerate() {
-            let mut padded_rollout = rollout.clone();
-            let mut padded_mask = all_masks[i].clone();
+            flat_inputs.extend(
+                rollout.iter().copied()
+                    .chain(iter::repeat(assistant_end))
+                    .take(max_len - 1)
+                    .map(|tok| tok as i32)
+            );
 
-            let pad_len = max_len.saturating_sub(rollout.len());
-            padded_rollout.extend(std::iter::repeat(assistant_end).take(pad_len));
-            padded_mask.extend(std::iter::repeat(0).take(pad_len));
+            let mask_iter = all_masks[i].iter().copied().chain(iter::repeat(0));
+            let rollout_padded_iter = rollout.iter().copied().chain(iter::repeat(assistant_end));
 
-            // inputs are first max_len - 1
-            for j in 0..(max_len - 1) { flat_inputs.push(padded_rollout[j] as i32); }
-
-            // targets are shifted by 1
-            for j in 1..max_len {
-                let mask_val = padded_mask[j];
-                let is_padding = j >= rollout.len();
-                if mask_val == 0 || is_padding {
-                    flat_targets.push(-1);
-                } else {
-                    flat_targets.push(padded_rollout[j] as i32);
-                }
-            }
+            flat_targets.extend(
+                rollout_padded_iter.zip(mask_iter)
+                    .skip(1)
+                    .take(max_len - 1)
+                    .enumerate()
+                    .map(|(idx, (tok, mask_val))| {
+                        let j = idx + 1;
+                        let is_padding = j >= rollout.len();
+                        if mask_val == 0 || is_padding {
+                            -1
+                        } else {
+                            tok as i32
+                        }
+                    })
+            );
         }
 
         let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)
@@ -182,10 +166,9 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let unreduced_2d = unreduced.reshape([num_sequences, max_len - 1]);
 
         // Broadcast advantages to [num_sequences, max_len - 1] and multiply
-        let mut flat_adv_seq = Vec::with_capacity(num_sequences * (max_len - 1));
-        for i in 0..num_sequences {
-            flat_adv_seq.extend(std::iter::repeat(all_advantages[i]).take(max_len - 1));
-        }
+        let flat_adv_seq: Vec<f32> = all_advantages.iter()
+            .flat_map(|&adv| iter::repeat(adv).take(max_len - 1))
+            .collect();
         let advantages_tensor = Tensor::<B, 1>::from_data(flat_adv_seq.as_slice(), device)
             .reshape([num_sequences, max_len - 1]);
 
@@ -199,7 +182,9 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let lrm = 1.0 - (step as f32 / num_steps as f32);
         let lr = learning_rate * lrm;
         tracing::info!("  Running optimizer update...");
-        optimizer.step(&mut model, &grads, lr, step, 0.0);
+
+        let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
+        optimizer.step(&mut model, &grads_params, lr, step, 0.0);
         tracing::info!("  Optimizer update completed!");
 
         let loss_val = loss.into_scalar().to_f32();
@@ -216,7 +201,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   RL Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    let checkpoint_path = std::path::Path::new("data/rl_checkpoint.safetensors");
+    let checkpoint_path = Path::new("data/rl_checkpoint.safetensors");
     tracing::info!("Saving RL checkpoint to {:?}...", checkpoint_path);
     if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
         tracing::error!("Failed to save RL checkpoint: {}", e);

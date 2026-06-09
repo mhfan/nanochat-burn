@@ -28,14 +28,7 @@ pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalIte
     Ok(items)
 }
 
-fn extract_answer(text: &str) -> Option<i32> {
-    let marker = "#### ";
-    if let Some(idx) = text.rfind(marker) {
-        let num_part = text[idx + marker.len()..].trim();
-        let clean_num: String = num_part.chars().filter(|c| c.is_digit(10) || *c == '-').collect();
-        clean_num.parse::<i32>().ok()
-    } else { None }
-}
+use crate::common::extract_answer;
 
 pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     items: &[EvalItem], device: &B::Device,) -> f32 {

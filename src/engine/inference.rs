@@ -28,7 +28,9 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         device: &B::Device,) -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
         let mut batch_idx_data = Vec::with_capacity(num_samples * prompt_len);
-        for _ in 0..num_samples { for &t in prompt_tokens { batch_idx_data.push(t as i32); } }
+        for _ in 0..num_samples {
+            batch_idx_data.extend(prompt_tokens.iter().map(|&t| t as i32));
+        }
 
         let idx = Tensor::<B, 2, Int>::from_data(
             TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])),
@@ -222,8 +224,12 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let mut indices: Vec<usize> = (0..vocab_size).collect();
         if let Some(k) = top_k {
             let k = k.min(vocab_size);
-            indices.sort_by(|&i, &j| sample_logits[j].partial_cmp(&sample_logits[i]).unwrap());
-            for &idx in &indices[k..] { sample_logits[idx] = -1e9; }
+            if k < vocab_size {
+                indices.select_nth_unstable_by(k, |&i, &j| {
+                    sample_logits[j].partial_cmp(&sample_logits[i]).unwrap()
+                });
+                for &idx in &indices[k..] { sample_logits[idx] = -1e9; }
+            }
         }
 
         // 5. Stable Softmax & Multinomial sampling

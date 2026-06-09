@@ -1,7 +1,7 @@
 
 use std::time::Instant;
 use burn::{prelude::ToElement, tensor::{Tensor, TensorData, Shape, backend::{Backend, AutodiffBackend}, Int}};
-use crate::{gpt::Gpt, tokenizer::BpeTokenizer, dataloader::DistributedDataLoader, optim::MuonAdamW, };
+use crate::{gpt::Gpt, tokenizer::BpeTokenizer, dataloader::DistributedDataLoader, optim::MuonAdamW};
 
 pub mod calculator;
 pub mod inference;
@@ -141,7 +141,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let grad_accum_steps = self.config.total_batch_size / world_tokens_per_fwdbwd;
 
         let mut step_loss = 0.0f32;
-        let mut grads = None;
+        let mut accumulator = burn::optim::GradientsAccumulator::new();
 
         for _ in 0..grad_accum_steps {
             if let Some(batch) = loader.next_batch().await {
@@ -159,22 +159,19 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
                 step_loss += loss.clone().into_scalar().to_f32();
 
                 let step_grads = loss.backward();
-                if grads.is_none() { grads = Some(step_grads); } else {
-                    // Accumulate gradients manually in the container
-                    // Note: In typical autodiff, backprop automatically updates the grad registers
-                }
+                let step_grads_params = burn::optim::GradientsParams::from_grads(step_grads, &self.model);
+                accumulator.accumulate(&self.model, step_grads_params);
             }
         }
 
         // Apply optimizer update step
-        if let Some(g) = grads {
-            let lrm = get_lr_multiplier(self.step, self.config.num_iterations,
-                self.config.warmup_steps, self.config.warmdown_ratio, self.config.final_lr_frac,);
-            let lr = self.config.learning_rate * lrm;
-            let wd = get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
+        let g = accumulator.grads();
+        let lrm = get_lr_multiplier(self.step, self.config.num_iterations,
+            self.config.warmup_steps, self.config.warmdown_ratio, self.config.final_lr_frac,);
+        let lr = self.config.learning_rate * lrm;
+        let wd = get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
 
-            self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
-        }
+        self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
 
         // Zero out gradients for the next optimization step
         // In Burn, since we use Param and autodiff grads are returned as a container,

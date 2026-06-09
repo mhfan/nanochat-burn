@@ -1,5 +1,5 @@
 
-use burn::{tensor::{f16, backend::BackendTypes}, backend::{wgpu::Wgpu, autodiff::Autodiff}};
+use burn::{tensor::{f16, backend::BackendTypes, DType}, backend::{wgpu::Wgpu, autodiff::Autodiff}};
 
 /// 定义默认的 GPU 后端与自动微分包装
 //pub type ModelBackend = Wgpu;
@@ -16,15 +16,34 @@ pub fn init_device() -> ModelDevice {
     device
 }
 
+pub fn extract_answer(text: &str) -> Option<i32> {
+    let marker = "#### ";
+    if let Some(idx) = text.rfind(marker) {
+        let num_part = text[idx + marker.len()..].trim();
+        let clean_num: String = num_part.chars().filter(|c| c.is_digit(10) || *c == '-').collect();
+        clean_num.parse::<i32>().ok()
+    } else { None }
+}
+
 pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
-    match data.to_vec::<f32>() {
-        Ok(v) => v,
-        Err(_) => {
+    match data.dtype {
+        DType::F32 => data.to_vec::<f32>().unwrap(),
+        DType::F16 => {
             let f16_vec = data.to_vec::<f16>().unwrap();
             f16_vec.into_iter().map(|v| v.to_f32()).collect()
         }
+        _ => {
+            match data.to_vec::<f32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    let f16_vec = data.to_vec::<f16>().unwrap();
+                    f16_vec.into_iter().map(|v| v.to_f32()).collect()
+                }
+            }
+        }
     }
 }
+
 
 //#[cfg(test)] mod tests { use super::*;
     /// 执行数值校验与反向传播管道验证

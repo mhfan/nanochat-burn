@@ -1,5 +1,5 @@
 
-use std::{io::{self, Write}, time::Instant};
+use std::{io::{self, Write}, time::Instant, env};
 use nanochat_burn::common::{ModelBackend, init_device};
 use nanochat_burn::{gpt::{Gpt, GptConfig}, engine::inference::InferenceEngine};
 use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
@@ -32,10 +32,10 @@ fn main() {
     println!("Vocabulary size: {}", vocab_size);
 
     // Parse CLI parameters and Environment Variables for quantization
-    let args: Vec<String> = std::env::args().collect();
-    let mut quantize_bits = std::env::var("NANOCHAT_QUANTIZE")
+    let args: Vec<String> = env::args().collect();
+    let mut quantize_bits = env::var("NANOCHAT_QUANTIZE")
         .ok().and_then(|v| v.parse::<usize>().ok());
-    let mut quantize_block = std::env::var("NANOCHAT_QUANTIZE_BLOCK")
+    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
         .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
     for i in 0..args.len() {

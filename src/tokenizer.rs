@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{collections::HashMap, sync::OnceLock, borrow::Cow};
 use serde::{Serialize, Deserialize};
 use fancy_regex::Regex;
 use rayon::prelude::*;
@@ -271,26 +271,31 @@ impl BpeTokenizer {
         };
 
         // 1. Preprocess messages to handle system messages (merging them into first user message)
-        let mut messages = conversation.messages.clone();
-        if !messages.is_empty() && messages[0].role == "system" {
-            if messages.len() < 2 {
+        let messages: Cow<'_, [ConversationMessage]> = if !conversation.messages.is_empty()
+            && conversation.messages[0].role == "system"
+        {
+            if conversation.messages.len() < 2 {
                 panic!("System message must be followed by a user message");
             }
-            assert_eq!(messages[1].role, "user", "System message must be followed by a user message");
+            assert_eq!(conversation.messages[1].role, "user", "System message must be followed by a user message");
 
-            let system_content = match &messages[0].content {
+            let system_content = match &conversation.messages[0].content {
                 MessageContent::Simple(s) => s.clone(),
                 MessageContent::Parts(_) => panic!("System message cannot have multipart content"),
             };
 
-            let user_content = match &messages[1].content {
+            let user_content = match &conversation.messages[1].content {
                 MessageContent::Simple(s) => s.clone(),
                 MessageContent::Parts(_) => panic!("User message cannot have multipart content"),
             };
 
-            messages[1].content = MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
-            messages.remove(0);
-        }
+            let mut cloned_messages = conversation.messages.clone();
+            cloned_messages[1].content = MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
+            cloned_messages.remove(0);
+            Cow::Owned(cloned_messages)
+        } else {
+            Cow::Borrowed(&conversation.messages)
+        };
 
         assert!(!messages.is_empty(), "Conversation must have at least one message");
 

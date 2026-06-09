@@ -1,11 +1,10 @@
 
-use burn::module::{Module, Param};
-use burn::tensor::{backend::Backend, Int, Tensor};
+use burn::{nn::Linear, module::{Module, Param}, tensor::{backend::Backend, Int, Tensor}};
 use crate::gpt::ForwardLayer;
 
 #[derive(Module, Debug)]
 pub enum LinearOrQuantized<B: Backend> {
-    Standard(burn::nn::Linear<B>),
+    Standard(Linear<B>),
     Quantized(QuantizedLinear<B>),
 }
 
@@ -143,7 +142,7 @@ impl<B: Backend> QuantizedLinear<B> {
 }
 
 /// Dynamically quantize a standard floating-point Linear layer into a QuantizedLinear layer in-place
-pub fn quantize_linear<B: Backend>(linear: burn::nn::Linear<B>, bits: usize,
+pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     block_size: usize,) -> QuantizedLinear<B> {
     let _device = linear.weight.device();
 
@@ -243,7 +242,7 @@ pub fn quantize_linear<B: Backend>(linear: burn::nn::Linear<B>, bits: usize,
 
         // Shape [64, 128] is divisible by 4 and 8
         let weight = Tensor::<ModelBackend, 2>::random([64, 128], Distribution::Normal(0.0, 1.0), &device);
-        let linear = burn::nn::Linear {
+        let linear = Linear {
             weight: Param::from_tensor(weight.clone()),
             bias: None,
         };
@@ -271,7 +270,7 @@ pub fn quantize_linear<B: Backend>(linear: burn::nn::Linear<B>, bits: usize,
 
         // Shape [64, 128]
         let weight = Tensor::<ModelBackend, 2>::random([64, 128], Distribution::Normal(0.0, 1.0), &device);
-        let linear = burn::nn::Linear {
+        let linear = Linear {
             weight: Param::from_tensor(weight.clone()),
             bias: None,
         };
@@ -299,7 +298,7 @@ pub fn quantize_linear<B: Backend>(linear: burn::nn::Linear<B>, bits: usize,
 
         let weight = Tensor::<ModelBackend, 2>::random([64, 128], Distribution::Normal(0.0, 0.5), &device);
         let bias = Tensor::<ModelBackend, 1>::random([128], Distribution::Normal(0.0, 0.1), &device);
-        let linear = burn::nn::Linear {
+        let linear = Linear {
             weight: Param::from_tensor(weight.clone()),
             bias: Some(Param::from_tensor(bias.clone())),
         };
