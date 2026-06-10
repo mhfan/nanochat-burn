@@ -43,14 +43,12 @@ pub struct MuonAdamW<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> MuonAdamW<B> {
     pub fn new(n_layer: usize) -> Self {
-        let mut value_embeds = Vec::with_capacity(n_layer);
-        let mut h = Vec::with_capacity(n_layer);
-        for _ in 0..n_layer {
-            value_embeds.push(None);
-            h.push(BlockMuonState { c_q: None, c_k: None, c_v: None,
-                c_proj: None, ve_gate: None, c_fc: None, c_proj_mlp: None,
-            });
-        }
+        let value_embeds = (0..n_layer).map(|_| None).collect();
+        let h = (0..n_layer)
+            .map(|_| BlockMuonState {
+                c_q: None, c_k: None, c_v: None, c_proj: None,
+                ve_gate: None, c_fc: None, c_proj_mlp: None,
+            }).collect();
         Self { wte: None, lm_head: None, value_embeds, resid_lambdas: None,
             x0_lambdas: None, smear_gate: None, smear_lambda: None, backout_lambda: None, h,
         }

@@ -86,10 +86,9 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
                 continue;
             }
 
-            let is_forced = !state.forced_tokens[i].is_empty();
-            let next_tok = if is_forced {
-                state.forced_tokens[i].pop_front().unwrap()
-            } else { sampled_tokens[i] };
+            let next_tok_opt = state.forced_tokens[i].pop_front();
+            let is_forced = next_tok_opt.is_some();
+            let next_tok = next_tok_opt.unwrap_or(sampled_tokens[i]);
 
             next_token_column.push(next_tok);
             state.current_tokens[i].push(next_tok);

@@ -21,9 +21,10 @@ pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalIte
     let mut items = Vec::new();
     for line in reader.lines() {
         let line_str = line?;
-        if line_str.trim().is_empty() { continue; }
-        let item: EvalItem = serde_json::from_str(&line_str)?;
-        items.push(item);
+        let trimmed = line_str.trim();
+        if !trimmed.is_empty() {
+            items.push(serde_json::from_str(trimmed)?);
+        }
     }
     Ok(items)
 }
@@ -55,21 +56,15 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
             vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]
         });
 
-        let mut best_letter = String::new();
-        let mut best_logit = f32::NEG_INFINITY;
-        for letter in &letters {
-            let letter_tokens = tokenizer.encode_ordinary(letter);
-            if !letter_tokens.is_empty() {
-                let token_id = letter_tokens[0];
-                if token_id < logits_vec.len() {
-                    let logit = logits_vec[token_id];
-                    if logit > best_logit {
-                        best_logit = logit;
-                        best_letter = letter.clone();
-                    }
-                }
-            }
-        }
+        let best_letter = letters.iter()
+            .filter_map(|letter| {
+                let letter_tokens = tokenizer.encode_ordinary(letter);
+                letter_tokens.first().copied().and_then(|token_id| {
+                    logits_vec.get(token_id).map(|&logit| (letter, logit))
+                })
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(letter, _)| letter.clone()).unwrap_or_default();
 
         if best_letter == ground_truth { correct += 1; }
         total += 1;

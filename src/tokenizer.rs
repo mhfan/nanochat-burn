@@ -125,15 +125,7 @@ impl BpeTokenizer {
                 }
             }
 
-            // Find the most frequent pair
-            let mut best_pair = None;
-            let mut max_count = 0;
-            for (pair, &count) in &pair_counts {
-                if count > max_count {
-                    max_count = count;
-                    best_pair = Some(*pair);
-                }
-            }
+            let best_pair = pair_counts.iter().max_by_key(|&(_, &count)| count).map(|(&pair, _)| pair);
 
             if let Some(pair) = best_pair {
                 let new_token_id = current_vocab_size;
@@ -189,20 +181,12 @@ impl BpeTokenizer {
         let mut parts: Vec<(usize, usize)> = (0..piece.len()).map(|i| (i, 1)).collect();
 
         loop {
-            let mut best_pair_idx = None;
-            let mut best_rank = usize::MAX;
-
-            for i in 0..parts.len() - 1 {
-                let start = parts[i].0;
-                let len = parts[i].1 + parts[i + 1].1;
-                let merged_bytes = &piece[start..start + len];
-                if let Some(&rank) = self.mergeable_ranks.get(merged_bytes) {
-                    if rank < best_rank {
-                        best_rank = rank;
-                        best_pair_idx = Some(i);
-                    }
-                }
-            }
+            let best_pair_idx = (0..parts.len() - 1)
+                .filter_map(|i| {
+                    let start = parts[i].0;
+                    let len = parts[i].1 + parts[i + 1].1;
+                    self.mergeable_ranks.get(&piece[start..start + len]).map(|&rank| (i, rank))
+                }).min_by_key(|&(_, rank)| rank).map(|(i, _)| i);
 
             if let Some(idx) = best_pair_idx {
                 parts[idx].1 += parts[idx + 1].1;

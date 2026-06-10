@@ -55,9 +55,10 @@ impl SftDataset {
         use io::BufRead;
         for line in reader.lines() {
             let line_str = line?;
-            if  line_str.trim().is_empty() { continue; }
-            let conversation: Conversation = serde_json::from_str(&line_str)?;
-            conversations.push(conversation);
+            let trimmed = line_str.trim();
+            if !trimmed.is_empty() {
+                conversations.push(serde_json::from_str(trimmed)?);
+            }
         }
         Ok(SftDataset { conversations })
     }
