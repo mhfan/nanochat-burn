@@ -51,10 +51,11 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>> SpeculativeI
         // 1. Autoregressively draft K tokens using the fast Draft Model
         let last_tok = *state.current_tokens.last().unwrap();
         let mut draft_tokens = Vec::with_capacity(k_spec);
+        let draft_vocab_size = self.draft_engine.model.config.vocab_size;
         let mut cur_draft_logits = self.draft_engine.model.forward_with_cache(
             Tensor::<B, 2, Int>::from_data(TensorData::new(vec![last_tok as i32], Shape::new([1, 1])), device),
             &mut state.draft_state.cache, state.step - 1,
-        ).slice([0..1, 0..1, 0..self.draft_engine.model.config.vocab_size]).reshape([1, self.draft_engine.model.config.vocab_size]);
+        ).reshape([1, draft_vocab_size]);
 
         let mut temp_draft_state = GeneratorState {
             cache: state.draft_state.cache.clone(),
@@ -115,9 +116,10 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>> SpeculativeI
             let target_logits_for_verify = if i == 0 {
                 target_logits.clone()
             } else {
+                let vocab_size = self.target_engine.model.config.vocab_size;
                 target_logits_3d.clone()
-                    .slice([0..1, (i - 1)..i, 0..self.target_engine.model.config.vocab_size])
-                    .reshape([1, self.target_engine.model.config.vocab_size])
+                    .slice([0..1, (i - 1)..i])
+                    .reshape([1, vocab_size])
             };
 
             let target_pred_toks = sample_next_token(
@@ -139,9 +141,10 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>> SpeculativeI
 
                 // If this is the last drafted token and it is accepted, we also accept the target's prediction for the next token
                 if i == draft_len - 1 {
+                    let vocab_size = self.target_engine.model.config.vocab_size;
                     let next_target_logits = target_logits_3d.clone()
-                        .slice([0..1, i..(i + 1), 0..self.target_engine.model.config.vocab_size])
-                        .reshape([1, self.target_engine.model.config.vocab_size]);
+                        .slice([0..1, i..(i + 1)])
+                        .reshape([1, vocab_size]);
 
                     let last_pred_toks = sample_next_token(
                         next_target_logits.clone(), temperature, top_k,
@@ -171,9 +174,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>> SpeculativeI
                 let correction_logits_3d = self.target_engine.model.forward_with_cache(
                     corrected_input, &mut state.target_state.cache, state.step + i,
                 );
+                let vocab_size = self.target_engine.model.config.vocab_size;
                 final_next_logits = correction_logits_3d
-                    .slice([0..1, 0..1, 0..self.target_engine.model.config.vocab_size])
-                    .reshape([1, self.target_engine.model.config.vocab_size]);
+                    .reshape([1, vocab_size]);
 
                 if target_pred_tok == assistant_end || target_pred_tok == bos { is_finished = true; }
                 break;

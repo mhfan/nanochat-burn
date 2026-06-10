@@ -75,12 +75,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
             // Get ground truth answer from conversation
             let last_msg = conversation.messages.last().unwrap();
-            let ground_truth_text = match &last_msg.content {
-                crate::tokenizer::MessageContent::Simple(s) => s.clone(),
-                crate::tokenizer::MessageContent::Parts(parts) => {
-                    parts.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("")
-                }
-            };
+            let ground_truth_text = last_msg.content.to_string_content();
             let gt_ans = extract_answer(&ground_truth_text);
 
             let mut question_rewards = Vec::with_capacity(num_samples);

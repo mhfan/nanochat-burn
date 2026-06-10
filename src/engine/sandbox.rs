@@ -10,6 +10,12 @@ pub struct ExecutionResult {
     pub timeout: bool,
 }
 
+struct TempFileGuard<'a>(&'a Path);
+
+impl<'a> Drop for TempFileGuard<'a> {
+    fn drop(&mut self) { let _ = fs::remove_file(self.0); }
+}
+
 pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let tmp_dir = Path::new(".cache/tmp");
     if let Err(e) = fs::create_dir_all(tmp_dir) {
@@ -36,6 +42,9 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
         };
     }
 
+    // Create the RAII guard to delete the file when leaving this function
+    let _guard = TempFileGuard(&temp_file_path);
+
     let mut child = match Command::new("python3")
         .arg(&temp_file_path)
         .stdout(std::process::Stdio::piped())
@@ -43,7 +52,6 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
         .spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = fs::remove_file(&temp_file_path);
                 return ExecutionResult {
                     success: false,
                     stdout: String::new(),
@@ -63,7 +71,6 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                 let output = match child.wait_with_output() {
                     Ok(o) => o,
                     Err(e) => {
-                        let _ = fs::remove_file(&temp_file_path);
                         return ExecutionResult {
                             success: false,
                             stdout: String::new(),
@@ -74,7 +81,6 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                     }
                 };
 
-                let _ = fs::remove_file(&temp_file_path);
                 let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr_str = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -89,7 +95,6 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
             Ok(None) => {
                 if start_time.elapsed() >= timeout {
                     let _ = child.kill();
-                    let _ = fs::remove_file(&temp_file_path);
                     return ExecutionResult {
                         success: false,
                         stdout: String::new(),
@@ -102,7 +107,6 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
             }
             Err(e) => {
                 let _ = child.kill();
-                let _ = fs::remove_file(&temp_file_path);
                 return ExecutionResult {
                     success: false,
                     stdout: String::new(),

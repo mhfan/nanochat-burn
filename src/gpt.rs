@@ -57,10 +57,10 @@ pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
 fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize, device: &B::Device) -> Tensor<B, 4> {
     let mut mask_data = Vec::with_capacity(sequence_len * sequence_len);
     for i in 0..sequence_len {
-        for j in 0..sequence_len {
-            let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
-            mask_data.push(if j > i || j < left_bound { -1e9f32 } else { 0.0f32 });
-        }
+        let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
+        mask_data.extend((0..sequence_len).map(|j| {
+            if j > i || j < left_bound { -1e9f32 } else { 0.0f32 }
+        }));
     }
     Tensor::<B, 4>::from_data(
         TensorData::new(mask_data, Shape::new([1, 1, sequence_len, sequence_len])), device,
@@ -131,12 +131,7 @@ impl<B: Backend> KVCache<B> {
             v_page_pool.push(Tensor::zeros(pool_shape.clone(), device));
         }
 
-        let mut data = Vec::with_capacity(batch_size * max_pages_per_seq);
-        for b in 0..batch_size {
-            for p in 0..max_pages_per_seq {
-                data.push((b * max_pages_per_seq + p) as i32);
-            }
-        }
+        let data: Vec<i32> = (0..(batch_size * max_pages_per_seq) as i32).collect();
         let block_table = Tensor::<B, 2, Int>::from_data(
             TensorData::new(data, Shape::new([batch_size, max_pages_per_seq])), device,
         );
@@ -394,12 +389,12 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let lm_head_weight = Tensor::random([n_embd, padded_vocab_size], Distribution::Normal(0.0, 0.001), device);
         let lm_head = Linear { weight: Param::from_tensor(lm_head_weight), bias: None };
 
-        let mut resid_init = vec![0.0f32; config.n_layer];
-        let mut x0_init = vec![0.0f32; config.n_layer];
-        for i in 0..config.n_layer {
-            resid_init[i] = 1.15 - (0.10 * i as f32 / (config.n_layer - 1).max(1) as f32);
-            x0_init[i] = 0.20 - (0.15 * i as f32 / (config.n_layer - 1).max(1) as f32);
-        }
+        let resid_init: Vec<f32> = (0..config.n_layer)
+            .map(|i| 1.15 - (0.10 * i as f32 / (config.n_layer - 1).max(1) as f32))
+            .collect();
+        let x0_init: Vec<f32> = (0..config.n_layer)
+            .map(|i| 0.20 - (0.15 * i as f32 / (config.n_layer - 1).max(1) as f32))
+            .collect();
 
         let resid_lambdas = Param::from_tensor(Tensor::from_data(TensorData::new(resid_init, Shape::new([config.n_layer])), device));
         let x0_lambdas = Param::from_tensor(Tensor::from_data(TensorData::new(x0_init, Shape::new([config.n_layer])), device));
@@ -418,18 +413,18 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
     fn precompute_rotary_embeddings(&self, start_pos: usize, len: usize, head_dim: usize,
         device: &B::Device,) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let base = ROPE_BASE_FREQ;
-        let mut inv_freq = Vec::with_capacity(head_dim / 2);
-        for i in (0..head_dim).step_by(2) { inv_freq.push(1.0 / base.powf(i as f32 / head_dim as f32)); }
+        let inv_freq: Vec<f32> = (0..head_dim)
+            .step_by(2)
+            .map(|i| 1.0 / base.powf(i as f32 / head_dim as f32))
+            .collect();
 
         let mut cos_data = Vec::with_capacity(len * (head_dim / 2));
         let mut sin_data = Vec::with_capacity(len * (head_dim / 2));
 
         for t in start_pos..(start_pos + len) {
-            for &freq in &inv_freq {
-                let angle = t as f32 * freq;
-                cos_data.push(angle.cos());
-                sin_data.push(angle.sin());
-            }
+            let t_f32 = t as f32;
+            cos_data.extend(inv_freq.iter().map(|&freq| (t_f32 * freq).cos()));
+            sin_data.extend(inv_freq.iter().map(|&freq| (t_f32 * freq).sin()));
         }
 
         let cos = Tensor::<B, 4>::from_data(TensorData::new(cos_data, Shape::new([1, len, 1, head_dim / 2])), device);

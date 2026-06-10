@@ -28,19 +28,10 @@ pub fn extract_answer(text: &str) -> Option<i32> {
 pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
     match data.dtype {
         DType::F32 => data.to_vec::<f32>().unwrap(),
-        DType::F16 => {
-            let f16_vec = data.to_vec::<f16>().unwrap();
-            f16_vec.into_iter().map(|v| v.to_f32()).collect()
-        }
-        _ => {
-            match data.to_vec::<f32>() {
-                Ok(v) => v,
-                Err(_) => {
-                    let f16_vec = data.to_vec::<f16>().unwrap();
-                    f16_vec.into_iter().map(|v| v.to_f32()).collect()
-                }
-            }
-        }
+        DType::F16 => data.to_vec::<f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+        _ => data.to_vec::<f32>().unwrap_or_else(|_| {
+            data.to_vec::<f16>().unwrap().into_iter().map(|v| v.to_f32()).collect()
+        }),
     }
 }
 

@@ -12,11 +12,8 @@ pub struct SftPacker {
 
 impl SftPacker {
     pub fn new(dataset: &SftDataset, tokenizer: &BpeTokenizer) -> Self {
-        let mut conversations = Vec::new();
-        for conv in &dataset.conversations {
-            let (ids, mask) = tokenizer.render_conversation(conv, usize::MAX);
-            conversations.push((ids, mask));
-        }
+        let mut conversations: Vec<_> = dataset.conversations.iter()
+            .map(|conv| tokenizer.render_conversation(conv, usize::MAX)).collect();
         conversations.sort_by_key(|(conv, _)| conv.len());
         SftPacker { conversations, cursor: 0 }
     }

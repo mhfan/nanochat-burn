@@ -13,8 +13,11 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>,
         let view = tensors.tensor(name).map_err(|e| format!("Tensor '{}' not found in safetensors: {:?}", name, e))?;
         let shape: Vec<usize> = view.shape().iter().map(|&x| x as usize).collect();
         let data = view.data();
-        let f32_data = data.chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect();
+        let f32_data = match bytemuck::try_cast_slice::<u8, f32>(data) {
+            Ok(slice) => slice.to_vec(),
+            Err(_) => data.chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect(),
+        };
         Ok((f32_data, shape))
     };
 
@@ -88,10 +91,7 @@ impl<B: Backend> ParamSaver<B> {
     fn save_tensor<const D: usize>(&mut self, name: &str, tensor: Tensor<B, D>) {
         let f32_data = crate::common::tensor_data_to_f32_vec(tensor.clone().into_data());
         let shape = tensor.shape().dims::<D>().to_vec();
-        let mut u8_data = Vec::with_capacity(f32_data.len() * 4);
-        for &val in &f32_data {
-            u8_data.extend_from_slice(&val.to_le_bytes());
-        }
+        let u8_data = bytemuck::cast_slice::<f32, u8>(&f32_data).to_vec();
         self.buffers.insert(name.to_string(), u8_data);
         self.shapes.insert(name.to_string(), shape);
     }

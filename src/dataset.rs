@@ -13,14 +13,15 @@ pub struct PretrainingDataset { pub shards: Vec<Shard>, }
 
 impl PretrainingDataset {
     pub fn new<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
-        let mut shards = Vec::new();
-        for p in paths {
-            let path = p.as_ref().to_path_buf();
-            let file = File::open(&path)?;
-            let mmap = unsafe { Mmap::map(&file)? };
-            let num_tokens = mmap.len() / 4;
-            shards.push(Shard { path, mmap, num_tokens });
-        }
+        let shards = paths.iter()
+            .map(|p| {
+                let path = p.as_ref().to_path_buf();
+                let file = File::open(&path)?;
+                let mmap = unsafe { Mmap::map(&file)? };
+                let num_tokens = mmap.len() / 4;
+                Ok(Shard { path, mmap, num_tokens })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         Ok(PretrainingDataset { shards })
     }
 
@@ -28,7 +29,7 @@ impl PretrainingDataset {
         let shard = &self.shards[shard_idx];
         let byte_offset = token_offset * 4;
         let bytes = &shard.mmap[byte_offset..byte_offset + 4];
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        u32::from_le_bytes(bytes.try_into().unwrap())
     }
 
     pub fn get_tokens(&self, shard_idx: usize, token_offset: usize, len: usize) -> Vec<u32> {
@@ -38,13 +39,9 @@ impl PretrainingDataset {
         let bytes = &shard.mmap[byte_start..byte_end];
         match bytemuck::try_cast_slice::<u8, u32>(bytes) {
             Ok(tokens_u32) => tokens_u32.to_vec(),
-            Err(_) => {
-                let mut tokens = Vec::with_capacity(len);
-                for chunk in bytes.chunks_exact(4) {
-                    tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                }
-                tokens
-            }
+            Err(_) => bytes.chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect(),
         }
     }
 }
@@ -73,9 +70,7 @@ impl SftDataset {
                 match &msg.content {
                     crate::tokenizer::MessageContent::Simple(s) => corpus.push(s.clone()),
                     crate::tokenizer::MessageContent::Parts(parts) => {
-                        for part in parts {
-                            corpus.push(part.text.clone());
-                        }
+                        corpus.extend(parts.iter().map(|p| p.text.clone()));
                     }
                 }
             }

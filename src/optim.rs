@@ -117,48 +117,32 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         }
 
         // 2. Transformer Block matrices go into Muon
+        let update_muon = |param: &mut Param<Tensor<B, 2>>, state_opt: &mut Option<MuonState<B::InnerBackend, 2>>| {
+            if let Some(grad) = grads.get::<B::InnerBackend, 2>(param.id) {
+                let new_w = Tensor::from_inner(muon_step(
+                    param.val().inner(), grad, state_opt, lr, weight_decay, 0.95, 0.9, 5,
+                ));
+                *param = Param::from_tensor(new_w);
+            }
+        };
+
         for i in 0..gpt.config.n_layer {
             let block = &mut gpt.h[i];
             let state = &mut self.h[i];
 
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_q.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.attn.c_q.weight.val().inner(), grad, &mut state.c_q, lr, weight_decay, 0.95, 0.9, 5));
-                block.attn.c_q.weight = Param::from_tensor(new_w);
-            }
-
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_k.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.attn.c_k.weight.val().inner(), grad, &mut state.c_k, lr, weight_decay, 0.95, 0.9, 5));
-                block.attn.c_k.weight = Param::from_tensor(new_w);
-            }
-
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_v.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.attn.c_v.weight.val().inner(), grad, &mut state.c_v, lr, weight_decay, 0.95, 0.9, 5));
-                block.attn.c_v.weight = Param::from_tensor(new_w);
-            }
-
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.attn.c_proj.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.attn.c_proj.weight.val().inner(), grad, &mut state.c_proj, lr, weight_decay, 0.95, 0.9, 5));
-                block.attn.c_proj.weight = Param::from_tensor(new_w);
-            }
+            update_muon(&mut block.attn.c_q.weight, &mut state.c_q);
+            update_muon(&mut block.attn.c_k.weight, &mut state.c_k);
+            update_muon(&mut block.attn.c_v.weight, &mut state.c_v);
+            update_muon(&mut block.attn.c_proj.weight, &mut state.c_proj);
 
             if has_ve(i, gpt.config.n_layer) {
                 if let Some(ref mut gate_linear) = block.attn.ve_gate {
-                    if let Some(grad) = grads.get::<B::InnerBackend, 2>(gate_linear.weight.id) {
-                        let new_w = Tensor::from_inner(muon_step(gate_linear.weight.val().inner(), grad, &mut state.ve_gate, lr, weight_decay, 0.95, 0.9, 5));
-                        gate_linear.weight = Param::from_tensor(new_w);
-                    }
+                    update_muon(&mut gate_linear.weight, &mut state.ve_gate);
                 }
             }
 
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.mlp.c_fc.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.mlp.c_fc.weight.val().inner(), grad, &mut state.c_fc, lr, weight_decay, 0.95, 0.9, 5));
-                block.mlp.c_fc.weight = Param::from_tensor(new_w);
-            }
-
-            if let Some(grad) = grads.get::<B::InnerBackend, 2>(block.mlp.c_proj.weight.id) {
-                let new_w = Tensor::from_inner(muon_step(block.mlp.c_proj.weight.val().inner(), grad, &mut state.c_proj_mlp, lr, weight_decay, 0.95, 0.9, 5));
-                block.mlp.c_proj.weight = Param::from_tensor(new_w);
-            }
+            update_muon(&mut block.mlp.c_fc.weight, &mut state.c_fc);
+            update_muon(&mut block.mlp.c_proj.weight, &mut state.c_proj_mlp);
         }
     }
 }
@@ -218,22 +202,21 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
     ];
 
     let steps = ns_steps.min(5);
-    if rows > cols {
-        for i in 0..steps {
-            let (a, b, c) = polar_express_coeffs[i];
-            let A = X.clone().transpose().matmul(X.clone());
-            let A_sq = A.clone().matmul(A.clone());
-            let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
-            X = X.clone().mul_scalar(a) + X.matmul(B);
-        }
-    } else {
-        for i in 0..steps {
-            let (a, b, c) = polar_express_coeffs[i];
-            let A = X.clone().matmul(X.clone().transpose());
-            let A_sq = A.clone().matmul(A.clone());
-            let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
-            X = X.clone().mul_scalar(a) + B.matmul(X);
-        }
+    let is_transposed = rows > cols;
+    for i in 0..steps {
+        let (a, b, c) = polar_express_coeffs[i];
+        let A = if is_transposed {
+            X.clone().transpose().matmul(X.clone())
+        } else {
+            X.clone().matmul(X.clone().transpose())
+        };
+        let A_sq = A.clone().matmul(A.clone());
+        let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
+        X = if is_transposed {
+            X.clone().mul_scalar(a) + X.matmul(B)
+        } else {
+            X.clone().mul_scalar(a) + B.matmul(X)
+        };
     }
     let mut g_ortho = X;
 

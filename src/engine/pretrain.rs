@@ -25,13 +25,7 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
             "Evaluation harnesses measure performance quantitatively using categorical argmax selections and generative pass metrics."
         ];
 
-        let mut full_text = String::new();
-        for _ in 0..10 { // Duplicate corpus to make it large enough for pretraining batching
-            for sentence in &corpus {
-                full_text.push_str(sentence);
-                full_text.push_str(" ");
-            }
-        }
+        let full_text = format!("{} ", corpus.join(" ")).repeat(10);
 
         std::fs::create_dir_all("data").ok();
         std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");

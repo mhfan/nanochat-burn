@@ -36,17 +36,17 @@ fn parse_and_eval_count(s: &str) -> Option<usize> {
 
     if sub_str.is_empty() { return Some(main_str.len() + 1); }
 
-    let (mut count, mut start) = (0, 0);
-    while let Some(pos) = main_str[start..].find(&sub_str) {
-        start += pos + sub_str.len();
-        count += 1;
-    }
-    Some(count)
+    Some(main_str.matches(&sub_str).count())
 }
 
 fn extract_quoted_string(s: &str) -> Option<String> {
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        if s.len() >= 2 { return Some(s[1..s.len() - 1].to_string()); }
+    if s.len() >= 2 {
+        if let Some(stripped) = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            return Some(stripped.to_string());
+        }
+        if let Some(stripped) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+            return Some(stripped.to_string());
+        }
     }
     None
 }

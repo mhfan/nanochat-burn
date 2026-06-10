@@ -75,32 +75,19 @@ impl<B: Backend> QuantizedLinear<B> {
         let q_unpacked = if self.bits == 8 {
             // W8A16 Unpacking (Pack Factor = 4)
             // packed: [I / 4, O]
-            let val0 = packed;
+            let mut q_floats = Vec::with_capacity(4);
+            let mut cur = packed;
+            for _ in 0..4 {
+                let cur_q = cur.clone() / 256;
+                let next_cur = cur_q.clone() - (cur.clone() - cur_q.clone() * 256).lower_elem(0).int();
+                let rem = cur.clone() - next_cur.clone() * 256;
 
-            let val1_q = val0.clone() / 256;
-            let val1 = val1_q.clone() - (val0.clone() - val1_q.clone() * 256).lower_elem(0).int();
-            let q0 = val0.clone() - val1.clone() * 256;
-
-            let val2_q = val1.clone() / 256;
-            let val2 = val2_q.clone() - (val1.clone() - val2_q.clone() * 256).lower_elem(0).int();
-            let q1 = val1.clone() - val2.clone() * 256;
-
-            let val3_q = val2.clone() / 256;
-            let val3 = val3_q.clone() - (val2.clone() - val3_q.clone() * 256).lower_elem(0).int();
-            let q2 = val2.clone() - val3.clone() * 256;
-
-            let val4_q = val3.clone() / 256;
-            let val4 = val4_q.clone() - (val3.clone() - val4_q.clone() * 256).lower_elem(0).int();
-            let q3 = val3.clone() - val4 * 256;
-
-            // Shift back to signed range [-128, 127]
-            let q0_f: Tensor<B, 3> = (q0.float() - 128.0).unsqueeze_dim(2); // [I / 4, O, 1]
-            let q1_f: Tensor<B, 3> = (q1.float() - 128.0).unsqueeze_dim(2);
-            let q2_f: Tensor<B, 3> = (q2.float() - 128.0).unsqueeze_dim(2);
-            let q3_f: Tensor<B, 3> = (q3.float() - 128.0).unsqueeze_dim(2);
+                q_floats.push((rem.float() - 128.0).unsqueeze_dim(2)); // Shift to [-128, 127]
+                cur = next_cur;
+            }
 
             // Stack along dimension 2 and reshape to [I, O]
-            let stacked: Tensor<B, 3> = Tensor::cat(vec![q0_f, q1_f, q2_f, q3_f], 2); // [I / 4, O, 4]
+            let stacked: Tensor<B, 3> = Tensor::cat(q_floats, 2); // [I / 4, O, 4]
             let permuted: Tensor<B, 3> = stacked.swap_dims(1, 2); // [I / 4, 4, O]
             permuted.reshape([i_packed * 4, o])
         } else {
@@ -157,6 +144,12 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         block_size
     };
 
+    let (max_val, offset, max_q) = if bits == 8 {
+        (127.0, 128.0, 255.0)
+    } else {
+        (7.0, 8.0, 15.0)
+    };
+
     let (q_weight, scales) = if block_size_actual > 0 {
         // Block-wise quantization
         let num_blocks = i / block_size_actual;
@@ -165,19 +158,12 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         // Compute block max absolute value along block dimension (dimension 1)
         // Note: max_dim returns [num_blocks, 1, o]
         let max_abs = reshaped.clone().abs().max_dim(1);
-        let max_val = if bits == 8 { 127.0 } else { 7.0 };
 
         // Prevent division by zero
         let block_scales = max_abs.clone() / max_val;
 
         // Quantize
-        let q_shifted = if bits == 8 {
-            (reshaped / block_scales.clone()).round() + 128.0
-        } else {
-            (reshaped / block_scales.clone()).round() + 8.0
-        };
-
-        let max_q = if bits == 8 { 255.0 } else { 15.0 };
+        let q_shifted = (reshaped / block_scales.clone()).round() + offset;
         let clamped = q_shifted.clamp(0.0, max_q);
         let q_flat = clamped.reshape([i, o]);
 
@@ -185,17 +171,10 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     } else {
         // Row-wise quantization (scales has shape [1, 1, O])
         let max_abs = weight.clone().abs().max_dim(0); // [1, o]
-        let max_val = if bits == 8 { 127.0 } else { 7.0 };
         let channel_scales = max_abs.clone() / max_val;
 
         let reshaped_scales = channel_scales.clone().reshape([1, o]);
-        let q_shifted = if bits == 8 {
-            (weight / reshaped_scales).round() + 128.0
-        } else {
-            (weight / reshaped_scales).round() + 8.0
-        };
-
-        let max_q = if bits == 8 { 255.0 } else { 15.0 };
+        let q_shifted = (weight / reshaped_scales).round() + offset;
         let clamped = q_shifted.clamp(0.0, max_q);
 
         (clamped, channel_scales.reshape([1, 1, o]))
@@ -207,12 +186,12 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let num_packed = i / 4;
         let q_reshaped = q_weight.reshape([num_packed, 4, o]).int();
 
-        let q0 = q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
-        let q1 = q_reshaped.clone().slice([0..num_packed, 1..2, 0..o]).reshape([num_packed, o]);
-        let q2 = q_reshaped.clone().slice([0..num_packed, 2..3, 0..o]).reshape([num_packed, o]);
-        let q3 = q_reshaped.clone().slice([0..num_packed, 3..4, 0..o]).reshape([num_packed, o]);
-
-        let packed = q0 + q1.mul_scalar(256) + q2.mul_scalar(65536) + q3.mul_scalar(16777216);
+        let mut packed = q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
+        let coeffs = [256, 65536, 16777216];
+        for k in 0..3 {
+            let slice = q_reshaped.clone().slice([0..num_packed, (k+1)..(k+2), 0..o]).reshape([num_packed, o]);
+            packed = packed + slice.mul_scalar(coeffs[k]);
+        }
         packed
     } else {
         // INT4: Pack factor 8

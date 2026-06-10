@@ -27,10 +27,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
         device: &B::Device,) -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
-        let mut batch_idx_data = Vec::with_capacity(num_samples * prompt_len);
-        for _ in 0..num_samples {
-            batch_idx_data.extend(prompt_tokens.iter().map(|&t| t as i32));
-        }
+        let batch_idx_data: Vec<i32> = std::iter::repeat(prompt_tokens)
+            .take(num_samples).flatten().map(|&t| t as i32).collect();
 
         let idx = Tensor::<B, 2, Int>::from_data(
             TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])),
@@ -193,8 +191,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
 
         // 1. Repetition penalty
         if repetition_penalty != 1.0 {
-            let mut unique_history = std::collections::HashSet::new();
-            for &t in &generated_tokens[b] { unique_history.insert(t); }
+            let unique_history: std::collections::HashSet<_> = generated_tokens[b].iter().copied().collect();
             for &t in &unique_history {
                 if t < vocab_size {
                     let val = sample_logits[t];

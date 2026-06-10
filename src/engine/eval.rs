@@ -49,12 +49,7 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
         let logits_vec = crate::common::tensor_data_to_f32_vec(last_logits.into_data());
 
         let last_msg = item.messages.last().unwrap();
-        let ground_truth = match &last_msg.content {
-            crate::tokenizer::MessageContent::Simple(s) => s.trim().to_string(),
-            crate::tokenizer::MessageContent::Parts(parts) => {
-                parts.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("").trim().to_string()
-            }
-        };
+        let ground_truth = last_msg.content.to_string_content().trim().to_string();
 
         let letters = item.letters.as_ref().cloned().unwrap_or_else(|| {
             vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]
@@ -100,12 +95,7 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         let generated_text = tokenizer.decode(generated_tokens);
 
         let last_msg = item.messages.last().unwrap();
-        let ground_truth_text = match &last_msg.content {
-            crate::tokenizer::MessageContent::Simple(s) => s.clone(),
-            crate::tokenizer::MessageContent::Parts(parts) => {
-                parts.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("")
-            }
-        };
+        let ground_truth_text = last_msg.content.to_string_content();
 
         let pred_ans = extract_answer(&generated_text);
         let gt_ans = extract_answer(&ground_truth_text);
@@ -133,12 +123,7 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         let generated_tokens = &rollout[prompt_len..];
         let generated_completion = tokenizer.decode(generated_tokens);
 
-        let prompt_pure_code = match &item.messages[0].content {
-            crate::tokenizer::MessageContent::Simple(s) => s.clone(),
-            crate::tokenizer::MessageContent::Parts(parts) => {
-                parts.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("")
-            }
-        };
+        let prompt_pure_code = item.messages[0].content.to_string_content();
 
         let full_code = format!("{}{}", prompt_pure_code, generated_completion);
 

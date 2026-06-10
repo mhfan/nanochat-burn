@@ -28,6 +28,15 @@ pub struct MessagePart {
     Simple(String), Parts(Vec<MessagePart>),
 }
 
+impl MessageContent {
+    pub fn to_string_content(&self) -> String {
+        match self {
+            Self::Simple(s) => s.clone(),
+            Self::Parts(parts) => parts.iter().map(|p| p.text.as_str()).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub role: String, // "system", "user", "assistant"
