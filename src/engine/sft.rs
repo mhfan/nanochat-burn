@@ -127,12 +127,10 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
             flat_inputs.extend(row[..max_seq_len].iter().map(|&x| x as i32));
 
             flat_targets.extend((1..=max_seq_len).map(|j| {
-                let mask_val = row_mask[j];
-                let is_padding = j >= content_len;
-                if mask_val == 0 || is_padding {
-                    -1
-                } else {
+                if row_mask[j] == 1 && j < content_len {
                     row[j] as i32
+                } else {
+                    -1
                 }
             }));
         }

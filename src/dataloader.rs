@@ -105,9 +105,8 @@ impl SftDataLoader {
         let bos = self.tokenizer.get_bos_token_id();
 
         for _ in 0..self.batch_size {
-            if self.cur_idx >= self.dataset.conversations.len() { self.cur_idx = 0; }
             let conv = &self.dataset.conversations[self.cur_idx];
-            self.cur_idx += 1;
+            self.cur_idx = (self.cur_idx + 1) % self.dataset.conversations.len();
 
             let (mut ids, mut m) = self.tokenizer.render_conversation(conv, self.sequence_length + 1);
             let pad_len = (self.sequence_length + 1).saturating_sub(ids.len());

@@ -212,11 +212,7 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
         };
         let A_sq = A.clone().matmul(A.clone());
         let B = A.mul_scalar(b) + A_sq.mul_scalar(c);
-        X = if is_transposed {
-            X.clone().mul_scalar(a) + X.matmul(B)
-        } else {
-            X.clone().mul_scalar(a) + B.matmul(X)
-        };
+        X = X.clone().mul_scalar(a) + if is_transposed { X.matmul(B) } else { B.matmul(X) };
     }
     let mut g_ortho = X;
 

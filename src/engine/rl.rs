@@ -120,31 +120,22 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let mut flat_targets = Vec::with_capacity(num_sequences * (max_len - 1));
 
         for (i, rollout) in all_rollouts.iter().enumerate() {
-            flat_inputs.extend(
-                rollout.iter().copied()
-                    .chain(iter::repeat(assistant_end))
-                    .take(max_len - 1)
-                    .map(|tok| tok as i32)
-            );
+            flat_inputs.extend((0..max_len - 1).map(|idx| {
+                if idx < rollout.len() {
+                    rollout[idx] as i32
+                } else {
+                    assistant_end as i32
+                }
+            }));
 
-            let mask_iter = all_masks[i].iter().copied().chain(iter::repeat(0));
-            let rollout_padded_iter = rollout.iter().copied().chain(iter::repeat(assistant_end));
-
-            flat_targets.extend(
-                rollout_padded_iter.zip(mask_iter)
-                    .skip(1)
-                    .take(max_len - 1)
-                    .enumerate()
-                    .map(|(idx, (tok, mask_val))| {
-                        let j = idx + 1;
-                        let is_padding = j >= rollout.len();
-                        if mask_val == 0 || is_padding {
-                            -1
-                        } else {
-                            tok as i32
-                        }
-                    })
-            );
+            flat_targets.extend((0..max_len - 1).map(|idx| {
+                let j = idx + 1;
+                if j < rollout.len() && all_masks[i].get(j).copied().unwrap_or(0) == 1 {
+                    rollout[j] as i32
+                } else {
+                    -1
+                }
+            }));
         }
 
         let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)

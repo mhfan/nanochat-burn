@@ -55,13 +55,13 @@ pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
 }
 
 fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize, device: &B::Device) -> Tensor<B, 4> {
-    let mut mask_data = Vec::with_capacity(sequence_len * sequence_len);
-    for i in 0..sequence_len {
-        let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
-        mask_data.extend((0..sequence_len).map(|j| {
-            if j > i || j < left_bound { -1e9f32 } else { 0.0f32 }
-        }));
-    }
+    let mask_data: Vec<f32> = (0..sequence_len)
+        .flat_map(|i| {
+            let left_bound = if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
+            (0..sequence_len).map(move |j| {
+                if j > i || j < left_bound { -1e9f32 } else { 0.0f32 }
+            })
+        }).collect();
     Tensor::<B, 4>::from_data(
         TensorData::new(mask_data, Shape::new([1, 1, sequence_len, sequence_len])), device,
     )
@@ -80,7 +80,7 @@ pub fn apply_rotary_emb<B: Backend>(x: Tensor<B, 4>, cos: Tensor<B, 4>,
     let x1 = x.clone().slice([0..shape[0], 0..shape[1], 0..shape[2], 0..d]);
     let x2 = x.slice([0..shape[0], 0..shape[1], 0..shape[2], d..shape[3]]);
     let y1 = x1.clone() * cos.clone() + x2.clone() * sin.clone();
-    let y2 = x1 * (sin * -1.0) + x2 * cos;
+    let y2 = x2 * cos - x1 * sin;
     Tensor::cat(vec![y1, y2], 3)
 }
 
@@ -353,48 +353,47 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let wte_weight = Tensor::random([padded_vocab_size, n_embd], Distribution::Normal(0.0, 0.8), device);
         let wte = Embedding { weight: Param::from_tensor(wte_weight) };
 
-        let mut value_embeds = Vec::new();
         let s = 3.0f32.sqrt() * (n_embd as f32).powf(-0.5);
-        for i in 0..config.n_layer {
-            if has_ve(i, config.n_layer) {
+        let value_embeds: Vec<_> = (0..config.n_layer)
+            .filter(|&i| has_ve(i, config.n_layer))
+            .map(|_| {
                 let ve_weight = Tensor::random([padded_vocab_size, kv_dim], Distribution::Uniform(-s as f64, s as f64), device);
-                value_embeds.push(Embedding { weight: Param::from_tensor(ve_weight) });
-            }
-        }
+                Embedding { weight: Param::from_tensor(ve_weight) }
+            })
+            .collect();
 
-        let mut h = Vec::new();
         let window_sizes = config.compute_window_sizes();
-        for i in 0..config.n_layer {
-            let c_q = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
-            let c_k = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_kv_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
-            let c_v = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_kv_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
-            let c_proj = Linear { weight: Param::from_tensor(Tensor::zeros([n_embd, n_embd], device)), bias: None };
-            let ve_gate = if has_ve(i, config.n_layer) {
-                Some(Linear { weight: Param::from_tensor(Tensor::random([VE_GATE_INPUT_DIM, config.n_kv_head], Distribution::Uniform(0.0, 0.02), device)), bias: None })
-            } else { None };
+        let h: Vec<_> = (0..config.n_layer)
+            .map(|i| {
+                let c_q = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
+                let c_k = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_kv_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
+                let c_v = Linear { weight: Param::from_tensor(Tensor::random([n_embd, config.n_kv_head * head_dim], Distribution::Uniform(-s as f64, s as f64), device)), bias: None };
+                let c_proj = Linear { weight: Param::from_tensor(Tensor::zeros([n_embd, n_embd], device)), bias: None };
+                let ve_gate = if has_ve(i, config.n_layer) {
+                    Some(Linear { weight: Param::from_tensor(Tensor::random([VE_GATE_INPUT_DIM, config.n_kv_head], Distribution::Uniform(0.0, 0.02), device)), bias: None })
+                } else { None };
 
-            let window_size = window_sizes[i];
-            let mask = precompute_window_mask::<B>(window_size, config.sequence_len, device);
-            let attn = CausalSelfAttention {
-                c_q, c_k, c_v, c_proj, ve_gate, layer_idx: i, n_head: config.n_head, n_kv_head: config.n_kv_head, head_dim, mask,
-            };
+                let window_size = window_sizes[i];
+                let mask = precompute_window_mask::<B>(window_size, config.sequence_len, device);
+                let attn = CausalSelfAttention {
+                    c_q, c_k, c_v, c_proj, ve_gate, layer_idx: i, n_head: config.n_head, n_kv_head: config.n_kv_head, head_dim, mask,
+                };
 
-            let c_fc = Linear { weight: Param::from_tensor(Tensor::random([n_embd, 4 * n_embd], Distribution::Uniform((-s * 0.4) as f64, (s * 0.4) as f64), device)), bias: None };
-            let c_proj_mlp = Linear { weight: Param::from_tensor(Tensor::zeros([4 * n_embd, n_embd], device)), bias: None };
-            let mlp = MLP { c_fc, c_proj: c_proj_mlp, _phantom: PhantomData };
+                let c_fc = Linear { weight: Param::from_tensor(Tensor::random([n_embd, 4 * n_embd], Distribution::Uniform((-s * 0.4) as f64, (s * 0.4) as f64), device)), bias: None };
+                let c_proj_mlp = Linear { weight: Param::from_tensor(Tensor::zeros([4 * n_embd, n_embd], device)), bias: None };
+                let mlp = MLP { c_fc, c_proj: c_proj_mlp, _phantom: PhantomData };
 
-            h.push(Block { attn, mlp });
-        }
+                Block { attn, mlp }
+            })
+            .collect();
 
         let lm_head_weight = Tensor::random([n_embd, padded_vocab_size], Distribution::Normal(0.0, 0.001), device);
         let lm_head = Linear { weight: Param::from_tensor(lm_head_weight), bias: None };
 
         let resid_init: Vec<f32> = (0..config.n_layer)
-            .map(|i| 1.15 - (0.10 * i as f32 / (config.n_layer - 1).max(1) as f32))
-            .collect();
+            .map(|i| 1.15 - (0.10 * i as f32 / (config.n_layer - 1).max(1) as f32)).collect();
         let x0_init: Vec<f32> = (0..config.n_layer)
-            .map(|i| 0.20 - (0.15 * i as f32 / (config.n_layer - 1).max(1) as f32))
-            .collect();
+            .map(|i| 0.20 - (0.15 * i as f32 / (config.n_layer - 1).max(1) as f32)).collect();
 
         let resid_lambdas = Param::from_tensor(Tensor::from_data(TensorData::new(resid_init, Shape::new([config.n_layer])), device));
         let x0_lambdas = Param::from_tensor(Tensor::from_data(TensorData::new(x0_init, Shape::new([config.n_layer])), device));
@@ -413,10 +412,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
     fn precompute_rotary_embeddings(&self, start_pos: usize, len: usize, head_dim: usize,
         device: &B::Device,) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let base = ROPE_BASE_FREQ;
-        let inv_freq: Vec<f32> = (0..head_dim)
-            .step_by(2)
-            .map(|i| 1.0 / base.powf(i as f32 / head_dim as f32))
-            .collect();
+        let inv_freq: Vec<f32> = (0..head_dim).step_by(2).map(|i| 1.0 / base.powf(i as f32 / head_dim as f32)).collect();
 
         let mut cos_data = Vec::with_capacity(len * (head_dim / 2));
         let mut sin_data = Vec::with_capacity(len * (head_dim / 2));

@@ -40,8 +40,7 @@ impl PretrainingDataset {
         match bytemuck::try_cast_slice::<u8, u32>(bytes) {
             Ok(tokens_u32) => tokens_u32.to_vec(),
             Err(_) => bytes.chunks_exact(4)
-                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-                .collect(),
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect(),
         }
     }
 }
