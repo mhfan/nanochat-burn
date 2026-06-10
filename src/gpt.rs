@@ -359,8 +359,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             .map(|_| {
                 let ve_weight = Tensor::random([padded_vocab_size, kv_dim], Distribution::Uniform(-s as f64, s as f64), device);
                 Embedding { weight: Param::from_tensor(ve_weight) }
-            })
-            .collect();
+            }).collect();
 
         let window_sizes = config.compute_window_sizes();
         let h: Vec<_> = (0..config.n_layer)
@@ -384,8 +383,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 let mlp = MLP { c_fc, c_proj: c_proj_mlp, _phantom: PhantomData };
 
                 Block { attn, mlp }
-            })
-            .collect();
+            }).collect();
 
         let lm_head_weight = Tensor::random([n_embd, padded_vocab_size], Distribution::Normal(0.0, 0.001), device);
         let lm_head = Linear { weight: Param::from_tensor(lm_head_weight), bias: None };

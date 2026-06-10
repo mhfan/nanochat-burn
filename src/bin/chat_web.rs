@@ -62,13 +62,18 @@ struct AppState { device: ModelDevice,
     // Parse CLI parameters and Environment Variables for quantization
     let mut quantize_bits = env::var("NANOCHAT_QUANTIZE")
         .ok().and_then(|v| v.parse::<usize>().ok());
-    let quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
+    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
         .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
     let args: Vec<String> = env::args().collect();
-    for i in 0..args.len() {
-        if args[i] == "--quantize" && i + 1 < args.len() {
-            if let Ok(bits) = args[i+1].parse::<usize>() { quantize_bits = Some(bits); }
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize") {
+        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+            quantize_bits = Some(val);
+        }
+    }
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") {
+        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+            quantize_block = val;
         }
     }
 
