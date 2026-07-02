@@ -63,16 +63,13 @@ pub fn scalar_to_f32<E: ToElement>(value: E) -> f32 { value.to_f32() }
             Tensor::from_data([[2.0f32, 0.0], [0.0, 2.0]], &device);
 
         // 2. 显式要求追踪这两个张量的梯度
-        let x = x.require_grad();
-        let w = w.require_grad();
+        let (x, w) = (x.require_grad(), w.require_grad());
 
         // 3. 执行前向计算：y = x * w (矩阵乘法)
         let y = x.clone().matmul(w.clone());
 
         // 4. 将输出规约为标量 Loss：loss = sum(y)
-        let loss = y.sum();
-
-        let epsilon = f32::EPSILON; // 1e-4
+        let (loss, epsilon) = (y.sum(), f32::EPSILON); // 1e-4
 
         // Burn 中转换为标量的写法非常直接
         let loss_val = loss.clone().into_scalar();

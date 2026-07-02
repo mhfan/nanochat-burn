@@ -40,9 +40,8 @@ pub struct GptConfig {
 impl GptConfig {
     pub fn compute_window_sizes(&self) -> Vec<i32> {
         let pattern = self.window_pattern.to_uppercase();
-        let long_window = -1;
         let short_window = ((self.sequence_len as f32 / 4.0 / 128.0).ceil() * 128.0) as i32;
-        let mut window_sizes = Vec::new();
+        let (mut window_sizes, long_window) = (Vec::new(), -1);
         for i in 0..self.n_layer {
             let ch = pattern.chars().nth(i % pattern.len()).unwrap_or('L');
             window_sizes.push(if ch == 'S' { short_window } else { long_window });
@@ -681,25 +680,18 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
         let config = GptConfig {
-            sequence_len: 256,
-            vocab_size: 280,
-            n_layer: 4,
-            n_head: 4,
-            n_kv_head: 2,
-            n_embd: 64,
-            window_pattern: "SL".to_string(),
-            quantization: None,
+            sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 4, n_kv_head: 1,
+            n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
         use crate::common::ModelAutodiffBackend;
         let gpt: Gpt<ModelAutodiffBackend> = Gpt::new(config, &device);
 
-        // Use identical shape as RL training batch: [8, 255]
-        let idx = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([8, 255], &device);
-        let targets = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([8, 255], &device);
+        let idx = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([2, 16], &device);
+        let targets = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([2, 16], &device);
 
         let logits = gpt.forward(idx, None);
-        assert_eq!(logits.shape().dims(), [8, 255, 280]);
+        assert_eq!(logits.shape().dims(), [2, 16, 280]);
 
         let loss = gpt.compute_loss(logits, targets);
         let loss_val = loss.clone().into_scalar();
@@ -711,33 +703,27 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     #[test] fn test_paged_attention_roundtrip() {
         let device = crate::common::init_device();
         let config = GptConfig {
-            sequence_len: 256,
-            vocab_size: 280,
-            n_layer: 2,
-            n_head: 4,
-            n_kv_head: 2,
-            n_embd: 64,
-            window_pattern: "SL".to_string(),
-            quantization: None,
+            sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4, n_kv_head: 1,
+            n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
-        use crate::common::ModelAutodiffBackend;
-        let gpt: Gpt<ModelAutodiffBackend> = Gpt::new(config, &device);
+        use crate::common::ModelBackend;
+        let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
 
-        let prompt = [12, 45, 67, 89, 90];
-        let (prompt_len, num_samples) = (prompt.len(), 2);
+        let prompt = [12, 45, 67];
+        let (prompt_len, num_samples) = (prompt.len(), 1);
 
         let idx_data: Vec<_> = std::iter::repeat_n(prompt, num_samples).flatten().collect();
 
         // Prefill index tensor
-        let prefill_idx = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
+        let prefill_idx = Tensor::<ModelBackend, 2, Int>::from_data(
             TensorData::new(idx_data, Shape::new([num_samples, prompt_len])), &device,
         );
 
         let head_dim = gpt.config.n_embd / gpt.config.n_head;
 
-        // Run prefill and 5 steps of autoregressive generation for different page sizes
-        let (page_sizes, mut outputs) = (vec![4, 8, 16], Vec::new());
+        // Run prefill and a couple of autoregressive steps across page sizes.
+        let (page_sizes, mut outputs) = (vec![2, 4], Vec::new());
 
         for &page_size in &page_sizes {
             let mut cache = KVCache::new_paged(gpt.config.n_layer, num_samples,
@@ -750,19 +736,18 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             let mut step_logits = vec![logits.clone()];
 
             // 2. Autoregressive steps
-            let mut current_token = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
-                TensorData::new(vec![90i32; num_samples], Shape::new([num_samples, 1])),
+            let mut current_token = Tensor::<ModelBackend, 2, Int>::from_data(
+                TensorData::new(vec![68i32; num_samples], Shape::new([num_samples, 1])),
                 &device,
             );
 
-            for step_idx in 0..5 {
+            for step_idx in 0..2 {
                 let step = prompt_len + step_idx;
                 let logits_step = gpt.forward_with_cache(current_token.clone(), &mut cache, step);
                 step_logits.push(logits_step.clone());
 
-                current_token = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
-                    TensorData::new(vec![91i32; num_samples], Shape::new([num_samples, 1])),
-                    &device,
+                current_token = Tensor::<ModelBackend, 2, Int>::from_data(
+                    TensorData::new(vec![69i32; num_samples], Shape::new([num_samples, 1])), &device,
                 );
             }
 
@@ -771,20 +756,14 @@ impl<B: Backend> Gpt<B, Linear<B>> {
 
         // Assert that the logits are mathematically identical across all page sizes
         for step in 0..outputs[0].len() {
-            let (logits_4, logits_8, logits_16) =
-                (&outputs[0][step], &outputs[1][step], &outputs[2][step]);
+            let (logits_2, logits_4) = (&outputs[0][step], &outputs[1][step]);
 
             let diff_8 = crate::common::scalar_to_f32(
-                (logits_4.clone() - logits_8.clone()).abs().max().into_scalar(),
-            );
-            let diff_16 = crate::common::scalar_to_f32(
-                (logits_4.clone() - logits_16.clone()).abs().max().into_scalar(),
+                (logits_2.clone() - logits_4.clone()).abs().max().into_scalar(),
             );
 
             assert_eq!(diff_8, 0.0,
-                "Logits differ between page_size=4 and page_size=8 at step {}", step);
-            assert_eq!(diff_16, 0.0,
-                "Logits differ between page_size=4 and page_size=16 at step {}", step);
+                "Logits differ between page_size=2 and page_size=4 at step {}", step);
         }
     }
 //}

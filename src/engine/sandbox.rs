@@ -129,7 +129,7 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     }
 
     #[test] fn test_sandbox_timeout() {
-        let result = execute_code("import time\ntime.sleep(10)", 1);
+        let result = execute_code("import time\ntime.sleep(10)", 0);
         assert!(!result.success);
         assert!(result.timeout);
         assert!(result.error.unwrap().contains("timed out"));

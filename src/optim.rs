@@ -48,24 +48,11 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         let value_embeds = (0..n_layer).map(|_| None).collect();
         let h = (0..n_layer)
             .map(|_| BlockMuonState {
-                c_q: None,
-                c_k: None,
-                c_v: None,
-                c_proj: None,
-                ve_gate: None,
-                c_fc: None,
-                c_proj_mlp: None,
+                c_q: None, c_k: None, c_v: None, c_proj: None,
+                ve_gate: None, c_fc: None, c_proj_mlp: None,
             }).collect();
-        Self {
-            wte: None,
-            lm_head: None,
-            value_embeds,
-            resid_lambdas: None,
-            x0_lambdas: None,
-            smear_gate: None,
-            smear_lambda: None,
-            backout_lambda: None,
-            h,
+        Self { wte: None, lm_head: None, value_embeds, resid_lambdas: None, x0_lambdas: None,
+            smear_gate: None, smear_lambda: None, backout_lambda: None, h,
         }
     }
 
@@ -82,31 +69,15 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         use burn::module::Param;
         // 1. Embeddings, lm_head, and scalars go into AdamW
         if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.wte.weight.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.wte.weight.val().inner(),
-                grad,
-                &mut self.wte,
-                embedding_lr,
-                0.001,
-                0.8,
-                0.995,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.wte.weight.val().inner(),
+                grad, &mut self.wte, embedding_lr, 0.001, 0.8, 0.995, 1e-4, step,
             ));
             gpt.wte.weight = Param::from_tensor(new_w);
         }
 
         if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.lm_head.weight.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.lm_head.weight.val().inner(),
-                grad,
-                &mut self.lm_head,
-                adamw_lr,
-                0.01,
-                0.8,
-                0.96,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.lm_head.weight.val().inner(),
+                grad, &mut self.lm_head, adamw_lr, 0.01, 0.8, 0.96, 1e-4, step,
             ));
             gpt.lm_head.weight = Param::from_tensor(new_w);
         }
@@ -118,14 +89,8 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
                     grads.get::<B::InnerBackend, 2>(gpt.value_embeds[ve_cnt].weight.id) {
                     let new_w = Tensor::from_inner(adamw_step(
                         gpt.value_embeds[ve_cnt].weight.val().inner(),
-                        grad,
-                        &mut self.value_embeds[ve_cnt],
-                        value_embed_lr,
-                        0.01,
-                        0.8,
-                        0.995,
-                        1e-4,
-                        step,
+                        grad, &mut self.value_embeds[ve_cnt], value_embed_lr,
+                        0.01, 0.8, 0.995, 1e-4, step,
                     ));
                     gpt.value_embeds[ve_cnt].weight = Param::from_tensor(new_w);
                 }
@@ -134,31 +99,17 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         }
 
         if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.resid_lambdas.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.resid_lambdas.val().inner(),
-                grad,
-                &mut self.resid_lambdas,
-                scalar_lr * 0.01,
-                0.05,
-                0.8,
-                0.95,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.resid_lambdas.val().inner(),
+                grad, &mut self.resid_lambdas, scalar_lr * 0.01,
+                0.05, 0.8, 0.95, 1e-4, step,
             ));
             gpt.resid_lambdas = Param::from_tensor(new_w);
         }
 
         if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.x0_lambdas.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.x0_lambdas.val().inner(),
-                grad,
-                &mut self.x0_lambdas,
-                scalar_lr,
-                0.0,
-                0.96,
-                0.95,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.x0_lambdas.val().inner(),
+                grad, &mut self.x0_lambdas, scalar_lr,
+                0.0, 0.96, 0.95, 1e-4, step,
             ));
             gpt.x0_lambdas = Param::from_tensor(new_w);
         }
@@ -166,46 +117,22 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         let smear_lr = lr * SMEAR_LR_SCALE;
 
         if let Some(grad) = grads.get::<B::InnerBackend, 2>(gpt.smear_gate.weight.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.smear_gate.weight.val().inner(),
-                grad,
-                &mut self.smear_gate,
-                smear_lr,
-                0.0,
-                0.8,
-                0.95,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.smear_gate.weight.val().inner(),
+                grad, &mut self.smear_gate, smear_lr, 0.0, 0.8, 0.95, 1e-4, step,
             ));
             gpt.smear_gate.weight = Param::from_tensor(new_w);
         }
 
         if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.smear_lambda.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.smear_lambda.val().inner(),
-                grad,
-                &mut self.smear_lambda,
-                smear_lr,
-                0.0,
-                0.8,
-                0.95,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.smear_lambda.val().inner(),
+                grad, &mut self.smear_lambda, smear_lr, 0.0, 0.8, 0.95, 1e-4, step,
             ));
             gpt.smear_lambda = Param::from_tensor(new_w);
         }
 
         if let Some(grad) = grads.get::<B::InnerBackend, 1>(gpt.backout_lambda.id) {
-            let new_w = Tensor::from_inner(adamw_step(
-                gpt.backout_lambda.val().inner(),
-                grad,
-                &mut self.backout_lambda,
-                smear_lr,
-                0.0,
-                0.8,
-                0.95,
-                1e-4,
-                step,
+            let new_w = Tensor::from_inner(adamw_step(gpt.backout_lambda.val().inner(),
+                grad, &mut self.backout_lambda, smear_lr, 0.0, 0.8, 0.95, 1e-4, step,
             ));
             gpt.backout_lambda = Param::from_tensor(new_w);
         }
@@ -215,15 +142,9 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             |param: &mut Param<Tensor<B, 2>>,
              state_opt: &mut Option<MuonState<B::InnerBackend, 2>>| {
                 if let Some(grad) = grads.get::<B::InnerBackend, 2>(param.id) {
-                    let new_w = Tensor::from_inner(muon_step(
-                        param.val().inner(),
+                    let new_w = Tensor::from_inner(muon_step(param.val().inner(),
                         grad,
-                        state_opt,
-                        lr,
-                        weight_decay,
-                        0.95,
-                        0.9,
-                        5,
+                        state_opt, lr, weight_decay, 0.95, 0.9, 5,
                     ));
                     *param = Param::from_tensor(new_w);
                 }

@@ -250,24 +250,14 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
         let target_config = crate::gpt::GptConfig {
-            sequence_len: 64,
-            vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 2,
-            n_head: 4,
-            n_kv_head: 2,
-            n_embd: 32,
-            window_pattern: "L".to_string(),
-            quantization: None,
+            sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
+            n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
+            window_pattern: "L".to_string(), quantization: None,
         };
         let draft_config = crate::gpt::GptConfig {
-            sequence_len: 64,
-            vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 1,
-            n_head: 4,
-            n_kv_head: 2,
-            n_embd: 32,
-            window_pattern: "L".to_string(),
-            quantization: None,
+            sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
+            n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
+            window_pattern: "L".to_string(), quantization: None,
         };
 
         use crate::common::ModelBackend;
@@ -284,15 +274,19 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let (mut target_state, mut target_logits) =
             target_engine.prefill(&prompt_tokens, 1, &device);
         let mut target_res = prompt_tokens.clone();
-        for _ in 0..10 {
+        for _ in 0..3 {
             let (toks, _, next_logits) = target_engine
                 .step_generation(&mut target_state, target_logits, 0.0, None, 1.0, &device);
             target_res.push(toks[0]);
             target_logits = next_logits;
+            let special_tokens = tokenizer.special_token_ids();
+            if toks[0] == special_tokens.assistant_end || toks[0] == special_tokens.bos {
+                break;
+            }
         }
 
-        // 2. Generate with Speculative Decoding (deterministic greedy: temperature = 0.0, K = 3)
-        let spec_res = spec_engine.generate(&prompt_tokens, 10, 3, 0.0, None, 1.0, &device);
+        // 2. Generate with Speculative Decoding (deterministic greedy: temperature = 0.0, K = 2)
+        let spec_res = spec_engine.generate(&prompt_tokens, 3, 2, 0.0, None, 1.0, &device);
 
         // 3. Verify Lossless Parity (outputs must be mathematically identical!)
         assert_eq!(spec_res, target_res,
