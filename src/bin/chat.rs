@@ -74,8 +74,7 @@ fn main() {
 
     // Initialize conversation state
     let mut conversation = Conversation { messages: vec![] };
-    let assistant_end = *tokenizer.get_special_tokens()
-        .get("<|assistant_end|>").unwrap_or(&50256);
+    let special_tokens = tokenizer.special_token_ids();
 
     loop {
         print!("\n\x1b[32m\x1b[1mUser >\x1b[0m ");
@@ -107,7 +106,7 @@ fn main() {
         // so we generate from the prompt end
         let mut clean_prompt = prompt_tokens;
         if let Some(&last) = clean_prompt.last() &&
-            (last == assistant_end || last == tokenizer.get_bos_token_id()) {
+            (last == special_tokens.assistant_end || last == special_tokens.bos) {
             clean_prompt.pop();
         }
 

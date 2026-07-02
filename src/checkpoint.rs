@@ -188,9 +188,6 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
 }
 
 //#[cfg(test)] mod tests { use super::*;
-#[cfg(all(test, feature = "ndarray"))]
-use burn::prelude::ToElement;
-
     #[test] fn test_safetensors_roundtrip() {
         let device = crate::common::init_device();
         use crate::common::ModelBackend;
@@ -213,43 +210,37 @@ use burn::prelude::ToElement;
             .expect("Failed to load safetensors");
 
         // 4. Assert that all weights are identical
-        let diff_wte = (model_src.wte.weight.val() - model_dst.wte.weight.val())
-            .abs().sum().into_scalar().to_f32();
-        assert_eq!(diff_wte, 0.0, "wte weight mismatch");
-
-        let diff_lm = (model_src.lm_head.weight.val() - model_dst.lm_head.weight.val())
-            .abs().sum().into_scalar().to_f32();
-        assert_eq!(diff_lm, 0.0, "lm_head weight mismatch");
+        assert_tensor_exact_eq(model_src.wte.weight.val(), model_dst.wte.weight.val(),
+            "wte weight mismatch");
+        assert_tensor_exact_eq(model_src.lm_head.weight.val(), model_dst.lm_head.weight.val(),
+            "lm_head weight mismatch");
 
         for i in 0..model_src.config.n_layer {
             let (src_block, dst_block) = (&model_src.h[i], &model_dst.h[i]);
 
-            let diff_q = (src_block.attn.c_q.weight.val() - dst_block.attn.c_q.weight.val())
-                .abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_q, 0.0, "c_q weight mismatch at layer {}", i);
-
-            let diff_k = (src_block.attn.c_k.weight.val() - dst_block.attn.c_k.weight.val())
-                .abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_k, 0.0, "c_k weight mismatch at layer {}", i);
-
-            let diff_v = (src_block.attn.c_v.weight.val() - dst_block.attn.c_v.weight.val())
-                .abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_v, 0.0, "c_v weight mismatch at layer {}", i);
-
-            let diff_proj = (src_block.attn.c_proj.weight.val() -
-                    dst_block.attn.c_proj.weight.val()).abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_proj, 0.0, "c_proj weight mismatch at layer {}", i);
-
-            let diff_fc = (src_block.mlp.c_fc.weight.val() - dst_block.mlp.c_fc.weight.val())
-                .abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_fc, 0.0, "c_fc weight mismatch at layer {}", i);
-
-            let diff_p = (src_block.mlp.c_proj.weight.val() - dst_block.mlp.c_proj.weight.val())
-                .abs().sum().into_scalar().to_f32();
-            assert_eq!(diff_p, 0.0, "c_proj weight mismatch at layer {}", i);
+            assert_tensor_exact_eq(src_block.attn.c_q.weight.val(), dst_block.attn.c_q.weight.val(),
+                &format!("c_q weight mismatch at layer {}", i));
+            assert_tensor_exact_eq(src_block.attn.c_k.weight.val(), dst_block.attn.c_k.weight.val(),
+                &format!("c_k weight mismatch at layer {}", i));
+            assert_tensor_exact_eq(src_block.attn.c_v.weight.val(), dst_block.attn.c_v.weight.val(),
+                &format!("c_v weight mismatch at layer {}", i));
+            assert_tensor_exact_eq(src_block.attn.c_proj.weight.val(),
+                dst_block.attn.c_proj.weight.val(),
+                &format!("c_proj weight mismatch at layer {}", i));
+            assert_tensor_exact_eq(src_block.mlp.c_fc.weight.val(), dst_block.mlp.c_fc.weight.val(),
+                &format!("c_fc weight mismatch at layer {}", i));
+            assert_tensor_exact_eq(src_block.mlp.c_proj.weight.val(),
+                dst_block.mlp.c_proj.weight.val(),
+                &format!("mlp c_proj weight mismatch at layer {}", i));
         }
 
         // Clean up temporary file
         std::fs::remove_file(path).ok();
+    }
+
+    #[cfg(test)] fn assert_tensor_exact_eq<B: Backend, const D: usize>(left: Tensor<B, D>,
+        right: Tensor<B, D>, message: &str) {
+        let diff = crate::common::scalar_to_f32((left - right).abs().sum().into_scalar());
+        assert_eq!(diff, 0.0, "{}", message);
     }
 //}

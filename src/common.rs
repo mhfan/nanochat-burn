@@ -1,20 +1,16 @@
 
-use burn::{backend::autodiff::Autodiff,
+use burn::{ prelude::ToElement, backend::autodiff::Autodiff,
     tensor::{DType, backend::BackendTypes, f16},
 };
-#[cfg(feature = "ndarray")]
-use burn::backend::ndarray::NdArray;
-#[cfg(not(feature = "ndarray"))]
-use burn::backend::wgpu::Wgpu;
+#[cfg(feature = "ndarray")] use burn::backend::ndarray::NdArray;
+#[cfg(not(feature = "ndarray"))] use burn::backend::wgpu::Wgpu;
 
 /// 定义默认的 GPU 后端与自动微分包装
 //pub type ModelBackend = Wgpu;
-#[cfg(feature = "ndarray")]
-pub type ModelBackend = NdArray<f32, i32>;
-#[cfg(not(feature = "ndarray"))]
-pub type ModelBackend = Wgpu<f16, i32>;
-pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
+#[cfg(feature = "ndarray")] pub type ModelBackend = NdArray<f32, i32>;
+#[cfg(not(feature = "ndarray"))] pub type ModelBackend = Wgpu<f16, i32>;
 pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
+pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
 
 /// 初始化系统计算设备：优先使用 WGPU GPU；
 /// 如果环境变量 BURN_DEVICE=cpu，则强行使用 CPU 运行以规避 GPU JIT 编译开销
@@ -22,11 +18,9 @@ pub fn init_device() -> ModelDevice {
     #[cfg(feature = "ndarray")] { Default::default() }
 
     #[cfg(not(feature = "ndarray"))] {
-    let device = if std::env::var("BURN_DEVICE").unwrap_or_default().to_lowercase() == "cpu" {
-        burn::backend::wgpu::WgpuDevice::Cpu
-    } else { Default::default() };
-    //tracing::info!("Initializing computational device: {:?}", device);
-    device
+        let use_cpu = std::env::var("BURN_DEVICE")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("cpu"));
+        if use_cpu { burn::backend::wgpu::WgpuDevice::Cpu } else { Default::default() }
     }
 }
 
@@ -50,10 +44,9 @@ pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
-#[cfg(all(test, feature = "ndarray"))]
-use burn::prelude::ToElement;
+pub fn scalar_to_f32<E: ToElement>(value: E) -> f32 { value.to_f32() }
 
+//#[cfg(test)] mod tests { use super::*;
     /// 执行数值校验与反向传播管道验证
     #[test] pub fn verify_autodiff_pipeline() {
         // 初始化测试日志，以便在测试失败时观察底层驱动输出
@@ -84,7 +77,7 @@ use burn::prelude::ToElement;
         // Burn 中转换为标量的写法非常直接
         let loss_val = loss.clone().into_scalar();
         tracing::debug!("Forward Pass Loss: {}", loss_val);
-        assert!((loss_val.to_f32() - 20.0).abs() < epsilon);
+        assert!((scalar_to_f32(loss_val) - 20.0).abs() < epsilon);
 
         // 5. 触发反向传播
         let grads = loss.backward();
@@ -101,14 +94,14 @@ use burn::prelude::ToElement;
         tracing::debug!("Gradient of w (dy/dw): \n{}", w_grad);
 
         let expected_x_grad = [2.0f32, 2.0, 2.0, 2.0];
-        for (act, exp) in x_grad.clone().into_data()
-            .iter().map(|v: f16| v.to_f32()).zip(expected_x_grad.iter()) {
+        for (act, exp) in tensor_data_to_f32_vec(x_grad.clone().into_data())
+            .into_iter().zip(expected_x_grad.iter()) {
             assert!((act - exp).abs() < epsilon, "x 梯度不匹配! 实际: {:?}", x_grad);
         }
 
         let expected_w_grad = [4.0f32, 4.0, 6.0, 6.0];
-        for (act, exp) in w_grad.clone().into_data()
-            .iter().map(|v: f16| v.to_f32()).zip(expected_w_grad.iter()) {
+        for (act, exp) in tensor_data_to_f32_vec(w_grad.clone().into_data())
+            .into_iter().zip(expected_w_grad.iter()) {
             assert!((act - exp).abs() < epsilon, "w 梯度不匹配! 实际: {:?}", w_grad);
         }
     }

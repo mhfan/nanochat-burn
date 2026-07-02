@@ -54,9 +54,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         target_logits: Tensor<B, 2>, k_spec: usize, temperature: f32,
         top_k: Option<usize>, repetition_penalty: f32, device: &B::Device) ->
         (Vec<usize>, Tensor<B, 2>, bool) {
-        let assistant_end = *self.tokenizer.get_special_tokens()
-            .get("<|assistant_end|>").unwrap_or(&50256);
-        let bos = self.tokenizer.get_bos_token_id();
+        let special_tokens = self.tokenizer.special_token_ids();
 
         // 1. Autoregressively draft K tokens using the fast Draft Model
         let last_tok = *state.current_tokens.last().unwrap();
@@ -100,7 +98,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             state.draft_state.step += 1;
             state.step += 1;
 
-            let is_finished = token == assistant_end || token == bos;
+            let is_finished =
+                token == special_tokens.assistant_end || token == special_tokens.bos;
             return (vec![token], next_logits, is_finished);
         }
 
@@ -146,7 +145,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 state.target_state.current_tokens[0].push(draft_tok);
                 accepted_count += 1;
 
-                if draft_tok == assistant_end || draft_tok == bos {
+                if draft_tok == special_tokens.assistant_end || draft_tok == special_tokens.bos {
                     is_finished = true;
                     break;
                 }
@@ -178,7 +177,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                     );
                     final_next_logits = next_logits_3d.reshape([1, vocab_size]);
 
-                    if last_pred_tok == assistant_end || last_pred_tok == bos {
+                    if last_pred_tok == special_tokens.assistant_end ||
+                        last_pred_tok == special_tokens.bos {
                         is_finished = true;
                     }
                 }
@@ -200,7 +200,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 let vocab_size = self.target_engine.model.config.vocab_size;
                 final_next_logits = correction_logits_3d.reshape([1, vocab_size]);
 
-                if target_pred_tok == assistant_end || target_pred_tok == bos {
+                if target_pred_tok == special_tokens.assistant_end ||
+                    target_pred_tok == special_tokens.bos {
                     is_finished = true;
                 }
                 break;

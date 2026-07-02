@@ -1,13 +1,11 @@
 
 use std::time::Instant;
 
-use burn::{prelude::ToElement,
-    tensor::{Int, Shape, Tensor, TensorData,
-        backend::{AutodiffBackend, Backend},
-    },
-};
+use burn::{tensor::{Int, Shape, Tensor, TensorData,
+    backend::{AutodiffBackend, Backend}
+}};
 
-use crate::{ dataloader::DistributedDataLoader, gpt::Gpt,
+use crate::{common::scalar_to_f32, dataloader::DistributedDataLoader, gpt::Gpt,
     optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
@@ -167,7 +165,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
                 let logits = self.model.forward(x_tensor, None);
                 let loss =
                     self.model.compute_loss(logits, y_tensor) / (grad_accum_steps as f32);
-                step_loss += loss.clone().into_scalar().to_f32();
+                step_loss += scalar_to_f32(loss.clone().into_scalar());
 
                 let step_grads = loss.backward();
                 let step_grads_params =

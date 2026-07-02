@@ -150,9 +150,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     let (max_val, offset, max_q) =
         if bits == 8 { (127.0, 128.0, 255.0) } else { (7.0, 8.0, 15.0) };
 
-    let (q_weight, scales) = if block_size_actual > 0 {
+    let (q_weight, scales) = if let Some(num_blocks) = i.checked_div(block_size_actual) {
         // Block-wise quantization
-        let num_blocks = i / block_size_actual;
         let reshaped = weight.reshape([num_blocks, block_size_actual, o]);
 
         // Compute block max absolute value along block dimension (dimension 1)
@@ -220,8 +219,6 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
 }
 
 #[cfg(test)] mod tests { use super::*;
-    #[cfg(feature = "ndarray")]
-    use burn::prelude::ToElement;
     use burn::tensor::Distribution;
 
     #[test] fn test_quantization_w8_rowwise() {
@@ -244,7 +241,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let dequantized = q_linear.dequantize();
         assert_eq!(dequantized.shape().dims(), [64, 128]);
 
-        let diff = (dequantized - weight).abs().mean().into_scalar().to_f32();
+        let diff = crate::common::scalar_to_f32(
+            (dequantized - weight).abs().mean().into_scalar());
         println!("W8 Row-wise Quantization Mean Absolute Error: {}", diff);
         // Standard normal distribution values quantized to 256 levels should have very low
         // error (< 0.02)
@@ -271,7 +269,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let dequantized = q_linear.dequantize();
         assert_eq!(dequantized.shape().dims(), [64, 128]);
 
-        let diff = (dequantized - weight).abs().mean().into_scalar().to_f32();
+        let diff = crate::common::scalar_to_f32(
+            (dequantized - weight).abs().mean().into_scalar());
         println!("W4 Block-wise (32) Quantization Mean Absolute Error: {}", diff);
         // Standard normal values quantized to 16 levels block-wise
         // should have acceptable error (< 0.25)
@@ -303,7 +302,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         assert_eq!(out_std.shape().dims(), [2, 8, 128]);
         assert_eq!(out_quant.shape().dims(), [2, 8, 128]);
 
-        let diff = (out_std - out_quant).abs().mean().into_scalar().to_f32();
+        let diff = crate::common::scalar_to_f32(
+            (out_std - out_quant).abs().mean().into_scalar());
         println!("W8 Block-wise Forward Mean Absolute Difference: {}", diff);
         assert!(diff < 0.05, "Forward difference too high: {}", diff);
     }

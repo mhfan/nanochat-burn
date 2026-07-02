@@ -514,6 +514,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         (cos, sin)
     }
 
+    #[allow(clippy::single_range_in_vec_init)]
     fn forward_inner(&self, idx: Tensor<B, 2, Int>, mut cache_opt: Option<&mut KVCache<B>>,
         step: usize) -> Tensor<B, 3> {
         let shape: [usize; 2] = idx.shape().dims();
@@ -677,9 +678,6 @@ impl<B: Backend> Gpt<B, Linear<B>> {
 }
 
 //#[cfg(test)] mod tests { use super::*;
-#[cfg(all(test, feature = "ndarray"))]
-use burn::prelude::ToElement;
-
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
         let config = GptConfig {
@@ -705,7 +703,7 @@ use burn::prelude::ToElement;
 
         let loss = gpt.compute_loss(logits, targets);
         let loss_val = loss.clone().into_scalar();
-        assert!(loss_val.to_f32() >= 0.0);
+        assert!(crate::common::scalar_to_f32(loss_val) >= 0.0);
 
         let _grads = loss.backward();
     }
@@ -729,8 +727,7 @@ use burn::prelude::ToElement;
         let prompt = [12, 45, 67, 89, 90];
         let (prompt_len, num_samples) = (prompt.len(), 2);
 
-        let mut idx_data = Vec::new();
-        for _ in 0..num_samples { idx_data.extend(prompt.iter().copied()); }
+        let idx_data: Vec<_> = std::iter::repeat_n(prompt, num_samples).flatten().collect();
 
         // Prefill index tensor
         let prefill_idx = Tensor::<ModelAutodiffBackend, 2, Int>::from_data(
@@ -777,8 +774,12 @@ use burn::prelude::ToElement;
             let (logits_4, logits_8, logits_16) =
                 (&outputs[0][step], &outputs[1][step], &outputs[2][step]);
 
-            let diff_8 = (logits_4.clone() - logits_8.clone()).abs().max().into_scalar().to_f32();
-            let diff_16 = (logits_4.clone() - logits_16.clone()).abs().max().into_scalar().to_f32();
+            let diff_8 = crate::common::scalar_to_f32(
+                (logits_4.clone() - logits_8.clone()).abs().max().into_scalar(),
+            );
+            let diff_16 = crate::common::scalar_to_f32(
+                (logits_4.clone() - logits_16.clone()).abs().max().into_scalar(),
+            );
 
             assert_eq!(diff_8, 0.0,
                 "Logits differ between page_size=4 and page_size=8 at step {}", step);

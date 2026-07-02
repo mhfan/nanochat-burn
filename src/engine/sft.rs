@@ -1,8 +1,9 @@
 
 use std::{iter, path::Path, time::Instant};
-use burn::{prelude::ToElement, tensor::{Int, Tensor, backend::AutodiffBackend}};
+use burn::tensor::{Int, Tensor, backend::AutodiffBackend};
 
-use crate::{dataset::SftDataset, engine::{get_lr_multiplier, get_weight_decay},
+use crate::{common::scalar_to_f32, dataset::SftDataset,
+    engine::{get_lr_multiplier, get_weight_decay},
     gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer};
 
 pub struct SftPacker {
@@ -138,7 +139,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
         optimizer.step(&mut model, &grads_params, lr, step, wd);
 
-        let loss_val = loss.into_scalar().to_f32();
+        let loss_val = scalar_to_f32(loss.into_scalar());
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
 
         if step % 5 == 0 || step == num_iterations {

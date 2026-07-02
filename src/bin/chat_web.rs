@@ -139,11 +139,10 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         let tokenizer = &engine_ref.engine.tokenizer;
         let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
 
-        let assistant_end = *tokenizer.get_special_tokens()
-            .get("<|assistant_end|>").unwrap_or(&50256);
+        let special_tokens = tokenizer.special_token_ids();
         let mut clean_prompt = prompt_tokens;
         if let Some(&last) = clean_prompt.last() {
-            if last == assistant_end || last == tokenizer.get_bos_token_id() {
+            if last == special_tokens.assistant_end || last == special_tokens.bos {
                 clean_prompt.pop();
             }
         }

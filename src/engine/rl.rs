@@ -1,8 +1,9 @@
 use std::{path::Path, time::Instant};
 
-use burn::{prelude::ToElement, tensor::{Int, Tensor, backend::AutodiffBackend}};
+use burn::tensor::{Int, Tensor, backend::AutodiffBackend};
 
-use crate::{common::extract_answer, dataset::SftDataset, tokenizer::BpeTokenizer,
+use crate::{common::{extract_answer, scalar_to_f32}, dataset::SftDataset,
+    tokenizer::BpeTokenizer,
     engine::inference::InferenceEngine, gpt::{Gpt, GptConfig}, optim::MuonAdamW};
 
 pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
@@ -26,8 +27,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 
-    let assistant_end =
-        *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+    let assistant_end = tokenizer.special_token_ids().assistant_end;
 
     // 2. Initialize Model and Optimizer
     let config = GptConfig {
@@ -156,8 +156,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let advantages_tensor = Tensor::<B, 1>::from_data(flat_adv_seq.as_slice(), device)
             .reshape([num_sequences, max_len - 1]);
 
-        let num_valid_val = targets_tensor.clone().not_equal_elem(-1)
-            .float().sum().into_scalar().to_f32().max(1.0);
+        let num_valid_val = scalar_to_f32(targets_tensor.clone().not_equal_elem(-1)
+            .float().sum().into_scalar()).max(1.0);
         let loss = (unreduced_2d * advantages_tensor).sum() / num_valid_val;
 
         tracing::info!("  Running training backward pass...");
@@ -172,7 +172,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         optimizer.step(&mut model, &grads_params, lr, step, 0.0);
         tracing::info!("  Optimizer update completed!");
 
-        let loss_val = loss.into_scalar().to_f32();
+        let loss_val = scalar_to_f32(loss.into_scalar());
         let avg_reward = all_rewards.iter().sum::<f32>() / (all_rewards.len() as f32);
 
         tracing::info!("Step {:02}/{:02} | Loss: {:.6} | Avg Reward: {:.2}%",

@@ -9,6 +9,21 @@ const SPECIAL_TOKENS: &[&str] = &[
     "<|bos|>", "<|user_start|>", "<|user_end|>", "<|assistant_start|>", "<|assistant_end|>",
     "<|python_start|>", "<|python_end|>", "<|output_start|>", "<|output_end|>",
 ];
+const FALLBACK_ASSISTANT_END: usize = 50256;
+const FALLBACK_PYTHON_START: usize = 50257;
+const FALLBACK_PYTHON_END: usize = 50258;
+const FALLBACK_OUTPUT_START: usize = 50259;
+const FALLBACK_OUTPUT_END: usize = 50260;
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpecialTokenIds {
+    pub bos: usize,
+    pub assistant_end: usize,
+    pub python_start: usize,
+    pub python_end: usize,
+    pub output_start: usize,
+    pub output_end: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePart {
@@ -229,6 +244,20 @@ impl BpeTokenizer {
         *self.special_tokens.get("<|bos|>")
             .or_else(|| self.special_tokens.get("<|endoftext|>"))
             .expect("Failed to find BOS token in tokenizer")
+    }
+
+    pub fn special_token_ids(&self) -> SpecialTokenIds {
+        let get = |token: &str, fallback| {
+            self.special_tokens.get(token).copied().unwrap_or(fallback)
+        };
+        SpecialTokenIds {
+            bos: self.get_bos_token_id(),
+            assistant_end: get("<|assistant_end|>", FALLBACK_ASSISTANT_END),
+            python_start: get("<|python_start|>", FALLBACK_PYTHON_START),
+            python_end: get("<|python_end|>", FALLBACK_PYTHON_END),
+            output_start: get("<|output_start|>", FALLBACK_OUTPUT_START),
+            output_end: get("<|output_end|>", FALLBACK_OUTPUT_END),
+        }
     }
 
     /// Return the vocabulary size

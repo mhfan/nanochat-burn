@@ -68,26 +68,19 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         device: &B::Device) -> (Vec<usize>, Vec<u8>, Tensor<B, 2>) {
         let num_samples = state.current_tokens.len();
 
-        let special_tokens = self.tokenizer.get_special_tokens();
-        let assistant_end = *special_tokens.get("<|assistant_end|>").unwrap_or(&50256);
-        let bos = self.tokenizer.get_bos_token_id();
+        let special_tokens = self.tokenizer.special_token_ids();
 
         // Sample candidate tokens
         let sampled_tokens = sample_next_token(
             logits, temperature, top_k, repetition_penalty, &state.current_tokens,
         );
 
-        let python_start = *special_tokens.get("<|python_start|>").unwrap_or(&50257);
-        let python_end = *special_tokens.get("<|python_end|>").unwrap_or(&50258);
-        let output_start = *special_tokens.get("<|output_start|>").unwrap_or(&50259);
-        let output_end = *special_tokens.get("<|output_end|>").unwrap_or(&50260);
-
         let mut next_token_column = Vec::with_capacity(num_samples);
         let mut is_sampled_mask = Vec::with_capacity(num_samples);
 
         for i in 0..num_samples {
             if state.completed[i] {
-                next_token_column.push(bos);
+                next_token_column.push(special_tokens.bos);
                 is_sampled_mask.push(0);
                 continue;
             }
@@ -100,22 +93,22 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             state.current_tokens[i].push(next_tok);
             is_sampled_mask.push(if is_forced { 0 } else { 1 });
 
-            if next_tok == assistant_end || next_tok == bos {
+            if next_tok == special_tokens.assistant_end || next_tok == special_tokens.bos {
                 state.completed[i] = true;
             }
 
             // Built-in Tool-Use State Machine
-            if next_tok == python_start {
+            if next_tok == special_tokens.python_start {
                 state.in_python_block[i] = true;
                 state.python_expr_tokens[i].clear();
-            } else if next_tok == python_end && state.in_python_block[i] {
+            } else if next_tok == special_tokens.python_end && state.in_python_block[i] {
                 state.in_python_block[i] = false;
                 let expr_str = self.tokenizer.decode(&state.python_expr_tokens[i]);
                 if let Some(res) = use_calculator(&expr_str) {
                     let res_tokens = self.tokenizer.encode_ordinary(&res);
-                    state.forced_tokens[i].push_back(output_start);
+                    state.forced_tokens[i].push_back(special_tokens.output_start);
                     for &t in &res_tokens { state.forced_tokens[i].push_back(t); }
-                    state.forced_tokens[i].push_back(output_end);
+                    state.forced_tokens[i].push_back(special_tokens.output_end);
                 }
             } else if state.in_python_block[i] {
                 state.python_expr_tokens[i].push(next_tok);
@@ -148,9 +141,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
 
-        let assistant_end = *self.tokenizer.get_special_tokens()
-            .get("<|assistant_end|>").unwrap_or(&50256);
-        let bos = self.tokenizer.get_bos_token_id();
+        let special_tokens = self.tokenizer.special_token_ids();
 
         let mut results = vec![prompt_tokens.to_vec(); num_samples];
         let mut masks = vec![vec![0; prompt_tokens.len()]; num_samples];
@@ -170,7 +161,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
                 if !completed[i] {
                     let token = token_column[i];
                     let mask = token_masks[i];
-                    if token == assistant_end || token == bos {
+                    if token == special_tokens.assistant_end || token == special_tokens.bos {
                         completed[i] = true;
                     } else {
                         results[i].push(token);
