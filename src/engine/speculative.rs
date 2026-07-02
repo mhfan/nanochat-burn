@@ -47,6 +47,11 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         (state, target_logits)
     }
 
+    fn sync_draft_state(&self, state: &mut SpeculativeState<B>, device: &B::Device) {
+        let (draft_state, _) = self.draft_engine.prefill(&state.current_tokens, 1, device);
+        state.draft_state = draft_state;
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Perform speculative decoding steps: draft K tokens,
     /// evaluate in parallel, and verify losslessly
@@ -94,9 +99,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             );
             let token = sampled_toks[0];
             state.current_tokens.push(token);
-            state.draft_state.current_tokens[0].push(token);
-            state.draft_state.step += 1;
             state.step += 1;
+            self.sync_draft_state(state, device);
 
             let is_finished =
                 token == special_tokens.assistant_end || token == special_tokens.bos;
@@ -208,15 +212,11 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             }
         }
 
-        // 4. Zero-Overhead KV-Cache Rollback & Pointers Synchronization
+        // 4. Synchronize state pointers and rebuild the draft cache from the accepted sequence.
         let final_len = state.step + accepted_count;
         state.target_state.step = final_len;
         state.step = final_len;
-
-        // Reset the Draft Model state to the exact accepted sequence length
-        state.draft_state.cache = temp_draft_state.cache;
-        state.draft_state.current_tokens[0] = state.target_state.current_tokens[0].clone();
-        state.draft_state.step = final_len;
+        self.sync_draft_state(state, device);
 
         (accepted_tokens, final_next_logits, is_finished)
     }

@@ -37,11 +37,19 @@ impl DistributedDataLoader {
                 return;
             }
 
+            let num_needed = batch_size * (sequence_length + 1);
+            if shards_assigned.iter().all(|&idx| dataset.shards[idx].num_tokens < num_needed) {
+                eprintln!(
+                    "DDP Rank {} has no shard large enough for one batch: need {} tokens",
+                    rank, num_needed
+                );
+                return;
+            }
+
             // 2. Set up initial positioning
             let mut shard_pos =
                 shards_assigned.iter().position(|&idx| idx == start_shard_idx).unwrap_or(0);
             let (mut offset, mut epoch) = (start_token_offset, start_epoch);
-            let num_needed = batch_size * (sequence_length + 1);
 
             loop {
                 let active_shard_idx = shards_assigned[shard_pos];

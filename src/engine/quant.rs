@@ -135,11 +135,16 @@ impl<B: Backend> QuantizedLinear<B> {
 pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     block_size: usize) -> QuantizedLinear<B> {
     let _device = linear.weight.device();
+    assert!(bits == 4 || bits == 8, "quantization bits must be 4 or 8");
 
     // Weight has shape [I, O] in Burn's Linear layer
     let weight = linear.weight.val();
     let shape = weight.shape().dims::<2>();
     let (i, o) = (shape[0], shape[1]);
+    let pack_factor = if bits == 8 { 4 } else { 8 };
+    assert!(i % pack_factor == 0,
+        "input dimension {} must be divisible by pack factor {} for W{} quantization",
+        i, pack_factor, bits);
 
     let block_size_actual = if bits == 4 && block_size == 0 {
         64 // Default block size of 64 for W4
@@ -150,7 +155,11 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     let (max_val, offset, max_q) =
         if bits == 8 { (127.0, 128.0, 255.0) } else { (7.0, 8.0, 15.0) };
 
-    let (q_weight, scales) = if let Some(num_blocks) = i.checked_div(block_size_actual) {
+    let (q_weight, scales) = if block_size_actual > 0 {
+        assert!(i % block_size_actual == 0,
+            "input dimension {} must be divisible by quantization block size {}",
+            i, block_size_actual);
+        let num_blocks = i / block_size_actual;
         // Block-wise quantization
         let reshaped = weight.reshape([num_blocks, block_size_actual, o]);
 
@@ -159,7 +168,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let max_abs = reshaped.clone().abs().max_dim(1);
 
         // Prevent division by zero
-        let block_scales = max_abs.clone() / max_val;
+        let block_scales = (max_abs.clone() / max_val).clamp(1e-6, 1e6);
 
         // Quantize
         let q_shifted = (reshaped / block_scales.clone()).round() + offset;
@@ -169,7 +178,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     } else {
         // Row-wise quantization (scales has shape [1, 1, O])
         let max_abs = weight.clone().abs().max_dim(0); // [1, o]
-        let channel_scales = max_abs.clone() / max_val;
+        let channel_scales = (max_abs.clone() / max_val).clamp(1e-6, 1e6);
 
         let reshaped_scales = channel_scales.clone().reshape([1, o]);
         let q_shifted = (weight / reshaped_scales).round() + offset;
@@ -181,8 +190,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     // Pack the quantized floats into packed i32 integers
     let packed_weights = if bits == 8 {
         // INT8: Pack factor 4
-        let num_packed = i / 4;
-        let q_reshaped = q_weight.reshape([num_packed, 4, o]).int();
+        let num_packed = i / pack_factor;
+        let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
 
         let mut packed =
             q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
@@ -195,8 +204,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         packed
     } else {
         // INT4: Pack factor 8
-        let num_packed = i / 8;
-        let q_reshaped = q_weight.reshape([num_packed, 8, o]).int();
+        let num_packed = i / pack_factor;
+        let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
 
         let mut packed =
             q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
@@ -209,11 +218,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         packed
     };
 
-    QuantizedLinear {
-        packed_weights,
-        scales,
-        bias: linear.bias,
-        bits,
+    QuantizedLinear { packed_weights, scales, bias: linear.bias, bits,
         block_size: block_size_actual,
     }
 }
