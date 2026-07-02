@@ -1,11 +1,9 @@
+use std::{path::Path, time::Instant};
 
-use std::{path::Path, time::Instant, iter};
-use burn::{prelude::ToElement, tensor::{Tensor, Int, backend::AutodiffBackend}};
-use crate::{gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer, dataset::SftDataset,
-    optim::MuonAdamW, engine::inference::InferenceEngine,
-};
+use burn::{prelude::ToElement, tensor::{Int, Tensor, backend::AutodiffBackend}};
 
-use crate::common::extract_answer;
+use crate::{common::extract_answer, dataset::SftDataset, tokenizer::BpeTokenizer,
+    engine::inference::InferenceEngine, gpt::{Gpt, GptConfig}, optim::MuonAdamW};
 
 pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
@@ -14,7 +12,9 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
     let rl_dataset_path = "data/eval/gsm8k.jsonl";
     if !Path::new(rl_dataset_path).exists() {
-        tracing::error!("GSM8K RL dataset not found! Please run synthetic dataset generator first.");
+        tracing::error!(
+            "GSM8K RL dataset not found! Please run synthetic dataset generator first."
+        );
         return;
     }
 
@@ -26,32 +26,38 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 
-    let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+    let assistant_end =
+        *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
 
     // 2. Initialize Model and Optimizer
-    let config = GptConfig { sequence_len: 256, n_layer: 4, n_head: 4, n_kv_head: 2, n_embd: 64,
-        window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(), quantization: None,
+    let config = GptConfig {
+        sequence_len: 256,
+        n_layer: 4,
+        n_head: 4,
+        n_kv_head: 2,
+        n_embd: 64,
+        window_pattern: "L".to_string(),
+        vocab_size: tokenizer.get_vocab_size(),
+        quantization: None,
     };
 
     let mut model: Gpt<B> = Gpt::new(config.clone(), device);
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
 
-    let num_steps = 10;
+    let (num_steps, learning_rate) = (10, 1e-3);
     let batch_size = 2; // number of questions per step
     let num_samples = 4; // number of rollouts per question
-    let learning_rate = 1e-3;
 
     tracing::info!("Starting RL training loop for {} steps...", num_steps);
-    let start_time = Instant::now();
-    let mut step = 0;
+    let (start_time, mut step) = (Instant::now(), 0);
 
     while step < num_steps {
         step += 1;
 
         // Collect rollouts
-        let mut all_rollouts = Vec::new();
         let mut all_masks = Vec::new();
         let mut all_rewards = Vec::new();
+        let mut all_rollouts = Vec::new();
         let mut all_advantages = Vec::new();
 
         // Run rollouts on batch_size questions
@@ -66,12 +72,10 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             let prompt_len = prompt_tokens.len();
 
             // Sample rollouts (returns both results and precise masks)
-            tracing::info!(
-                "  Rollout for question {}/{} (conv {}), prompt len = {}...",
-                q_idx + 1, batch_size, conv_idx, prompt_len
-            );
-            let (rollouts, masks) = inference_engine.generate_batch(&prompt_tokens,
-                num_samples, 128, 1.0, Some(50), 1.0, device,);
+            tracing::info!("  Rollout for question {}/{} (conv {}), prompt len = {}...",
+                q_idx + 1, batch_size, conv_idx, prompt_len);
+            let (rollouts, masks) = inference_engine.generate_batch(
+                &prompt_tokens, num_samples, 128, 1.0, Some(50), 1.0, device);
 
             // Get ground truth answer from conversation
             let last_msg = conversation.messages.last().unwrap();
@@ -88,7 +92,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
                 let pred_ans = extract_answer(&decoded_text);
 
                 // Compute reward
-                let reward = if gt_ans.is_some() && pred_ans == gt_ans { 1.0f32 } else { 0.0f32 };
+                let reward =
+                    if gt_ans.is_some() && pred_ans == gt_ans { 1.0f32 } else { 0.0f32 };
                 question_rewards.push(reward);
 
                 // Use the precise token-level mask returned from InferenceEngine
@@ -100,41 +105,35 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
             // Calculate advantages using GRPO formulation: (r - mean) / (std_dev + eps)
             let mean_reward = question_rewards.iter().sum::<f32>() / (num_samples as f32);
-            let variance = question_rewards.iter()
-                .map(|&r| (r - mean_reward).powi(2)) .sum::<f32>() / (num_samples as f32);
+            let variance = question_rewards.iter().map(|&r|
+                (r - mean_reward).powi(2)).sum::<f32>() / (num_samples as f32);
             let (std_dev, eps) = (variance.sqrt(), 1e-4f32);
-            let advantages: Vec<f32> = question_rewards.iter()
-                .map(|&r| (r - mean_reward) / (std_dev + eps)).collect();
+            let advantages: Vec<f32> = question_rewards.iter().map(|&r|
+                (r - mean_reward) / (std_dev + eps)).collect();
 
             all_rollouts.extend(question_rollouts);
-            all_masks.extend(question_masks);
             all_rewards.extend(question_rewards);
             all_advantages.extend(advantages);
+            all_masks.extend(question_masks);
         }
 
-        // Collate and pad rollouts to static maximum context length to eliminate JIT compiles during backprop
-        let max_len = model.config.sequence_len;
-        let num_sequences = all_rollouts.len();
+        // Collate and pad rollouts to static maximum context length to eliminate JIT compiles
+        // during backprop
+        let (max_len, num_sequences) = (model.config.sequence_len, all_rollouts.len());
 
         let mut flat_inputs = Vec::with_capacity(num_sequences * (max_len - 1));
         let mut flat_targets = Vec::with_capacity(num_sequences * (max_len - 1));
 
         for (i, rollout) in all_rollouts.iter().enumerate() {
             flat_inputs.extend((0..max_len - 1).map(|idx| {
-                if idx < rollout.len() {
-                    rollout[idx] as i32
-                } else {
-                    assistant_end as i32
-                }
+                if idx < rollout.len() { rollout[idx] as i32 } else { assistant_end as i32 }
             }));
 
             flat_targets.extend((0..max_len - 1).map(|idx| {
                 let j = idx + 1;
                 if j < rollout.len() && all_masks[i].get(j).copied().unwrap_or(0) == 1 {
                     rollout[j] as i32
-                } else {
-                    -1
-                }
+                } else { -1 }
             }));
         }
 
@@ -153,12 +152,12 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
         // Broadcast advantages to [num_sequences, max_len - 1] and multiply
         let flat_adv_seq: Vec<f32> = all_advantages.iter()
-            .flat_map(|&adv| iter::repeat(adv).take(max_len - 1))
-            .collect();
+            .flat_map(|&adv| std::iter::repeat_n(adv, max_len - 1)).collect();
         let advantages_tensor = Tensor::<B, 1>::from_data(flat_adv_seq.as_slice(), device)
             .reshape([num_sequences, max_len - 1]);
 
-        let num_valid_val = targets_tensor.clone().not_equal_elem(-1).float().sum().into_scalar().to_f32().max(1.0);
+        let num_valid_val = targets_tensor.clone().not_equal_elem(-1)
+            .float().sum().into_scalar().to_f32().max(1.0);
         let loss = (unreduced_2d * advantages_tensor).sum() / num_valid_val;
 
         tracing::info!("  Running training backward pass...");
@@ -176,10 +175,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let loss_val = loss.into_scalar().to_f32();
         let avg_reward = all_rewards.iter().sum::<f32>() / (all_rewards.len() as f32);
 
-        tracing::info!(
-            "Step {:02}/{:02} | Loss: {:.6} | Avg Reward: {:.2}%",
-            step, num_steps, loss_val, avg_reward * 100.0
-        );
+        tracing::info!("Step {:02}/{:02} | Loss: {:.6} | Avg Reward: {:.2}%",
+            step, num_steps, loss_val, avg_reward * 100.0);
     }
 
     let elapsed = start_time.elapsed();

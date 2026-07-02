@@ -1,9 +1,9 @@
 
 use std::{path::{Path, PathBuf}, time::Instant};
 use burn::tensor::backend::AutodiffBackend;
-use crate::{gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
-    dataset::pretokenize_text_to_bin, dataloader::DistributedDataLoader,
-    engine::{TrainingEngine, TrainingConfig},
+
+use crate::{dataloader::DistributedDataLoader, dataset::pretokenize_text_to_bin,
+    engine::{TrainingConfig, TrainingEngine}, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
 };
 
 pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
@@ -22,14 +22,15 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
             "Reinforcement learning uses rollback policies and policy gradient updates to align base pretrained models with human feedback.",
             "Isolated subprocess sandboxes protect systems by executing untrusted assistant-generated Python code with timeout limits.",
             "Pretraining establishes the core foundational language patterns, grammar, and generic semantic knowledge inside LLM weights.",
-            "Evaluation harnesses measure performance quantitatively using categorical argmax selections and generative pass metrics."
+            "Evaluation harnesses measure performance quantitatively using categorical argmax selections and generative pass metrics.",
         ];
 
         let full_text = format!("{} ", corpus.join(" ")).repeat(10);
 
         std::fs::create_dir_all("data").ok();
         std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");
-        pretokenize_text_to_bin(txt_path, bin_path, tokenizer).expect("Failed to pretokenize dataset");
+        pretokenize_text_to_bin(txt_path, bin_path, tokenizer)
+            .expect("Failed to pretokenize dataset");
         tracing::info!("Synthetic pretraining dataset pretokenized to: {:?}", bin_path);
     }
 
@@ -42,15 +43,16 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
 
     // 1. Train tokenizer
-    let corpus = vec!["BOS user assistant python output system pretraining deep learning transformer model optimizer"];
+    let corpus = vec![
+        "BOS user assistant python output system pretraining deep learning transformer model optimizer",
+    ];
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 512);
 
     // 2. Generate and pretokenize data
     let bin_path = generate_pretrain_dataset(&tokenizer);
 
     // 3. Configure training
-    let config = GptConfig { sequence_len: 16,
-        vocab_size: tokenizer.get_vocab_size(),
+    let config = GptConfig { sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
         n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
         window_pattern: "L".to_string(), quantization: None,
     };
@@ -81,10 +83,8 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
 
     for i in 1..=training_config.num_iterations {
         let loss = engine.train_step(&mut loader, device).await;
-        tracing::info!(
-            "Iteration {:02}/{:02} | Loss: {:.6}",
-            i, training_config.num_iterations, loss
-        );
+        tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}",
+            i, training_config.num_iterations, loss);
     }
 
     let elapsed = start_time.elapsed();

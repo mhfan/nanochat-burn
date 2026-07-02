@@ -1,6 +1,7 @@
 
-use nanochat_burn::common::{ModelAutodiffBackend, init_device};
-use nanochat_burn::engine::{pretrain::run_pretraining, sft::run_sft_training, rl::run_rl_training};
+use nanochat_burn::{common::{ModelAutodiffBackend, init_device},
+    engine::{pretrain::run_pretraining, rl::run_rl_training, sft::run_sft_training},
+};
 
 #[tokio::main] async fn main() {
     // Initialize logging subscriber

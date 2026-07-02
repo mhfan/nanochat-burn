@@ -1,15 +1,16 @@
 
-use axum::{routing::{get, post}, Router, Json,
-    response::{sse::{Event, KeepAlive, Sse}, Html, IntoResponse},
+use std::{convert::Infallible, env, sync::Arc};
+
+use axum::{Json, Router, routing::{get, post},
+    response::{Html, IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
-use std::{convert::Infallible, sync::Arc, env};
-use tokio::sync::mpsc;
-use serde::{Deserialize, Serialize};
 use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
+    common::{ModelBackend, ModelDevice, init_device},
     engine::{inference::InferenceEngine, quant::LinearOrQuantized},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
-    common::{ModelBackend, ModelDevice, init_device},
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
@@ -20,10 +21,7 @@ struct ChatRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    device: String,
-}
+struct HealthResponse { status: &'static str, device: String, }
 
 // Custom Stream wrapper to avoid tokio-stream dependency
 struct SseStream { rx: mpsc::Receiver<Result<Event, Infallible>>, }
@@ -31,8 +29,8 @@ struct SseStream { rx: mpsc::Receiver<Result<Event, Infallible>>, }
 impl futures_core::Stream for SseStream {
     type Item = Result<Event, Infallible>;
 
-    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>,)
-        -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
@@ -45,8 +43,9 @@ struct AppState { device: ModelDevice,
 #[tokio::main] async fn main() {
     // Initialize logging
     use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))).try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    ).try_init();
 
     // 1. Train BpeTokenizer
     let corpus = vec![
@@ -54,13 +53,13 @@ struct AppState { device: ModelDevice,
         "The planets of the solar system are: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
         "The capital of France is Paris.",
         "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / 5<|python_end|><|output_start|>2<|output_end|>.",
-        "System programming in Rust is extremely safe, concurrent, and high-performance."
+        "System programming in Rust is extremely safe, concurrent, and high-performance.",
     ];
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
     let vocab_size = tokenizer.get_vocab_size();
 
     // Parse CLI parameters and Environment Variables for quantization
-    let mut quantize_bits = env::var("NANOCHAT_QUANTIZE")
+    let mut quantize_bits  = env::var("NANOCHAT_QUANTIZE")
         .ok().and_then(|v| v.parse::<usize>().ok());
     let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
         .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
@@ -83,21 +82,21 @@ struct AppState { device: ModelDevice,
     };
 
     if let Some(bits) = quantize_bits {
-        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block, });
+        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block });
     }
 
     let device = init_device();
     let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
 
     let gpt = if let Some(q_config) = config.quantization {
-        println!("Dynamically quantizing web server model to INT{} (block = {})...", q_config.bits, q_config.block_size);
+        println!("Dynamically quantizing web server model to INT{} (block = {})...",
+            q_config.bits, q_config.block_size);
         gpt_fp.quantize(q_config.bits, q_config.block_size)
     } else {
         gpt_fp.into_linear_or_quantized()
     };
 
     let engine = InferenceEngine::new(gpt, tokenizer);
-
     let shared_state = Arc::new(AppState { engine, device });
 
     // 3. Build Axum Router
@@ -114,19 +113,22 @@ struct AppState { device: ModelDevice,
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../../nanochat/ui.html")) }
+async fn serve_ui() -> impl IntoResponse {
+    Html(include_str!("../../../nanochat/ui.html"))
+}
 
-async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>,) -> impl IntoResponse {
-    Json(HealthResponse { device: format!("{:?}", state.device), status: "ok", })
+async fn health_check(axum::Extension(state):
+    axum::Extension<Arc<AppState>>) -> impl IntoResponse {
+    Json(HealthResponse { device: format!("{:?}", state.device), status: "ok" })
 }
 
 async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>,
-    Json(payload): Json<ChatRequest>,) -> impl IntoResponse {
+    Json(payload): Json<ChatRequest>) -> impl IntoResponse {
     let (tx, rx) = mpsc::channel(100);
     let engine_ref = state.clone();
 
     tokio::spawn(async move {
-        let mut conversation = Conversation { messages: payload.messages, };
+        let mut conversation = Conversation { messages: payload.messages };
 
         // Add dummy assistant response to construct correct SFT prompt
         conversation.messages.push(ConversationMessage {
@@ -137,17 +139,21 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         let tokenizer = &engine_ref.engine.tokenizer;
         let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
 
-        let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+        let assistant_end = *tokenizer.get_special_tokens()
+            .get("<|assistant_end|>").unwrap_or(&50256);
         let mut clean_prompt = prompt_tokens;
         if let Some(&last) = clean_prompt.last() {
-            if last == assistant_end || last == tokenizer.get_bos_token_id() { clean_prompt.pop(); }
+            if last == assistant_end || last == tokenizer.get_bos_token_id() {
+                clean_prompt.pop();
+            }
         }
 
-        let temp = payload.temperature.unwrap_or(0.7);
         let top_k = payload.top_k.or(Some(50));
+        let temp = payload.temperature.unwrap_or(0.7);
         let max_tok = payload.max_tokens.unwrap_or(256);
 
-        let (mut gen_state, mut cur_logits) = engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
+        let (mut gen_state, mut cur_logits) =
+            engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
 
         for _ in 0..max_tok {
             if gen_state.completed[0] { break; }
@@ -155,9 +161,7 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
                 &mut gen_state, cur_logits, temp, top_k, 1.2, &engine_ref.device,
             );
             cur_logits = next_logits;
-
-            let token = next_tokens[0];
-            let text = tokenizer.decode(&[token]);
+            let text = tokenizer.decode(&[next_tokens[0]]);
 
             let event_data = serde_json::json!({ "token": text });
             let event = Event::default().json_data(event_data).unwrap();

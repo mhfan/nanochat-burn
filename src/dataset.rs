@@ -1,7 +1,8 @@
 
-use crate::tokenizer::{Conversation, BpeTokenizer};
-use std::{io, fs::{self, File}, path::{Path, PathBuf}};
+use std::{fs::{self, File}, io, path::{Path, PathBuf}};
 use memmap2::Mmap;
+
+use crate::tokenizer::{BpeTokenizer, Conversation};
 
 pub struct Shard {
     pub path: PathBuf,
@@ -13,15 +14,12 @@ pub struct PretrainingDataset { pub shards: Vec<Shard>, }
 
 impl PretrainingDataset {
     pub fn new<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
-        let shards = paths.iter()
-            .map(|p| {
-                let path = p.as_ref().to_path_buf();
-                let file = File::open(&path)?;
-                let mmap = unsafe { Mmap::map(&file)? };
-                let num_tokens = mmap.len() / 4;
-                Ok(Shard { path, mmap, num_tokens })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+        let shards = paths.iter().map(|p| {
+            let path = p.as_ref().to_path_buf();
+            let mmap = unsafe { Mmap::map(&File::open(&path)?)? };
+            let num_tokens = mmap.len() / 4;
+            Ok(Shard { path, mmap, num_tokens })
+        }) .collect::<io::Result<Vec<_>>>()?;
         Ok(PretrainingDataset { shards })
     }
 
@@ -49,8 +47,7 @@ pub struct SftDataset { pub conversations: Vec<Conversation>, }
 
 impl SftDataset {
     pub fn new<P: AsRef<Path>>(jsonl_path: P) -> io::Result<Self> {
-        let file = File::open(jsonl_path)?;
-        let reader = io::BufReader::new(file);
+        let reader = io::BufReader::new(File::open(jsonl_path)?);
         let mut conversations = Vec::new();
         use io::BufRead;
         for line in reader.lines() {
@@ -79,15 +76,14 @@ impl SftDataset {
     }
 }
 
-pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
-    text_path: P, bin_path: Q, tokenizer: &BpeTokenizer,) -> io::Result<()> {
+pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(text_path: P,
+    bin_path: Q, tokenizer: &BpeTokenizer) -> io::Result<()> {
     let content = fs::read_to_string(text_path)?;
     let tokens = tokenizer.encode_ordinary(&content);
-    let mut file = File::create(bin_path)?;
     let tokens_u32: Vec<u32> = tokens.iter().map(|&tok| tok as u32).collect();
     let bytes = bytemuck::cast_slice::<u32, u8>(&tokens_u32);
+    File::create(bin_path)?.write_all(bytes)?;
     use io::Write;
-    file.write_all(bytes)?;
     Ok(())
 }
 
@@ -105,7 +101,7 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
 
         pretokenize_text_to_bin(&text_path, &bin_path, &tokenizer).unwrap();
 
-        let dataset = PretrainingDataset::new(&[bin_path.clone()]).unwrap();
+        let dataset = PretrainingDataset::new(std::slice::from_ref(&bin_path)).unwrap();
         assert_eq!(dataset.shards.len(), 1);
 
         let num_tokens = dataset.shards[0].num_tokens;

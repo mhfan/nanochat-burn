@@ -2,13 +2,14 @@
 [package]
 name = "nanochat-burn"
 version = "0.1.0"
-edition = "2021"
-authors = ["MeiHui FAN <mhfan@zepp.com>"]
+edition = "2024"
+authors = ["MeiHui FAN <mhfan@ustc.edu>"]
 description = "A clean, idiomatic Rust port of nanochat using the Burn framework"
 default-run = "chat"
 
 [features]
 default = []
+ndarray = ["burn/ndarray"]
 web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
 
 [[bin]]
@@ -44,7 +45,7 @@ rayon = "1.10"
 
 # 高性能序列化/反序列化（对接 PyTorch 权重与本地 Checkpoint）
 serde = { version = "1.0", features = ["derive"] }
-safetensors = "0.7"
+safetensors = "0.8"
 serde_json = "1.0"
 
 # 日志与系统级 Profiling 诊断
@@ -69,3 +70,6 @@ codegen-units = 8
 panic = "abort"
 debug = false
 lto = true
+
+[lints.clippy]
+needless_range_loop = "allow"

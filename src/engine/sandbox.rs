@@ -21,10 +21,10 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     if let Err(e) = fs::create_dir_all(tmp_dir) {
         return ExecutionResult {
             success: false,
+            timeout: false,
             stdout: String::new(),
             stderr: String::new(),
             error: Some(format!("Failed to create temp directory: {}", e)),
-            timeout: false,
         };
     }
 
@@ -35,32 +35,30 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     if let Err(e) = fs::write(&temp_file_path, code) {
         return ExecutionResult {
             success: false,
+            timeout: false,
             stdout: String::new(),
             stderr: String::new(),
             error: Some(format!("Failed to write Python code to file: {}", e)),
-            timeout: false,
         };
     }
 
     // Create the RAII guard to delete the file when leaving this function
     let _guard = TempFileGuard(&temp_file_path);
 
-    let mut child = match Command::new("python3")
-        .arg(&temp_file_path)
+    let mut child = match Command::new("python3").arg(&temp_file_path)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                return ExecutionResult {
-                    success: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    error: Some(format!("Failed to spawn python3 process: {}", e)),
-                    timeout: false,
-                };
-            }
-        };
+        .stderr(std::process::Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ExecutionResult {
+                success: false,
+                timeout: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some(format!("Failed to spawn python3 process: {}", e)),
+            };
+        }
+    };
 
     let start_time = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -73,10 +71,10 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                     Err(e) => {
                         return ExecutionResult {
                             success: false,
+                            timeout: false,
                             stdout: String::new(),
                             stderr: String::new(),
                             error: Some(format!("Failed to read process output: {}", e)),
-                            timeout: false,
                         };
                     }
                 };
@@ -86,10 +84,12 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
 
                 return ExecutionResult {
                     success: status.success(),
+                    timeout: false,
                     stdout: stdout_str,
                     stderr: stderr_str,
-                    error: if status.success() { None } else { Some(format!("Process exited with non-zero status")) },
-                    timeout: false,
+                    error: if status.success() { None } else {
+                        Some("Process exited with non-zero status".to_string())
+                    },
                 };
             }
             Ok(None) => {
@@ -97,10 +97,10 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                     let _ = child.kill();
                     return ExecutionResult {
                         success: false,
+                        timeout: true,
                         stdout: String::new(),
                         stderr: String::new(),
                         error: Some("Execution timed out (process killed)".to_string()),
-                        timeout: true,
                     };
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -109,10 +109,10 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                 let _ = child.kill();
                 return ExecutionResult {
                     success: false,
+                    timeout: false,
                     stdout: String::new(),
                     stderr: String::new(),
                     error: Some(format!("Error while waiting for child process: {}", e)),
-                    timeout: false,
                 };
             }
         }

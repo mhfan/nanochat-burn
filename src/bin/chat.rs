@@ -1,14 +1,16 @@
 
-use std::{io::{self, Write}, time::Instant, env};
-use nanochat_burn::common::{ModelBackend, init_device};
-use nanochat_burn::{gpt::{Gpt, GptConfig}, engine::inference::InferenceEngine};
-use nanochat_burn::tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent};
+use std::{env, io::{self, Write}, time::Instant};
+
+use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
+    common::{ModelBackend, init_device}, engine::inference::InferenceEngine,
+    tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
+};
 
 fn main() {
-    // Initialize logging
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt().with_env_filter(EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))).try_init();
+    use tracing_subscriber::EnvFilter; // Initialize logging
+    let _ = tracing_subscriber::fmt().with_env_filter(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    ).try_init();
 
     println!("==================================================================");
     println!("   🔥 NanoChat Burn CLI Chat Client (WGPU Accelerated f16) 🔥    ");
@@ -25,7 +27,7 @@ fn main() {
         "The planets of the solar system are: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
         "The capital of France is Paris.",
         "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / 5<|python_end|><|output_start|>2<|output_end|>.",
-        "System programming in Rust is extremely safe, concurrent, and high-performance."
+        "System programming in Rust is extremely safe, concurrent, and high-performance.",
     ];
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
     let vocab_size = tokenizer.get_vocab_size();
@@ -38,15 +40,13 @@ fn main() {
     let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
         .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
-    if let Some(pos) = args.iter().position(|arg| arg == "--quantize") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
-            quantize_bits = Some(val);
-        }
+    if  let Some(pos) = args.iter().position(|arg| arg == "--quantize") &&
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        quantize_bits = Some(val);
     }
-    if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
-            quantize_block = val;
-        }
+    if  let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") &&
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        quantize_block = val;
     }
 
     // 2. Initialize a small Gpt model on WGPU
@@ -55,9 +55,7 @@ fn main() {
     };
 
     if let Some(bits) = quantize_bits {
-        config.quantization = Some(nanochat_burn::gpt::QuantizationConfig {
-            bits, block_size: quantize_block,
-        });
+        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block });
     }
 
     let device = init_device();
@@ -65,7 +63,8 @@ fn main() {
     let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
 
     let gpt = if let Some(q_config) = config.quantization {
-        println!("Dynamically quantizing model to INT{} (block_size = {})...", q_config.bits, q_config.block_size);
+        println!("Dynamically quantizing model to INT{} (block_size = {})...",
+            q_config.bits, q_config.block_size);
         gpt_fp.quantize(q_config.bits, q_config.block_size)
     } else {
         gpt_fp.into_linear_or_quantized()
@@ -75,7 +74,8 @@ fn main() {
 
     // Initialize conversation state
     let mut conversation = Conversation { messages: vec![] };
-    let assistant_end = *tokenizer.get_special_tokens().get("<|assistant_end|>").unwrap_or(&50256);
+    let assistant_end = *tokenizer.get_special_tokens()
+        .get("<|assistant_end|>").unwrap_or(&50256);
 
     loop {
         print!("\n\x1b[32m\x1b[1mUser >\x1b[0m ");
@@ -84,7 +84,8 @@ fn main() {
         let mut user_input = String::new();
         io::stdin().read_line(&mut user_input).unwrap();
         let trimmed = user_input.trim();
-        if  trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("exit") { break; }
+        if  trimmed.eq_ignore_ascii_case("quit") ||
+            trimmed.eq_ignore_ascii_case("exit") { break; }
         if  trimmed.is_empty() { continue; }
 
         // Add user message to conversation
@@ -102,12 +103,12 @@ fn main() {
         // Render multi-turn conversation into tokens
         let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
 
-        // Remove the trailing assistant end-of-text or bos tokens so we generate from the prompt end
+        // Remove the trailing assistant end-of-text or bos tokens
+        // so we generate from the prompt end
         let mut clean_prompt = prompt_tokens;
-        if let Some(&last) = clean_prompt.last() {
-            if last == assistant_end || last == tokenizer.get_bos_token_id() {
-                clean_prompt.pop();
-            }
+        if let Some(&last) = clean_prompt.last() &&
+            (last == assistant_end || last == tokenizer.get_bos_token_id()) {
+            clean_prompt.pop();
         }
 
         print!("\x1b[35m\x1b[1mAssistant >\x1b[0m ");
@@ -116,19 +117,17 @@ fn main() {
         let start_time = Instant::now();
         let (mut state, mut cur_logits) = engine.prefill(&clean_prompt, 1, &device);
 
-        let mut assistant_response_tokens = Vec::new();
-        let mut first_token = true;
+        let (mut first_token, mut token_count) = (true, 0);
         let mut tft = start_time.elapsed().as_secs_f64();
-        let mut token_count = 0;
+        let mut assistant_response_tokens = Vec::new();
 
         for _ in 0..256 {
             if state.completed[0] { break; }
-            let (next_tokens, _, next_logits) = engine.step_generation(
-                &mut state,
+            let (next_tokens, _, next_logits) = engine.step_generation(&mut state,
                 cur_logits,
-                0.7, // Temperature
+                0.7,      // Temperature
                 Some(50), // Top-K
-                1.2, // Repetition penalty
+                1.2,      // Repetition penalty
                 &device,
             );
             cur_logits = next_logits;
@@ -152,10 +151,7 @@ fn main() {
         let tok_per_sec = token_count as f64 / total_time;
         println!(
             "\x1b[90m[Benchmark: TFT: {:.2}ms | Speed: {:.2} tok/sec | Total generated: {} tokens]\x1b[0m",
-            tft * 1000.0,
-            tok_per_sec,
-            token_count
-        );
+            tft * 1000.0, tok_per_sec, token_count);
 
         // Save generated tokens back to conversation
         let response_text = tokenizer.decode(&assistant_response_tokens);

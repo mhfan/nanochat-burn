@@ -1,13 +1,13 @@
 
-use std::{path::Path, time::Instant, iter};
-use burn::{prelude::ToElement, tensor::{Tensor, Int, backend::AutodiffBackend}};
-use crate::{gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
-    dataset::SftDataset, optim::MuonAdamW, engine::{get_lr_multiplier, get_weight_decay},
-};
+use std::{iter, path::Path, time::Instant};
+use burn::{prelude::ToElement, tensor::{Int, Tensor, backend::AutodiffBackend}};
+
+use crate::{dataset::SftDataset, engine::{get_lr_multiplier, get_weight_decay},
+    gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer};
 
 pub struct SftPacker {
-    pub conversations: Vec<(Vec<usize>, Vec<i32>)>,
     pub cursor: usize,
+    pub conversations: Vec<(Vec<usize>, Vec<i32>)>,
 }
 
 impl SftPacker {
@@ -19,7 +19,7 @@ impl SftPacker {
     }
 
     pub fn next_batch(&mut self, batch_size: usize, max_seq_len: usize,
-        bos_token: usize,) -> (Vec<Vec<usize>>, Vec<Vec<i32>>, Vec<usize>) {
+        bos_token: usize) -> (Vec<Vec<usize>>, Vec<Vec<i32>>, Vec<usize>) {
         let row_capacity = max_seq_len + 1;
         let mut rows = Vec::with_capacity(batch_size);
         let mut mask_rows = Vec::with_capacity(batch_size);
@@ -28,41 +28,31 @@ impl SftPacker {
         for _ in 0..batch_size {
             let mut row = Vec::with_capacity(row_capacity);
             let mut mask_row = Vec::with_capacity(row_capacity);
-            let mut content_len = row_capacity;
-            let mut padded = false;
+            let (mut content_len, mut padded) = (row_capacity, false);
 
             while row.len() < row_capacity {
                 let remaining = row_capacity - row.len();
-
-                let idx_limit = self.conversations.partition_point(|(conv, _)| conv.len() <= remaining);
+                let idx_limit =
+                    self.conversations.partition_point(|(conv, _)| conv.len() <= remaining);
 
                 if idx_limit > 0 {
-                    let best_idx = idx_limit - 1;
-                    let (conv, conv_mask) = self.conversations.remove(best_idx);
-                    row.extend(conv);
+                    let (conv, conv_mask) = self.conversations.remove(idx_limit - 1);
                     mask_row.extend(conv_mask);
+                    row.extend(conv);
                 } else {
                     content_len = row.len();
-                    row.extend(iter::repeat(bos_token).take(remaining));
-                    mask_row.extend(iter::repeat(0).take(remaining));
+                    row.extend(iter::repeat_n(bos_token, remaining));
+                    mask_row.extend(iter::repeat_n(0, remaining));
                     padded = true;
                     break;
                 }
 
-                if self.conversations.is_empty() {
-                    self.cursor = 0;
-                    break;
-                }
+                if self.conversations.is_empty() { self.cursor = 0; break; }
             }
 
-            if padded {
-                row_lengths.push(content_len);
-            } else {
-                row_lengths.push(row_capacity);
-            }
-
-            rows.push(row);
+            row_lengths.push(if padded { content_len } else { row_capacity });
             mask_rows.push(mask_row);
+            rows.push(row);
         }
 
         (rows, mask_rows, row_lengths)
@@ -84,55 +74,52 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("Loaded SFT dataset with {} conversations", dataset.conversations.len());
 
     let corpus = dataset.get_corpus();
-
     tracing::info!("Training BpeTokenizer on {} SFT text fragments...", corpus.len());
+
     let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
     tokenizer.build_inverse_mappings();
 
-    let config = GptConfig { sequence_len: 128, n_layer: 4, n_head: 4, n_kv_head: 2, n_embd: 64,
-        window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(), quantization: None,
+    let config = GptConfig {
+        sequence_len: 128,
+        n_layer: 4,
+        n_head: 4,
+        n_kv_head: 2,
+        n_embd: 64,
+        window_pattern: "L".to_string(),
+        vocab_size: tokenizer.get_vocab_size(),
+        quantization: None,
     };
 
     let mut model: Gpt<B> = Gpt::new(config.clone(), device);
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
     let mut packer = SftPacker::new(&dataset, &tokenizer);
 
-    let batch_size = 4;
-    let max_seq_len = config.sequence_len;
+    let (batch_size, max_seq_len) = (4, config.sequence_len);
     let bos_token = tokenizer.get_bos_token_id();
 
-    let num_iterations = 20;
-    let warmup_steps = 5;
-    let learning_rate = 1e-4;
-    let weight_decay = 0.0;
-
+    let (warmup_steps, num_iterations, learning_rate, weight_decay) = (5, 20, 1e-4, 0.0);
     tracing::info!("Starting SFT training loop for {} iterations...", num_iterations);
-    let start_time = Instant::now();
-    let mut smooth_loss = 0.0;
+    let (start_time, mut smooth_loss) = (Instant::now(), 0.0);
 
     for step in 1..=num_iterations {
         if packer.conversations.is_empty() {
             packer = SftPacker::new(&dataset, &tokenizer);
         }
-
-        let (rows, mask_rows, row_lengths) = packer.next_batch(batch_size, max_seq_len, bos_token);
+        let (rows, mask_rows, row_lengths) =
+            packer.next_batch(batch_size, max_seq_len, bos_token);
 
         let mut flat_inputs = Vec::with_capacity(batch_size * max_seq_len);
         let mut flat_targets = Vec::with_capacity(batch_size * max_seq_len);
 
         for (i, row) in rows.iter().enumerate() {
-            let content_len = row_lengths[i];
-            let row_mask = &mask_rows[i];
-
+            let (content_len, row_mask) = (row_lengths[i], &mask_rows[i]);
             flat_inputs.extend(row[..max_seq_len].iter().map(|&x| x as i32));
 
-            flat_targets.extend((1..=max_seq_len).map(|j| {
-                if row_mask[j] == 1 && j < content_len {
-                    row[j] as i32
-                } else {
-                    -1
-                }
-            }));
+            flat_targets.extend(
+                (1..=max_seq_len).map(|j| {
+                    if row_mask[j] == 1 && j < content_len { row[j] as i32 } else { -1 }
+                }),
+            );
         }
 
         let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)
@@ -155,10 +142,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
 
         if step % 5 == 0 || step == num_iterations {
-            tracing::info!(
-                "Step {:03}/{:03} | lr: {:.6} | Loss: {:.4} (smooth: {:.4})",
-                step, num_iterations, lr, loss_val, smooth_loss
-            );
+            tracing::info!("Step {:03}/{:03} | lr: {:.6} | Loss: {:.4} (smooth: {:.4})",
+                step, num_iterations, lr, loss_val, smooth_loss);
         }
     }
 
