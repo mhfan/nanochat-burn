@@ -9,10 +9,9 @@ use nanochat_burn::{common::{ModelAutodiffBackend, init_device},
         .with_max_level(tracing::Level::INFO).finish();
     tracing::subscriber::set_global_default(subscriber).ok();
 
-    let args: Vec<String> = std::env::args().collect();
-    let mode = if args.len() > 1 {
-        args[1].trim_start_matches('-').to_lowercase()
-    } else { "pretrain".to_string() };
+    let mode = std::env::args().nth(1)
+        .map(|arg| arg.trim_start_matches('-').to_lowercase())
+        .unwrap_or_else(|| "pretrain".to_string());
     let device = init_device();
 
     tracing::info!("=============================================");

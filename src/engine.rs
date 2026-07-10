@@ -1,12 +1,10 @@
 
 use std::time::Instant;
 
-use burn::{tensor::{Int, Shape, Tensor, TensorData,
-    backend::{AutodiffBackend, Backend}
-}};
+use burn::tensor::{Int, Shape, Tensor, TensorData, backend::{AutodiffBackend, Backend}};
 
-use crate::{common::scalar_to_f32, dataloader::DistributedDataLoader, gpt::Gpt,
-    optim::MuonAdamW, tokenizer::BpeTokenizer,
+use crate::{common::scalar_to_f32, dataloader::DistributedDataLoader,
+    gpt::Gpt, optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 pub mod calculator;
@@ -56,7 +54,9 @@ pub fn get_muon_momentum(step: usize, num_iterations: usize, warmdown_ratio: f32
     } else if step >= warmdown_start {
         let progress = (step - warmdown_start) as f32 / warmdown_iters.max(1) as f32;
         0.97 * (1.0 - progress) + 0.90 * progress
-    } else { 0.97 }
+    } else {
+        0.97
+    }
 }
 
 /// Compute the weight decay value dynamically over the training horizon.
@@ -77,9 +77,14 @@ pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
     }
 
     // Single byte fallbacks
-    for i in 0..256 { if i < vocab_size { token_bytes[i] = 1; } }
+    token_bytes.iter_mut().take(256).for_each(|bytes| *bytes = 1);
 
     token_bytes
+}
+
+fn int_tensor_2d<B: Backend>(data: Vec<i32>, shape: Shape,
+    device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::<B, 2, Int>::from_data(TensorData::new(data, shape), device)
 }
 
 /// Evaluate validation Bits Per Byte (BPB) on a given DataLoader.
@@ -88,32 +93,27 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
     let (mut total_nats, mut total_bytes) = (0.0f32, 0);
 
     for _ in 0..steps {
-        if let Some(batch) = loader.next_batch().await {
-            let t = model.config.sequence_len;
-            let b = batch.x.len() / t;
-            let x_tensor = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(batch.x, Shape::new([b, t])), device,
-            );
-            let y_tensor = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(batch.y, Shape::new([b, t])), device,
-            );
+        let Some(batch) = loader.next_batch().await else { break; };
+        let t = model.config.sequence_len;
+        let b = batch.x.len() / t;
+        let x_tensor = int_tensor_2d(batch.x, Shape::new([b, t]), device);
+        let y_tensor = int_tensor_2d(batch.y, Shape::new([b, t]), device);
 
-            let logits = model.forward(x_tensor, None);
-            let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
+        let logits = model.forward(x_tensor, None);
+        let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
 
-            let targets_vec = y_tensor.into_data().to_vec::<i32>().unwrap();
-            let loss_vec = crate::common::tensor_data_to_f32_vec(unreduced_losses.into_data());
+        let targets_vec = y_tensor.into_data().to_vec::<i32>().unwrap();
+        let loss_vec = crate::common::tensor_data_to_f32_vec(unreduced_losses.into_data());
 
-            for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec) {
-                if target_tok >= 0 {
-                    let bytes_len = token_bytes.get(target_tok as usize).cloned().unwrap_or(0);
-                    if bytes_len > 0 {
-                        total_nats += loss_val;
-                        total_bytes += bytes_len;
-                    }
+        for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec) {
+            if target_tok >= 0 {
+                let bytes_len = token_bytes.get(target_tok as usize).cloned().unwrap_or(0);
+                if bytes_len > 0 {
+                    total_nats += loss_val;
+                    total_bytes += bytes_len;
                 }
             }
-        } else { break; }
+        }
     }
 
     if total_bytes == 0 { f32::INFINITY } else {
@@ -153,14 +153,10 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         for _ in 0..grad_accum_steps {
             if let Some(batch) = loader.next_batch().await {
-                let shape = Shape::new([self.config.device_batch_size,
-                                        self.config.sequence_length]);
-                let x_tensor = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(batch.x, shape.clone()), device,
-                );
-                let y_tensor = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(batch.y, shape), device,
-                );
+                let shape =
+                    Shape::new([self.config.device_batch_size, self.config.sequence_length]);
+                let x_tensor = int_tensor_2d(batch.x, shape.clone(), device);
+                let y_tensor = int_tensor_2d(batch.y, shape, device);
 
                 let logits = self.model.forward(x_tensor, None);
                 let loss =
@@ -181,8 +177,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             self.config.warmdown_ratio, self.config.final_lr_frac,
         );
         let lr = self.config.learning_rate * lrm;
-        let wd = get_weight_decay(self.step, self.config.num_iterations,
-                                             self.config.weight_decay);
+        let wd =
+            get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
 
         self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
 
@@ -192,14 +188,15 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         // backward pass.
 
         let elapsed = start_time.elapsed().as_secs_f64();
-        if self.step > 10 { self.total_training_time_secs += elapsed; }
+        if self.step > 10 {
+            self.total_training_time_secs += elapsed;
+        }
 
         // Compute debiased smoothed loss
         let ema_beta = 0.9f32;
-        if self.step == 0 { self.smooth_train_loss = step_loss; } else {
-            self.smooth_train_loss =
-                ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss;
-        }
+        self.smooth_train_loss = if self.step == 0 { step_loss } else {
+                ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss
+        };
         let debiased_loss =
             self.smooth_train_loss / (1.0 - ema_beta.powi((self.step + 1) as i32));
 

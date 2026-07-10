@@ -4,9 +4,10 @@ use std::{convert::Infallible, env, sync::Arc};
 use axum::{Json, Router, routing::{get, post},
     response::{Html, IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
-use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
+use nanochat_burn::{
     common::{ModelBackend, ModelDevice, init_device},
     engine::{inference::InferenceEngine, quant::LinearOrQuantized},
+    gpt::{Gpt, GptConfig, QuantizationConfig},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
 };
 use serde::{Deserialize, Serialize};
@@ -21,22 +22,28 @@ struct ChatRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct HealthResponse { status: &'static str, device: String, }
+struct HealthResponse {
+    status: &'static str,
+    device: String,
+}
 
 // Custom Stream wrapper to avoid tokio-stream dependency
-struct SseStream { rx: mpsc::Receiver<Result<Event, Infallible>>, }
+struct SseStream {
+    rx: mpsc::Receiver<Result<Event, Infallible>>,
+}
 
 impl futures_core::Stream for SseStream {
     type Item = Result<Event, Infallible>;
 
-    fn poll_next(mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+        -> std::task::Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
 // Shared engine state wrapper
-struct AppState { device: ModelDevice,
+struct AppState {
+    device: ModelDevice,
     engine: InferenceEngine<ModelBackend, LinearOrQuantized<ModelBackend>>,
 }
 
@@ -44,8 +51,8 @@ struct AppState { device: ModelDevice,
     // Initialize logging
     use tracing_subscriber::EnvFilter;
     let _ = tracing_subscriber::fmt().with_env_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    ).try_init();
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        ).try_init();
 
     // 1. Train BpeTokenizer
     let corpus = vec![
@@ -59,10 +66,10 @@ struct AppState { device: ModelDevice,
     let vocab_size = tokenizer.get_vocab_size();
 
     // Parse CLI parameters and Environment Variables for quantization
-    let mut quantize_bits  = env::var("NANOCHAT_QUANTIZE")
-        .ok().and_then(|v| v.parse::<usize>().ok());
-    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
-        .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let mut quantize_bits =
+        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
+    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK").ok()
+        .and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
     let args: Vec<String> = env::args().collect();
     if let Some(pos) = args.iter().position(|arg| arg == "--quantize") {
@@ -113,12 +120,9 @@ struct AppState { device: ModelDevice,
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn serve_ui() -> impl IntoResponse {
-    Html(include_str!("../../../nanochat/ui.html"))
-}
+async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../../nanochat/ui.html")) }
 
-async fn health_check(axum::Extension(state):
-    axum::Extension<Arc<AppState>>) -> impl IntoResponse {
+async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>) -> impl IntoResponse {
     Json(HealthResponse { device: format!("{:?}", state.device), status: "ok" })
 }
 
@@ -141,11 +145,9 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
 
         let special_tokens = tokenizer.special_token_ids();
         let mut clean_prompt = prompt_tokens;
-        if let Some(&last) = clean_prompt.last() {
-            if last == special_tokens.assistant_end || last == special_tokens.bos {
-                clean_prompt.pop();
-            }
-        }
+        if clean_prompt.last().is_some_and(|&last| {
+            last == special_tokens.assistant_end || last == special_tokens.bos
+        }) { clean_prompt.pop(); }
 
         let top_k = payload.top_k.or(Some(50));
         let temp = payload.temperature.unwrap_or(0.7);

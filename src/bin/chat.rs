@@ -1,16 +1,16 @@
 
 use std::{env, io::{self, Write}, time::Instant};
 
-use nanochat_burn::{gpt::{Gpt, GptConfig, QuantizationConfig},
-    common::{ModelBackend, init_device}, engine::inference::InferenceEngine,
+use nanochat_burn::{common::{ModelBackend, init_device},
+    engine::inference::InferenceEngine, gpt::{Gpt, GptConfig, QuantizationConfig},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
 };
 
 fn main() {
     use tracing_subscriber::EnvFilter; // Initialize logging
     let _ = tracing_subscriber::fmt().with_env_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    ).try_init();
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        ).try_init();
 
     println!("==================================================================");
     println!("   🔥 NanoChat Burn CLI Chat Client (WGPU Accelerated f16) 🔥    ");
@@ -35,16 +35,16 @@ fn main() {
 
     // Parse CLI parameters and Environment Variables for quantization
     let args: Vec<String> = env::args().collect();
-    let mut quantize_bits = env::var("NANOCHAT_QUANTIZE")
-        .ok().and_then(|v| v.parse::<usize>().ok());
-    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK")
-        .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let mut quantize_bits =
+        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
+    let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK").ok()
+        .and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
 
-    if  let Some(pos) = args.iter().position(|arg| arg == "--quantize") &&
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize") &&
         let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
         quantize_bits = Some(val);
     }
-    if  let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") &&
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") &&
         let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
         quantize_block = val;
     }
@@ -105,8 +105,9 @@ fn main() {
         // Remove the trailing assistant end-of-text or bos tokens
         // so we generate from the prompt end
         let mut clean_prompt = prompt_tokens;
-        if let Some(&last) = clean_prompt.last() &&
-            (last == special_tokens.assistant_end || last == special_tokens.bos) {
+        if clean_prompt.last().is_some_and(|&last| {
+            last == special_tokens.assistant_end || last == special_tokens.bos
+        }) {
             clean_prompt.pop();
         }
 
@@ -122,8 +123,7 @@ fn main() {
 
         for _ in 0..256 {
             if state.completed[0] { break; }
-            let (next_tokens, _, next_logits) = engine.step_generation(&mut state,
-                cur_logits,
+            let (next_tokens, _, next_logits) = engine.step_generation(&mut state, cur_logits,
                 0.7,      // Temperature
                 Some(50), // Top-K
                 1.2,      // Repetition penalty
@@ -148,8 +148,7 @@ fn main() {
 
         let total_time = start_time.elapsed().as_secs_f64();
         let tok_per_sec = token_count as f64 / total_time;
-        println!(
-            "\x1b[90m[Benchmark: TFT: {:.2}ms | Speed: {:.2} tok/sec | Total generated: {} tokens]\x1b[0m",
+        println!("\x1b[90m[Benchmark: TFT: {:.2}ms | Speed: {:.2} tok/sec | Total generated: {} tokens]\x1b[0m",
             tft * 1000.0, tok_per_sec, token_count);
 
         // Save generated tokens back to conversation

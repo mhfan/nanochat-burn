@@ -1,5 +1,9 @@
-
-use std::{fs, path::Path, process::Command, time::{Duration, Instant}};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -8,6 +12,22 @@ pub struct ExecutionResult {
     pub stderr: String,
     pub error: Option<String>,
     pub timeout: bool,
+}
+
+impl ExecutionResult {
+    fn failure(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(error.into()),
+            timeout: false,
+        }
+    }
+
+    fn timeout() -> Self {
+        Self { timeout: true, ..Self::failure("Execution timed out (process killed)") }
+    }
 }
 
 struct TempFileGuard<'a>(&'a Path);
@@ -19,13 +39,7 @@ impl<'a> Drop for TempFileGuard<'a> {
 pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let tmp_dir = Path::new(".cache/tmp");
     if let Err(e) = fs::create_dir_all(tmp_dir) {
-        return ExecutionResult {
-            success: false,
-            timeout: false,
-            stdout: String::new(),
-            stderr: String::new(),
-            error: Some(format!("Failed to create temp directory: {}", e)),
-        };
+        return ExecutionResult::failure(format!("Failed to create temp directory: {}", e));
     }
 
     // Generate a unique file name
@@ -33,30 +47,17 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let temp_file_path = tmp_dir.join(format!("sandbox_{}.py", file_id));
 
     if let Err(e) = fs::write(&temp_file_path, code) {
-        return ExecutionResult {
-            success: false,
-            timeout: false,
-            stdout: String::new(),
-            stderr: String::new(),
-            error: Some(format!("Failed to write Python code to file: {}", e)),
-        };
+        return ExecutionResult::failure(format!("Failed to write Python code to file: {}", e));
     }
 
     // Create the RAII guard to delete the file when leaving this function
     let _guard = TempFileGuard(&temp_file_path);
 
     let mut child = match Command::new("python3").arg(&temp_file_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped()).spawn() {
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ExecutionResult {
-                success: false,
-                timeout: false,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: Some(format!("Failed to spawn python3 process: {}", e)),
-            };
+            return ExecutionResult::failure(format!("Failed to spawn python3 process: {}", e));
         }
     };
 
@@ -69,13 +70,9 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
                 let output = match child.wait_with_output() {
                     Ok(o) => o,
                     Err(e) => {
-                        return ExecutionResult {
-                            success: false,
-                            timeout: false,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            error: Some(format!("Failed to read process output: {}", e)),
-                        };
+                        return ExecutionResult::failure(format!(
+                            "Failed to read process output: {}", e
+                        ));
                     }
                 };
 
@@ -95,25 +92,15 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
             Ok(None) => {
                 if start_time.elapsed() >= timeout {
                     let _ = child.kill();
-                    return ExecutionResult {
-                        success: false,
-                        timeout: true,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        error: Some("Execution timed out (process killed)".to_string()),
-                    };
+                    return ExecutionResult::timeout();
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
-                return ExecutionResult {
-                    success: false,
-                    timeout: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    error: Some(format!("Error while waiting for child process: {}", e)),
-                };
+                return ExecutionResult::failure(format!(
+                    "Error while waiting for child process: {}", e
+                ));
             }
         }
     }

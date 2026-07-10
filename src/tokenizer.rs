@@ -25,6 +25,19 @@ pub struct SpecialTokenIds {
     pub output_end: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RenderTokenIds {
+    bos: usize,
+    user_start: usize,
+    user_end: usize,
+    assistant_start: usize,
+    assistant_end: usize,
+    python_start: usize,
+    python_end: usize,
+    output_start: usize,
+    output_end: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePart {
     #[serde(rename = "type")]
@@ -33,7 +46,8 @@ pub struct MessagePart {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)] pub enum MessageContent {
+#[serde(untagged)]
+pub enum MessageContent {
     Simple(String),
     Parts(Vec<MessagePart>),
 }
@@ -43,6 +57,13 @@ impl MessageContent {
         match self {
             Self::Simple(s) => s.clone(),
             Self::Parts(parts) => parts.iter().map(|p| p.text.as_str()).collect(),
+        }
+    }
+
+    fn expect_simple(&self, role: &str) -> String {
+        match self {
+            Self::Simple(s) => s.clone(),
+            Self::Parts(_) => panic!("{role} message cannot have multipart content"),
         }
     }
 }
@@ -155,8 +176,7 @@ impl BpeTokenizer {
                     let mut i = 0;
                     let mut merged_tokens = Vec::new();
                     while i < tokens.len() {
-                        if i + 1 < tokens.len() &&
-                            tokens[i] == pair.0 && tokens[i + 1] == pair.1 {
+                        if i + 1 < tokens.len() && tokens[i] == pair.0 && tokens[i + 1] == pair.1 {
                             merged_tokens.push(new_token_id);
                             i += 2;
                         } else {
@@ -239,17 +259,22 @@ impl BpeTokenizer {
         self.special_tokens.get(text).copied()
     }
 
+    fn required_special(&self, text: &str) -> usize {
+        self.encode_special(text).unwrap_or_else(|| panic!("Missing {text} token"))
+    }
+
     /// Get the Beginning of Sequence (BOS) token ID
     pub fn get_bos_token_id(&self) -> usize {
-        *self.special_tokens.get("<|bos|>")
+        *self
+            .special_tokens
+            .get("<|bos|>")
             .or_else(|| self.special_tokens.get("<|endoftext|>"))
             .expect("Failed to find BOS token in tokenizer")
     }
 
     pub fn special_token_ids(&self) -> SpecialTokenIds {
-        let get = |token: &str, fallback| {
-            self.special_tokens.get(token).copied().unwrap_or(fallback)
-        };
+        let get =
+            |token: &str, fallback| self.special_tokens.get(token).copied().unwrap_or(fallback);
         SpecialTokenIds {
             bos: self.get_bos_token_id(),
             assistant_end: get("<|assistant_end|>", FALLBACK_ASSISTANT_END),
@@ -283,118 +308,100 @@ impl BpeTokenizer {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    fn render_token_ids(&self) -> RenderTokenIds {
+        RenderTokenIds {
+            bos: self.get_bos_token_id(),
+            user_start: self.required_special("<|user_start|>"),
+            user_end: self.required_special("<|user_end|>"),
+            assistant_start: self.required_special("<|assistant_start|>"),
+            assistant_end: self.required_special("<|assistant_end|>"),
+            python_start: self.required_special("<|python_start|>"),
+            python_end: self.required_special("<|python_end|>"),
+            output_start: self.required_special("<|output_start|>"),
+            output_end: self.required_special("<|output_end|>"),
+        }
+    }
+
+    fn normalize_messages(conversation: &Conversation) -> Cow<'_, [ConversationMessage]> {
+        if !matches!(conversation.messages.first(), Some(message) if message.role == "system") {
+            return Cow::Borrowed(&conversation.messages);
+        }
+
+        assert!(conversation.messages.len() >= 2,
+            "System message must be followed by a user message"
+        );
+        assert_eq!(conversation.messages[1].role, "user",
+            "System message must be followed by a user message"
+        );
+
+        let system_content = conversation.messages[0].content.expect_simple("System");
+        let user_content = conversation.messages[1].content.expect_simple("User");
+        let mut messages = conversation.messages.clone();
+        messages[1].content =
+            MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
+        messages.remove(0);
+        Cow::Owned(messages)
+    }
+
     /// Render a Chat conversation into sequence token IDs and attention target masks
-    pub fn render_conversation(&self, conversation: &Conversation, max_tokens: usize) ->
-        (Vec<usize>, Vec<i32>) {
+    pub fn render_conversation(&self, conversation: &Conversation, max_tokens: usize)
+        -> (Vec<usize>, Vec<i32>) {
         let (mut ids, mut mask) = (Vec::new(), Vec::new());
+        let tokens = self.render_token_ids();
 
         let mut add_tokens = |token_ids: &[usize], mask_val: i32| {
             mask.extend(std::iter::repeat_n(mask_val, token_ids.len()));
             ids.extend_from_slice(token_ids);
         };
 
-        // 1. Preprocess messages to handle system messages (merging them into first user
-        //    message)
-        let messages: Cow<'_, [ConversationMessage]> =
-            if !conversation.messages.is_empty() && conversation.messages[0].role == "system" {
-                if conversation.messages.len() < 2 {
-                    panic!("System message must be followed by a user message");
-                }
-                assert_eq!(
-                    conversation.messages[1].role, "user",
-                    "System message must be followed by a user message"
-                );
-
-                let system_content = match &conversation.messages[0].content {
-                    MessageContent::Simple(s) => s.clone(),
-                    MessageContent::Parts(_) =>
-                        panic!("System message cannot have multipart content"),
-                };
-
-                let user_content = match &conversation.messages[1].content {
-                    MessageContent::Simple(s) => s.clone(),
-                    MessageContent::Parts(_) =>
-                        panic!("User message cannot have multipart content"),
-                };
-
-                let mut cloned_messages = conversation.messages.clone();
-                cloned_messages[1].content =
-                    MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
-                cloned_messages.remove(0);
-                Cow::Owned(cloned_messages)
-            } else {
-                Cow::Borrowed(&conversation.messages)
-            };
-
+        let messages = Self::normalize_messages(conversation);
         assert!(!messages.is_empty(), "Conversation must have at least one message");
-
-        // 2. Fetch special token IDs
-        let bos = self.get_bos_token_id();
-        let user_start =
-            self.encode_special("<|user_start|>").expect("Missing <|user_start|> token");
-        let user_end = self.encode_special("<|user_end|>").expect("Missing <|user_end|> token");
-        let assistant_start = self
-            .encode_special("<|assistant_start|>")
-            .expect("Missing <|assistant_start|> token");
-        let assistant_end =
-            self.encode_special("<|assistant_end|>").expect("Missing <|assistant_end|> token");
-        let python_start =
-            self.encode_special("<|python_start|>").expect("Missing <|python_start|> token");
-        let python_end =
-            self.encode_special("<|python_end|>").expect("Missing <|python_end|> token");
-        let output_start =
-            self.encode_special("<|output_start|>").expect("Missing <|output_start|> token");
-        let output_end =
-            self.encode_special("<|output_end|>").expect("Missing <|output_end|> token");
-
-        // 3. Render conversation
-        add_tokens(&[bos], 0);
+        add_tokens(&[tokens.bos], 0);
 
         for (i, message) in messages.iter().enumerate() {
             let expected_role = if i % 2 == 0 { "user" } else { "assistant" };
             assert_eq!(message.role, expected_role,
-                "Message {} is from {} but should be from {}",
-                i, message.role, expected_role
-            );
+                "Message {} is from {} but should be from {}", i, message.role, expected_role);
 
             match &message.content {
                 MessageContent::Simple(text) => {
                     let value_ids = self.encode_ordinary(text);
                     if message.role == "user" {
-                        add_tokens(&[user_start], 0);
+                        add_tokens(&[tokens.user_start], 0);
                         add_tokens(&value_ids, 0);
-                        add_tokens(&[user_end], 0);
+                        add_tokens(&[tokens.user_end], 0);
                     } else {
-                        add_tokens(&[assistant_start], 0);
+                        add_tokens(&[tokens.assistant_start], 0);
                         add_tokens(&value_ids, 1);
-                        add_tokens(&[assistant_end], 1);
+                        add_tokens(&[tokens.assistant_end], 1);
                     }
                 }
                 MessageContent::Parts(parts) => {
-                    assert_eq!(message.role, "assistant",
+                    assert_eq!(
+                        message.role, "assistant",
                         "Only assistant messages can have multipart content"
                     );
-                    add_tokens(&[assistant_start], 0);
+                    add_tokens(&[tokens.assistant_start], 0);
 
                     for part in parts {
                         let value_ids = self.encode_ordinary(&part.text);
                         match part.part_type.as_str() {
                             "text" => add_tokens(&value_ids, 1),
                             "python" => {
-                                add_tokens(&[python_start], 1);
+                                add_tokens(&[tokens.python_start], 1);
                                 add_tokens(&value_ids, 1);
-                                add_tokens(&[python_end], 1);
+                                add_tokens(&[tokens.python_end], 1);
                             }
                             "python_output" => {
-                                add_tokens(&[output_start], 0);
+                                add_tokens(&[tokens.output_start], 0);
                                 add_tokens(&value_ids, 0);
-                                add_tokens(&[output_end], 0);
+                                add_tokens(&[tokens.output_end], 0);
                             }
                             _ => panic!("Unknown part type: {}", part.part_type),
                         }
                     }
 
-                    add_tokens(&[assistant_end], 1);
+                    add_tokens(&[tokens.assistant_end], 1);
                 }
             }
         }
@@ -411,15 +418,12 @@ impl BpeTokenizer {
     pub fn render_for_completion(&self, conversation: &Conversation) -> Vec<usize> {
         let mut conversation = conversation.clone();
         assert!(!conversation.messages.is_empty(), "Conversation cannot be empty");
-        assert_eq!(conversation.messages.last().unwrap().role, "assistant",
-            "Last message must be from the Assistant"
-        );
+        assert_eq!(conversation.messages.last().unwrap().role,
+            "assistant", "Last message must be from the Assistant");
         conversation.messages.pop(); // Remove assistant message
 
         let (mut ids, _) = self.render_conversation(&conversation, usize::MAX);
-        let assistant_start = self.encode_special("<|assistant_start|>")
-            .expect("Missing <|assistant_start|> token");
-        ids.push(assistant_start);
+        ids.push(self.required_special("<|assistant_start|>"));
         ids
     }
 

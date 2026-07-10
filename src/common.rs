@@ -1,14 +1,16 @@
 
-use burn::{ prelude::ToElement, backend::autodiff::Autodiff,
-    tensor::{DType, backend::BackendTypes, f16},
-};
 #[cfg(feature = "ndarray")] use burn::backend::ndarray::NdArray;
 #[cfg(not(feature = "ndarray"))] use burn::backend::wgpu::Wgpu;
+use burn::{prelude::ToElement, backend::autodiff::Autodiff,
+    tensor::{DType, backend::BackendTypes, f16},
+};
 
 /// 定义默认的 GPU 后端与自动微分包装
 //pub type ModelBackend = Wgpu;
-#[cfg(feature = "ndarray")] pub type ModelBackend = NdArray<f32, i32>;
-#[cfg(not(feature = "ndarray"))] pub type ModelBackend = Wgpu<f16, i32>;
+#[cfg(feature = "ndarray")]
+pub type ModelBackend = NdArray<f32, i32>;
+#[cfg(not(feature = "ndarray"))]
+pub type ModelBackend = Wgpu<f16, i32>;
 pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
 pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
 
@@ -18,20 +20,20 @@ pub fn init_device() -> ModelDevice {
     #[cfg(feature = "ndarray")] { Default::default() }
 
     #[cfg(not(feature = "ndarray"))] {
-        let use_cpu = std::env::var("BURN_DEVICE")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("cpu"));
+        let use_cpu =
+            std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu"));
         if use_cpu { burn::backend::wgpu::WgpuDevice::Cpu } else { Default::default() }
     }
 }
 
 pub fn extract_answer(text: &str) -> Option<i32> {
     let marker = "#### ";
-    if let Some(idx) = text.rfind(marker) {
+    text.rfind(marker).and_then(|idx| {
         let num_part = text[idx + marker.len()..].trim();
-        let clean_num: String = num_part.chars()
-            .filter(|c| c.is_ascii_digit() || *c == '-').collect();
+        let clean_num: String =
+            num_part.chars().filter(|c| c.is_ascii_digit() || *c == '-').collect();
         clean_num.parse::<i32>().ok()
-    } else { None }
+    })
 }
 
 pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
@@ -90,16 +92,15 @@ pub fn scalar_to_f32<E: ToElement>(value: E) -> f32 { value.to_f32() }
         tracing::debug!("Gradient of x (dy/dx): \n{}", x_grad);
         tracing::debug!("Gradient of w (dy/dw): \n{}", w_grad);
 
-        let expected_x_grad = [2.0f32, 2.0, 2.0, 2.0];
-        for (act, exp) in tensor_data_to_f32_vec(x_grad.clone().into_data())
-            .into_iter().zip(expected_x_grad.iter()) {
-            assert!((act - exp).abs() < epsilon, "x 梯度不匹配! 实际: {:?}", x_grad);
+        fn assert_close_slice(actual: &[f32], expected: &[f32], epsilon: f32, label: &str) {
+            for (act, exp) in actual.iter().zip(expected) {
+                assert!((act - exp).abs() < epsilon, "{} mismatch: {actual:?}", label);
+            }
         }
 
-        let expected_w_grad = [4.0f32, 4.0, 6.0, 6.0];
-        for (act, exp) in tensor_data_to_f32_vec(w_grad.clone().into_data())
-            .into_iter().zip(expected_w_grad.iter()) {
-            assert!((act - exp).abs() < epsilon, "w 梯度不匹配! 实际: {:?}", w_grad);
-        }
+        assert_close_slice(&tensor_data_to_f32_vec(x_grad.into_data()),
+            &[2.0, 2.0, 2.0, 2.0], epsilon, "x gradient");
+        assert_close_slice(&tensor_data_to_f32_vec(w_grad.into_data()),
+            &[4.0, 4.0, 6.0, 6.0], epsilon, "w gradient");
     }
 //}

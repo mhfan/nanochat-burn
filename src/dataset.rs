@@ -1,8 +1,9 @@
 
-use std::{fs::{self, File}, io, path::{Path, PathBuf}};
+use std::{io, fs::{self, File}, path::{Path, PathBuf}};
+
 use memmap2::Mmap;
 
-use crate::tokenizer::{BpeTokenizer, Conversation};
+use crate::tokenizer::{BpeTokenizer, Conversation, MessageContent};
 
 pub struct Shard {
     pub path: PathBuf,
@@ -15,12 +16,12 @@ pub struct PretrainingDataset { pub shards: Vec<Shard>, }
 impl PretrainingDataset {
     pub fn new<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
         let shards = paths.iter().map(|p| {
-            let path = p.as_ref().to_path_buf();
-            let mmap = unsafe { Mmap::map(&File::open(&path)?)? };
-            let num_tokens = mmap.len() / 4;
-            Ok(Shard { path, mmap, num_tokens })
-        }) .collect::<io::Result<Vec<_>>>()?;
-        Ok(PretrainingDataset { shards })
+                let path = p.as_ref().to_path_buf();
+                let mmap = unsafe { Mmap::map(&File::open(&path)?)? };
+                let num_tokens = mmap.len() / 4;
+                Ok(Shard { path, mmap, num_tokens })
+        }).collect::<io::Result<_>>()?;
+        Ok(Self { shards })
     }
 
     pub fn get_token(&self, shard_idx: usize, token_offset: usize) -> u32 {
@@ -47,40 +48,34 @@ pub struct SftDataset { pub conversations: Vec<Conversation>, }
 
 impl SftDataset {
     pub fn new<P: AsRef<Path>>(jsonl_path: P) -> io::Result<Self> {
-        let reader = io::BufReader::new(File::open(jsonl_path)?);
-        let mut conversations = Vec::new();
         use io::BufRead;
-        for line in reader.lines() {
-            let line_str = line?;
-            let trimmed = line_str.trim();
-            if !trimmed.is_empty() {
-                conversations.push(serde_json::from_str(trimmed)?);
-            }
-        }
-        Ok(SftDataset { conversations })
+        let reader = io::BufReader::new(File::open(jsonl_path)?);
+        let conversations = reader
+            .lines()
+            .filter_map(|line| match line {
+                Ok(line) if line.trim().is_empty() => None,
+                other => Some(other.and_then(|line| {
+                    serde_json::from_str(line.trim()).map_err(io::Error::other)
+                })),
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self { conversations })
     }
 
     pub fn get_corpus(&self) -> Vec<String> {
-        let mut corpus = Vec::new();
-        for conv in &self.conversations {
-            for msg in &conv.messages {
-                match &msg.content {
-                    crate::tokenizer::MessageContent::Simple(s) => corpus.push(s.clone()),
-                    crate::tokenizer::MessageContent::Parts(parts) => {
-                        corpus.extend(parts.iter().map(|p| p.text.clone()));
-                    }
-                }
-            }
-        }
-        corpus
+        self.conversations.iter().flat_map(|conv| conv.messages.iter())
+            .flat_map(|msg| match &msg.content {
+                MessageContent::Simple(s) => vec![s.clone()],
+                MessageContent::Parts(parts) => parts.iter().map(|p| p.text.clone()).collect(),
+            }).collect()
     }
 }
 
-pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(text_path: P,
-    bin_path: Q, tokenizer: &BpeTokenizer) -> io::Result<()> {
+pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
+    text_path: P, bin_path: Q, tokenizer: &BpeTokenizer) -> io::Result<()> {
     let content = fs::read_to_string(text_path)?;
     let tokens = tokenizer.encode_ordinary(&content);
-    let tokens_u32: Vec<u32> = tokens.iter().map(|&tok| tok as u32).collect();
+    let tokens_u32: Vec<_> = tokens.into_iter().map(|tok| tok as u32).collect();
     let bytes = bytemuck::cast_slice::<u32, u8>(&tokens_u32);
     File::create(bin_path)?.write_all(bytes)?;
     use io::Write;

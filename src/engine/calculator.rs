@@ -2,21 +2,18 @@
 /// Safe handcrafted mathematical and string expression evaluator in pure Rust.
 /// Supports basic arithmetic (+, -, *, /, parentheses) and ".count()" string queries.
 pub fn use_calculator(expr: &str) -> Option<String> {
-    let expr_clean = expr.replace(",", "");
+    let expr_clean = expr.replace(',', "");
     let expr_trimmed = expr_clean.trim();
 
     // 1. String count matching: e.g. "strawberry".count("r")
     if expr_trimmed.contains(".count(") &&
-        let Some(res) = parse_and_eval_count(expr_trimmed) { return Some(res.to_string()); }
-
-    // 2. Arithmetic expression evaluation
-    if let Some(val) = parse_and_eval_arithmetic(expr_trimmed) {
-        // Return rounded/formatted values for neat token representation if integral
-        if val.fract() == 0.0 { return Some(format!("{}", val as i64));
-        } else { return Some(format!("{}", val)); }
+        let Some(res) = parse_and_eval_count(expr_trimmed) {
+        return Some(res.to_string());
     }
 
-    None
+    // 2. Arithmetic expression evaluation
+    parse_and_eval_arithmetic(expr_trimmed)
+        .map(|val| if val.fract() == 0.0 { (val as i64).to_string() } else { val.to_string() })
 }
 
 fn parse_and_eval_count(s: &str) -> Option<usize> {
@@ -31,23 +28,20 @@ fn parse_and_eval_count(s: &str) -> Option<usize> {
     let main_str = extract_quoted_string(prefix)?;
     let  sub_str = extract_quoted_string(arg)?;
 
-    if   sub_str.is_empty() { return Some(main_str.len() + 1); }
+    if sub_str.is_empty() { return Some(main_str.len() + 1); }
     Some(main_str.matches(&sub_str).count())
 }
 
 fn extract_quoted_string(s: &str) -> Option<String> {
-    if s.len() >= 2 {
-        if let Some(stripped) = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            return Some(stripped.to_string());
-        }
-        if let Some(stripped) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
-            return Some(stripped.to_string());
-        }
-    }
-    None
+    s.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .map(str::to_string)
 }
 
-struct Parser<'a> { input: &'a str, pos: usize, }
+struct Parser<'a> {
+    input: &'a str,
+    pos: usize,
+}
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self { Parser { input, pos: 0 } }
@@ -119,15 +113,22 @@ impl<'a> Parser<'a> {
                 self.consume();
                 let val = self.parse_expression()?;
                 self.skip_whitespace();
-                if self.peek() == Some(')') { self.consume(); Some(val) } else { None }
+                if self.peek() == Some(')') {
+                    self.consume();
+                    Some(val)
+                } else { None }
             }
             c if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' => {
                 let start = self.pos;
                 if c == '-' || c == '+' { self.consume(); }
                 let mut has_digits = false;
                 while let Some(next_c) = self.peek() {
-                    if next_c.is_ascii_digit() { self.consume(); has_digits = true;
-                    } else    if next_c == '.' { self.consume(); } else { break; }
+                    if next_c.is_ascii_digit() {
+                        self.consume();
+                        has_digits = true;
+                    } else if next_c == '.' {
+                        self.consume();
+                    } else { break; }
                 }
                 if !has_digits { return None; }
                 let num_str = &self.input[start..self.pos];

@@ -1,5 +1,6 @@
 
 use std::path::PathBuf;
+
 use tokio::sync::mpsc::{Receiver, channel};
 
 use crate::{tokenizer::BpeTokenizer, dataset::{PretrainingDataset, SftDataset}};
@@ -13,6 +14,14 @@ pub struct Batch {
 }
 
 pub struct DistributedDataLoader { receiver: Receiver<Batch>, }
+
+fn push_lm_rows(tokens: &[u32], batch_size: usize, sequence_length: usize, x: &mut Vec<i32>,
+    y: &mut Vec<i32>) {
+    for row in tokens.chunks_exact(sequence_length + 1).take(batch_size) {
+        x.extend(row[..sequence_length].iter().map(|&t| t as i32));
+        y.extend(row[1..].iter().map(|&t| t as i32));
+    }
+}
 
 impl DistributedDataLoader {
     #[allow(clippy::too_many_arguments)]
@@ -68,12 +77,7 @@ impl DistributedDataLoader {
                 let mut x = Vec::with_capacity(batch_size * sequence_length);
                 let mut y = Vec::with_capacity(batch_size * sequence_length);
 
-                for row in 0..batch_size {
-                    let start = row * (sequence_length + 1);
-                    let row_tokens = &tokens[start..start + (sequence_length + 1)];
-                    x.extend(row_tokens[..sequence_length].iter().map(|&t| t as i32));
-                    y.extend(row_tokens[1..sequence_length + 1].iter().map(|&t| t as i32));
-                }
+                push_lm_rows(&tokens, batch_size, sequence_length, &mut x, &mut y);
 
                 let batch =
                     Batch { x, y, shard_idx: active_shard_idx, token_offset: offset, epoch };
@@ -158,8 +162,8 @@ impl SftDataLoader {
         pretokenize_text_to_bin(&t2_txt, &t2_bin, &tokenizer).unwrap();
 
         // World size = 2, Rank 0 gets t1.bin (shard 0), Rank 1 gets t2.bin (shard 1)
-        let mut loader_r0 = DistributedDataLoader::new(
-            vec![t1_bin.clone(), t2_bin.clone()], 2, 2, 0, 2, 0, 0, 1);
+        let mut loader_r0 =
+            DistributedDataLoader::new(vec![t1_bin.clone(), t2_bin.clone()], 2, 2, 0, 2, 0, 0, 1);
 
         let batch = loader_r0.next_batch().await.unwrap();
         assert_eq!(batch.shard_idx, 0); // Rank 0 assigned shard 0

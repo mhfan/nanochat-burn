@@ -1,8 +1,16 @@
 
 use burn::tensor::{Int, Shape, Tensor, TensorData, backend::Backend};
 
-use crate::{gpt::{ForwardLayer, Gpt}, tokenizer::BpeTokenizer,
-    engine::inference::{GeneratorState, InferenceEngine, sample_next_token}};
+use crate::{engine::inference::{GeneratorState, InferenceEngine, sample_next_token},
+    gpt::{ForwardLayer, Gpt}, tokenizer::BpeTokenizer,
+};
+
+fn token_tensor<B: Backend>(tokens: &[usize], device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::<B, 2, Int>::from_data(
+        TensorData::new(tokens.iter().map(|&t| t as i32).collect(),
+            Shape::new([1, tokens.len()])), device,
+    )
+}
 
 /// Coordinates speculative decoding state
 pub struct SpeculativeState<B: Backend> {
@@ -14,7 +22,7 @@ pub struct SpeculativeState<B: Backend> {
 
 pub struct SpeculativeInferenceEngine<B: Backend,
     LTarget: ForwardLayer<B> = burn::nn::Linear<B>,
-    LDraft: ForwardLayer<B> = burn::nn::Linear<B>> {
+    LDraft:  ForwardLayer<B> = burn::nn::Linear<B>> {
     pub target_engine: InferenceEngine<B, LTarget>,
     pub draft_engine: InferenceEngine<B, LDraft>,
     pub tokenizer: BpeTokenizer,
@@ -32,8 +40,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     }
 
     /// Prefill prompt sequence for both models, initializing states
-    pub fn prefill(&self, prompt_tokens: &[usize], device: &B::Device) ->
-        (SpeculativeState<B>, Tensor<B, 2>) {
+    pub fn prefill(&self, prompt_tokens: &[usize], device: &B::Device)
+        -> (SpeculativeState<B>, Tensor<B, 2>) {
         let (draft_state, _) = self.draft_engine.prefill(prompt_tokens, 1, device);
         let (target_state, target_logits) =
             self.target_engine.prefill(prompt_tokens, 1, device);
@@ -55,31 +63,21 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     #[allow(clippy::too_many_arguments)]
     /// Perform speculative decoding steps: draft K tokens,
     /// evaluate in parallel, and verify losslessly
-    pub fn step_speculative(&self, state: &mut SpeculativeState<B>,
-        target_logits: Tensor<B, 2>, k_spec: usize, temperature: f32,
-        top_k: Option<usize>, repetition_penalty: f32, device: &B::Device) ->
-        (Vec<usize>, Tensor<B, 2>, bool) {
+    pub fn step_speculative(&self, state: &mut SpeculativeState<B>, target_logits: Tensor<B, 2>,
+        k_spec: usize, temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
+        device: &B::Device) -> (Vec<usize>, Tensor<B, 2>, bool) {
         let special_tokens = self.tokenizer.special_token_ids();
 
         // 1. Autoregressively draft K tokens using the fast Draft Model
         let last_tok = *state.current_tokens.last().unwrap();
         let mut draft_tokens = Vec::with_capacity(k_spec);
         let draft_vocab_size = self.draft_engine.model.config.vocab_size;
-        let mut cur_draft_logits = self.draft_engine.model.forward_with_cache(
-                Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(vec![last_tok as i32], Shape::new([1, 1])), device,
-                ), &mut state.draft_state.cache, state.step - 1,
-            ).reshape([1, draft_vocab_size]);
+        let mut cur_draft_logits = self.draft_engine.model
+            .forward_with_cache(token_tensor(&[last_tok], device),
+                &mut state.draft_state.cache, state.step - 1).reshape([1, draft_vocab_size]);
 
-        let mut temp_draft_state = GeneratorState {
-            cache: state.draft_state.cache.clone(),
-            current_tokens: state.draft_state.current_tokens.clone(),
-            forced_tokens: state.draft_state.forced_tokens.clone(),
-            in_python_block: state.draft_state.in_python_block.clone(),
-            python_expr_tokens: state.draft_state.python_expr_tokens.clone(),
-            completed: state.draft_state.completed.clone(),
-            step: state.step,
-        };
+        let mut temp_draft_state = state.draft_state.clone();
+        temp_draft_state.step = state.step;
 
         for _ in 0..k_spec {
             if temp_draft_state.completed[0] { break; }
@@ -94,8 +92,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         if draft_tokens.is_empty() {
             // Nothing drafted, fall back to single target model step
             let (sampled_toks, _, next_logits) = self.target_engine.step_generation(
-                &mut state.target_state, target_logits, temperature, top_k,
-                repetition_penalty, device,
+                &mut state.target_state, target_logits, temperature, top_k, repetition_penalty,
+                device,
             );
             let token = sampled_toks[0];
             state.current_tokens.push(token);
@@ -109,12 +107,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         // 2. Parallelly evaluate all K draft tokens in the Target Model
         let draft_len = draft_tokens.len();
-        let target_input = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(
-                draft_tokens.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                Shape::new([1, draft_len]),
-            ), device,
-        );
+        let target_input = token_tensor(&draft_tokens, device);
 
         let target_logits_3d = self.target_engine.model
             .forward_with_cache(target_input, &mut state.target_state.cache, state.step);
@@ -134,13 +127,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 target_logits_3d.clone().slice([0..1, (i - 1)..i]).reshape([1, vocab_size])
             };
 
-            let target_pred_toks = sample_next_token(
-                target_logits_for_verify,
-                temperature,
-                top_k,
-                repetition_penalty,
-                &state.target_state.current_tokens,
-            );
+            let target_pred_toks = sample_next_token(target_logits_for_verify,
+                temperature, top_k, repetition_penalty, &state.target_state.current_tokens);
             let target_pred_tok = target_pred_toks[0];
 
             if draft_tok == target_pred_tok {
@@ -161,11 +149,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                     let next_target_logits = target_logits_3d.clone()
                         .slice([0..1, i..(i + 1)]).reshape([1, vocab_size]);
 
-                    let last_pred_toks = sample_next_token(
-                        next_target_logits.clone(),
+                    let last_pred_toks = sample_next_token(next_target_logits.clone(),
                         temperature, top_k, repetition_penalty,
-                        &state.target_state.current_tokens,
-                    );
+                        &state.target_state.current_tokens);
                     let last_pred_tok = last_pred_toks[0];
 
                     accepted_tokens.push(last_pred_tok);
@@ -173,18 +159,15 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                     state.target_state.current_tokens[0].push(last_pred_tok);
                     accepted_count += 1;
 
-                    let next_input = Tensor::<B, 2, Int>::from_data(
-                        TensorData::new(vec![last_pred_tok as i32], Shape::new([1, 1])), device,
-                    );
                     let next_logits_3d = self.target_engine.model.forward_with_cache(
-                        next_input, &mut state.target_state.cache, state.step + draft_len,
+                        token_tensor(&[last_pred_tok], device),
+                        &mut state.target_state.cache,
+                        state.step + draft_len,
                     );
                     final_next_logits = next_logits_3d.reshape([1, vocab_size]);
 
                     if last_pred_tok == special_tokens.assistant_end ||
-                        last_pred_tok == special_tokens.bos {
-                        is_finished = true;
-                    }
+                        last_pred_tok == special_tokens.bos { is_finished = true; }
                 }
             } else {
                 // Reject draft_tok, accept target_pred_tok instead
@@ -195,19 +178,15 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
                 // Run correction forward pass for target_pred_tok to overwrite cache at
                 // position L + i and get next logits.
-                let corrected_input = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(vec![target_pred_tok as i32], Shape::new([1, 1])), device,
-                );
                 let correction_logits_3d = self.target_engine.model.forward_with_cache(
-                    corrected_input, &mut state.target_state.cache, state.step + i,
+                    token_tensor(&[target_pred_tok], device),
+                    &mut state.target_state.cache, state.step + i,
                 );
                 let vocab_size = self.target_engine.model.config.vocab_size;
                 final_next_logits = correction_logits_3d.reshape([1, vocab_size]);
 
                 if target_pred_tok == special_tokens.assistant_end ||
-                    target_pred_tok == special_tokens.bos {
-                    is_finished = true;
-                }
+                    target_pred_tok == special_tokens.bos { is_finished = true; }
                 break;
             }
         }
@@ -249,14 +228,12 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             vec!["Rust is extremely elegant, ultra-fast, and lossless speculative decoding works!"];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
-        let target_config = crate::gpt::GptConfig {
-            sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
+        let target_config = crate::gpt::GptConfig { sequence_len: 16,
+            vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
             window_pattern: "L".to_string(), quantization: None,
         };
-        let draft_config = crate::gpt::GptConfig {
-            sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
-            n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
+        let draft_config = crate::gpt::GptConfig { sequence_len: 16,
+            vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
             window_pattern: "L".to_string(), quantization: None,
         };
 
@@ -264,8 +241,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let target_model: Gpt<ModelBackend> = Gpt::new(target_config.clone(), &device);
         let draft_model: Gpt<ModelBackend> = Gpt::new(draft_config.clone(), &device);
 
-        let spec_engine = SpeculativeInferenceEngine::new(
-            target_model.clone(), draft_model.clone(), tokenizer.clone());
+        let spec_engine = SpeculativeInferenceEngine::new(target_model.clone(),
+            draft_model.clone(), tokenizer.clone());
         let target_engine = InferenceEngine::new(target_model, tokenizer.clone());
 
         let prompt_tokens = vec![1, 2, 3];
@@ -290,7 +267,6 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         // 3. Verify Lossless Parity (outputs must be mathematically identical!)
         assert_eq!(spec_res, target_res,
-            "Speculative decoding did not maintain lossless parity with target model!"
-        );
+            "Speculative decoding did not maintain lossless parity with target model!");
     }
 //}

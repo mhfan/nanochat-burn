@@ -1,10 +1,12 @@
 
-use std::{fs::File, io::{BufRead, BufReader}, path::Path, };
-use burn::tensor::backend::Backend;
+use std::{fs::File, io::{self, BufRead, BufReader}, path::Path};
+
+use burn::tensor::{Int, Tensor, backend::Backend};
 use serde::Deserialize;
 
-use crate::{engine::{inference::InferenceEngine, sandbox::execute_code},
-    gpt::Gpt, tokenizer::{BpeTokenizer, Conversation, ConversationMessage},
+use crate::{gpt::Gpt,
+    engine::{inference::InferenceEngine, sandbox::execute_code},
+    tokenizer::{BpeTokenizer, Conversation, ConversationMessage},
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -16,35 +18,43 @@ pub struct EvalItem {
 }
 
 pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalItem>> {
-    let (file, mut items) = (File::open(path)?, Vec::new());
-    for line in BufReader::new(file).lines() {
-        let line_str = line?;
-        let trimmed = line_str.trim();
-        if !trimmed.is_empty() {
-            items.push(serde_json::from_str(trimmed)?);
-        }
-    }
-    Ok(items)
+    BufReader::new(File::open(path)?).lines()
+        .filter_map(|line| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            other =>
+                Some(other.and_then(|line| {
+                    serde_json::from_str(line.trim()).map_err(io::Error::other)
+                })),
+        }).collect()
 }
 
 use crate::common::extract_answer;
+
+fn prompt_tokens(tokenizer: &BpeTokenizer, item: &EvalItem) -> Vec<usize> {
+    tokenizer.render_for_completion(&Conversation { messages: item.messages.clone() })
+}
+
+fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeTokenizer,
+    prompt_tokens: &[usize], device: &B::Device) -> String {
+    let (rollouts, _) = engine.generate_batch(prompt_tokens, 1, 128, 0.0, None, 1.0, device);
+    tokenizer.decode(&rollouts[0][prompt_tokens.len()..])
+}
 
 pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     items: &[EvalItem], device: &B::Device) -> f32 {
     let (mut correct, mut total) = (0, 0);
 
     for item in items {
-        let conv = Conversation { messages: item.messages.clone() };
-        let prompt_tokens = tokenizer.render_for_completion(&conv);
+        let prompt_tokens = prompt_tokens(tokenizer, item);
         let prompt_len = prompt_tokens.len();
 
-        let inputs = burn::tensor::Tensor::<B, 1, burn::tensor::Int>::from_data(
-            prompt_tokens.iter().map(|&t| t as i32).collect::<Vec<_>>().as_slice(), device
+        let inputs = Tensor::<B, 1, Int>::from_data(
+            prompt_tokens.iter().map(|&t| t as i32).collect::<Vec<_>>().as_slice(), device,
         ).reshape([1, prompt_len]);
 
         let (logits, vocab_size) = (model.forward(inputs, None), model.config.vocab_size);
-        let last_logits = logits.slice([0..1, (prompt_len - 1)..prompt_len, 0..vocab_size
-        ]).reshape([vocab_size]);
+        let last_logits = logits
+            .slice([0..1, (prompt_len - 1)..prompt_len, 0..vocab_size]).reshape([vocab_size]);
         let ground_truth =
             item.messages.last().unwrap().content.to_string_content().trim().to_string();
         let logits_vec = crate::common::tensor_data_to_f32_vec(last_logits.into_data());
@@ -53,10 +63,11 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
             vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]
         });
 
-        let best_letter = letters.iter().filter_map(|letter|
-                tokenizer.encode_ordinary(letter).first().copied().and_then(|token_id|
-                    logits_vec.get(token_id).map(|&logit| (letter, logit))))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        let best_letter = letters .iter().filter_map(|letter| {
+                tokenizer.encode_ordinary(letter).first().copied().and_then(|token_id| {
+                    logits_vec.get(token_id).map(|&logit| (letter, logit))
+                })
+            }).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(letter, _)| letter.clone()).unwrap_or_default();
 
         if best_letter == ground_truth { correct += 1; }
@@ -72,13 +83,8 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
-        let conv = Conversation { messages: item.messages.clone() };
-        let prompt_tokens = tokenizer.render_for_completion(&conv);
-        let (rollouts, _) =
-            inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device);
-
-        let generated_tokens = &rollouts[0][prompt_tokens.len()..];
-        let generated_text = tokenizer.decode(generated_tokens);
+        let generated_text = generate_completion(&inference_engine, tokenizer,
+            &prompt_tokens(tokenizer, item), device);
 
         let ground_truth_text = item.messages.last().unwrap().content.to_string_content();
         let (pred_ans, gt_ans) =
@@ -97,13 +103,8 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
-        let conv = Conversation { messages: item.messages.clone() };
-        let prompt_tokens = tokenizer.render_for_completion(&conv);
-        let (rollouts, _) =
-            inference_engine.generate_batch(&prompt_tokens, 1, 128, 0.0, None, 1.0, device);
-
-        let generated_tokens = &rollouts[0][prompt_tokens.len()..];
-        let generated_completion = tokenizer.decode(generated_tokens);
+        let generated_completion = generate_completion(&inference_engine,
+            tokenizer, &prompt_tokens(tokenizer, item), device);
 
         let prompt_pure_code = item.messages[0].content.to_string_content();
         let full_code = format!("{}{}", prompt_pure_code, generated_completion);

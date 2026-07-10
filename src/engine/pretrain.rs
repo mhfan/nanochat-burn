@@ -1,10 +1,34 @@
 
 use std::{path::{Path, PathBuf}, time::Instant};
+
 use burn::tensor::backend::AutodiffBackend;
 
 use crate::{dataloader::DistributedDataLoader, dataset::pretokenize_text_to_bin,
     engine::{TrainingConfig, TrainingEngine}, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
 };
+
+const SYNTHETIC_PRETRAIN_CORPUS: &[&str] = &[
+    "Rust is a high-performance system programming language designed for memory safety, \
+     concurrency, and speed.",
+    "Nanochat-burn uses the powerful Burn deep learning framework to run hardware-accelerated \
+     GPT models.",
+    "Autodiff backends in Burn automatically track operations to construct dynamic \
+     computational graphs for backpropagation.",
+    "Optimizers like Muon use orthogonalized parameter updates to accelerate parameter \
+     convergence in deep transformer networks.",
+    "Language models are trained using causal self-attention layers to autoregressively \
+     predict the next token ID.",
+    "Packed sequence datasets maximize GPU execution efficiency by batching multiple \
+     conversations without padding.",
+    "Reinforcement learning uses rollback policies and policy gradient updates to align base \
+     pretrained models with human feedback.",
+    "Isolated subprocess sandboxes protect systems by executing untrusted assistant-generated \
+     Python code with timeout limits.",
+    "Pretraining establishes the core foundational language patterns, grammar, and generic \
+     semantic knowledge inside LLM weights.",
+    "Evaluation harnesses measure performance quantitatively using categorical argmax \
+     selections and generative pass metrics.",
+];
 
 pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
     let txt_path = Path::new("data/pretrain.txt");
@@ -12,20 +36,7 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
 
     if !bin_path.exists() {
         tracing::info!("Creating synthetic pretraining text dataset...");
-        let corpus = vec![
-            "Rust is a high-performance system programming language designed for memory safety, concurrency, and speed.",
-            "Nanochat-burn uses the powerful Burn deep learning framework to run hardware-accelerated GPT models.",
-            "Autodiff backends in Burn automatically track operations to construct dynamic computational graphs for backpropagation.",
-            "Optimizers like Muon use orthogonalized parameter updates to accelerate parameter convergence in deep transformer networks.",
-            "Language models are trained using causal self-attention layers to autoregressively predict the next token ID.",
-            "Packed sequence datasets maximize GPU execution efficiency by batching multiple conversations without padding.",
-            "Reinforcement learning uses rollback policies and policy gradient updates to align base pretrained models with human feedback.",
-            "Isolated subprocess sandboxes protect systems by executing untrusted assistant-generated Python code with timeout limits.",
-            "Pretraining establishes the core foundational language patterns, grammar, and generic semantic knowledge inside LLM weights.",
-            "Evaluation harnesses measure performance quantitatively using categorical argmax selections and generative pass metrics.",
-        ];
-
-        let full_text = format!("{} ", corpus.join(" ")).repeat(10);
+        let full_text = format!("{} ", SYNTHETIC_PRETRAIN_CORPUS.join(" ")).repeat(10);
 
         std::fs::create_dir_all("data").ok();
         std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");
@@ -44,7 +55,8 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
 
     // 1. Train tokenizer
     let corpus = vec![
-        "BOS user assistant python output system pretraining deep learning transformer model optimizer",
+        "BOS user assistant python output system pretraining deep learning transformer model \
+         optimizer",
     ];
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 512);
 
@@ -83,8 +95,8 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
 
     for i in 1..=training_config.num_iterations {
         let loss = engine.train_step(&mut loader, device).await;
-        tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}",
-            i, training_config.num_iterations, loss);
+        tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}", i,
+            training_config.num_iterations, loss);
     }
 
     let elapsed = start_time.elapsed();

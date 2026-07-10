@@ -69,48 +69,21 @@ impl<B: Backend> QuantizedLinear<B> {
     /// De-quantize packed integer weights to float weights of shape [I, O]
     pub fn dequantize(&self) -> Tensor<B, 2> {
         let packed = self.packed_weights.clone();
-        let packed_shape = packed.shape().dims::<2>();
-        let (i_packed, o) = (packed_shape[0], packed_shape[1]);
+        let [i_packed, o] = packed.shape().dims::<2>();
+        let (pack_factor, base, offset) = quant_layout(self.bits);
+        let mut cur = packed;
+        let mut q_floats: Vec<Tensor<B, 3>> = Vec::with_capacity(pack_factor);
+        for _ in 0..pack_factor {
+            let cur_q = cur.clone() / base;
+            let next_cur =
+                cur_q.clone() - (cur.clone() - cur_q.clone() * base).lower_elem(0).int();
+            let rem = cur.clone() - next_cur.clone() * base;
+            q_floats.push((rem.float() - offset).unsqueeze_dim(2));
+            cur = next_cur;
+        }
 
-        let q_unpacked = if self.bits == 8 {
-            // W8A16 Unpacking (Pack Factor = 4)
-            // packed: [I / 4, O]
-            let mut q_floats = Vec::with_capacity(4);
-            let mut cur = packed;
-            for _ in 0..4 {
-                let cur_q = cur.clone() / 256;
-                let next_cur =
-                    cur_q.clone() - (cur.clone() - cur_q.clone() * 256).lower_elem(0).int();
-                let rem = cur.clone() - next_cur.clone() * 256;
-
-                q_floats.push((rem.float() - 128.0).unsqueeze_dim(2)); // Shift to [-128, 127]
-                cur = next_cur;
-            }
-
-            // Stack along dimension 2 and reshape to [I, O]
-            let stacked: Tensor<B, 3> = Tensor::cat(q_floats, 2); // [I / 4, O, 4]
-            let permuted: Tensor<B, 3> = stacked.swap_dims(1, 2); // [I / 4, 4, O]
-            permuted.reshape([i_packed * 4, o])
-        } else {
-            // W4A16 Unpacking (Pack Factor = 8)
-            // packed: [I / 8, O]
-            let mut q_floats: Vec<Tensor<B, 3>> = Vec::with_capacity(8);
-            let mut cur = packed;
-            for _ in 0..8 {
-                let cur_q = cur.clone() / 16;
-                let next_cur =
-                    cur_q.clone() - (cur.clone() - cur_q.clone() * 16).lower_elem(0).int();
-                let rem = cur.clone() - next_cur.clone() * 16;
-
-                q_floats.push((rem.float() - 8.0).unsqueeze_dim(2)); // Shift to [-8, 7]
-                cur = next_cur;
-            }
-
-            // Stack along dimension 2 and reshape to [I, O]
-            let stacked: Tensor<B, 3> = Tensor::cat(q_floats, 2); // [I / 8, O, 8]
-            let permuted: Tensor<B, 3> = stacked.swap_dims(1, 2); // [I / 8, 8, O]
-            permuted.reshape([i_packed * 8, o])
-        };
+        let q_unpacked =
+            Tensor::cat(q_floats, 2).swap_dims(1, 2).reshape([i_packed * pack_factor, o]);
 
         // 3. Apply Scales & Shift
         let i = q_unpacked.shape().dims::<2>()[0];
@@ -119,8 +92,7 @@ impl<B: Backend> QuantizedLinear<B> {
 
         if self.block_size > 0 {
             // Block-wise scaling
-            let block_len = self.block_size;
-            let reshaped = q_unpacked.reshape([i_blocks, block_len, o]);
+            let reshaped = q_unpacked.reshape([i_blocks, self.block_size, o]);
             let scaled = reshaped * scales_val;
             scaled.reshape([i, o])
         } else {
@@ -132,8 +104,8 @@ impl<B: Backend> QuantizedLinear<B> {
 
 /// Dynamically quantize a standard floating-point Linear layer
 /// into a QuantizedLinear layer in-place
-pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
-    block_size: usize) -> QuantizedLinear<B> {
+pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: usize)
+    -> QuantizedLinear<B> {
     let _device = linear.weight.device();
     assert!(bits == 4 || bits == 8, "quantization bits must be 4 or 8");
 
@@ -141,7 +113,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     let weight = linear.weight.val();
     let shape = weight.shape().dims::<2>();
     let (i, o) = (shape[0], shape[1]);
-    let pack_factor = if bits == 8 { 4 } else { 8 };
+    let (pack_factor, base, _offset) = quant_layout(bits);
     assert!(i % pack_factor == 0,
         "input dimension {} must be divisible by pack factor {} for W{} quantization",
         i, pack_factor, bits);
@@ -188,51 +160,37 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
     };
 
     // Pack the quantized floats into packed i32 integers
-    let packed_weights = if bits == 8 {
-        // INT8: Pack factor 4
-        let num_packed = i / pack_factor;
-        let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
-
-        let mut packed =
-            q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
-        let coeffs = [256, 65536, 16777216];
-        for k in 0..3 {
-            let slice = q_reshaped.clone()
-                .slice([0..num_packed, (k + 1)..(k + 2), 0..o]).reshape([num_packed, o]);
-            packed = packed + slice.mul_scalar(coeffs[k]);
-        }
-        packed
-    } else {
-        // INT4: Pack factor 8
-        let num_packed = i / pack_factor;
-        let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
-
-        let mut packed =
-            q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
-        let coeffs = [16, 256, 4096, 65536, 1048576, 16777216, 268435456];
-        for k in 0..7 {
-            let slice = q_reshaped.clone()
-                .slice([0..num_packed, (k + 1)..(k + 2), 0..o]).reshape([num_packed, o]);
-            packed = packed + slice.mul_scalar(coeffs[k]);
-        }
-        packed
-    };
+    let num_packed = i / pack_factor;
+    let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
+    let mut packed_weights =
+        q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
+    let mut coeff = base;
+    for k in 1..pack_factor {
+        let slice =
+            q_reshaped.clone().slice([0..num_packed, k..k + 1, 0..o]).reshape([num_packed, o]);
+        packed_weights = packed_weights + slice.mul_scalar(coeff);
+        if k + 1 < pack_factor { coeff *= base; }
+    }
 
     QuantizedLinear { packed_weights, scales, bias: linear.bias, bits,
         block_size: block_size_actual,
     }
 }
 
+fn quant_layout(bits: usize) -> (usize, i32, f32) {
+    if bits == 8 { (4, 256, 128.0) } else { (8, 16, 8.0) }
+}
+
 #[cfg(test)] mod tests { use super::*;
     use burn::tensor::Distribution;
+    use crate::common::ModelBackend;
 
     #[test] fn test_quantization_w8_rowwise() {
         let device = crate::common::init_device();
-        use crate::common::ModelBackend;
 
         // Shape [64, 128] is divisible by 4 and 8
-        let weight = Tensor::<ModelBackend, 2>::random( [64, 128],
-            Distribution::Normal(0.0, 1.0), &device,);
+        let weight = Tensor::<ModelBackend, 2>::random([64, 128],
+            Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 
         // Quantize to W8 row-wise (block_size = 0)
@@ -246,8 +204,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let dequantized = q_linear.dequantize();
         assert_eq!(dequantized.shape().dims(), [64, 128]);
 
-        let diff = crate::common::scalar_to_f32(
-            (dequantized - weight).abs().mean().into_scalar());
+        let diff =
+            crate::common::scalar_to_f32((dequantized - weight).abs().mean().into_scalar());
         println!("W8 Row-wise Quantization Mean Absolute Error: {}", diff);
         // Standard normal distribution values quantized to 256 levels should have very low
         // error (< 0.02)
@@ -256,7 +214,6 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
 
     #[test] fn test_quantization_w4_blockwise() {
         let device = crate::common::init_device();
-        use crate::common::ModelBackend;
 
         // Shape [64, 128]
         let weight = Tensor::<ModelBackend, 2>::random([64, 128],
@@ -274,8 +231,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         let dequantized = q_linear.dequantize();
         assert_eq!(dequantized.shape().dims(), [64, 128]);
 
-        let diff = crate::common::scalar_to_f32(
-            (dequantized - weight).abs().mean().into_scalar());
+        let diff =
+            crate::common::scalar_to_f32((dequantized - weight).abs().mean().into_scalar());
         println!("W4 Block-wise (32) Quantization Mean Absolute Error: {}", diff);
         // Standard normal values quantized to 16 levels block-wise
         // should have acceptable error (< 0.25)
@@ -284,7 +241,6 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
 
     #[test] fn test_quantized_linear_forward() {
         let device = crate::common::init_device();
-        use crate::common::ModelBackend;
 
         let weight = Tensor::<ModelBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 0.5), &device);
@@ -307,8 +263,8 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize,
         assert_eq!(out_std.shape().dims(), [2, 8, 128]);
         assert_eq!(out_quant.shape().dims(), [2, 8, 128]);
 
-        let diff = crate::common::scalar_to_f32(
-            (out_std - out_quant).abs().mean().into_scalar());
+        let diff =
+            crate::common::scalar_to_f32((out_std - out_quant).abs().mean().into_scalar());
         println!("W8 Block-wise Forward Mean Absolute Difference: {}", diff);
         assert!(diff < 0.05, "Forward difference too high: {}", diff);
     }

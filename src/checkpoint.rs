@@ -6,16 +6,21 @@ use safetensors::SafeTensors;
 
 use crate::gpt::{Gpt, has_ve};
 
-pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path,
-    device: &B::Device) -> Result<(), String> {
+fn block_weight_name(layer: usize, path: &str) -> String {
+    format!("transformer.h.{layer}.{path}.weight")
+}
+
+fn value_embed_weight_name(layer: usize) -> String { format!("value_embeds.{layer}.weight") }
+
+pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path, device: &B::Device)
+    -> Result<(), String> {
     let file_data =
         std::fs::read(path).map_err(|e| format!("Failed to read safetensors file: {:?}", e))?;
     let tensors = SafeTensors::deserialize(&file_data)
         .map_err(|e| format!("Failed to parse safetensors: {:?}", e))?;
 
     let get_f32_data = |name: &str| -> Result<(Vec<f32>, Vec<usize>), String> {
-        let view = tensors
-            .tensor(name)
+        let view = tensors.tensor(name)
             .map_err(|e| format!("Tensor '{}' not found in safetensors: {:?}", name, e))?;
         let shape: Vec<usize> = view.shape().to_vec();
         let data = view.data();
@@ -46,39 +51,32 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path,
     for i in 0..gpt.config.n_layer {
         let block = &mut gpt.h[i];
 
-        block.attn.c_q.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.attn.c_q.weight", i
-        ))?);
-        block.attn.c_k.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.attn.c_k.weight", i
-        ))?);
-        block.attn.c_v.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.attn.c_v.weight", i
-        ))?);
-        block.attn.c_proj.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.attn.c_proj.weight", i
-        ))?);
+        block.attn.c_q.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "attn.c_q"))?);
+        block.attn.c_k.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "attn.c_k"))?);
+        block.attn.c_v.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "attn.c_v"))?);
+        block.attn.c_proj.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "attn.c_proj"))?);
 
         if has_ve(i, gpt.config.n_layer) &&
             let Some(ref mut gate_linear) = block.attn.ve_gate {
-                gate_linear.weight = Param::from_tensor(load_transposed_param(&format!(
-                    "transformer.h.{}.attn.ve_gate.weight", i
-                ))?);
-            }
+            gate_linear.weight = Param::from_tensor(
+                load_transposed_param(&block_weight_name(i, "attn.ve_gate"))?);
+        }
 
-        block.mlp.c_fc.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.mlp.c_fc.weight", i
-        ))?);
-        block.mlp.c_proj.weight = Param::from_tensor(load_transposed_param(&format!(
-            "transformer.h.{}.mlp.c_proj.weight", i
-        ))?);
+        block.mlp.c_fc.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "mlp.c_fc"))?);
+        block.mlp.c_proj.weight =
+            Param::from_tensor(load_transposed_param(&block_weight_name(i, "mlp.c_proj"))?);
     }
 
     let mut ve_cnt = 0;
     for i in 0..gpt.config.n_layer {
         if has_ve(i, gpt.config.n_layer) {
             gpt.value_embeds[ve_cnt].weight =
-                Param::from_tensor(load_param(&format!("value_embeds.{}.weight", i))?);
+                Param::from_tensor(load_param(&value_embed_weight_name(i))?);
             ve_cnt += 1;
         }
     }
@@ -133,32 +131,45 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
     for i in 0..gpt.config.n_layer {
         let block = &gpt.h[i];
 
-        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_q.weight", i),
-            block.attn.c_q.weight.val());
-        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_k.weight", i),
-            block.attn.c_k.weight.val());
-        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_v.weight", i),
-            block.attn.c_v.weight.val());
-        saver.save_transposed_param(&format!("transformer.h.{}.attn.c_proj.weight", i),
-            block.attn.c_proj.weight.val());
+        saver.save_transposed_param(
+            &block_weight_name(i, "attn.c_q"),
+            block.attn.c_q.weight.val(),
+        );
+        saver.save_transposed_param(
+            &block_weight_name(i, "attn.c_k"),
+            block.attn.c_k.weight.val(),
+        );
+        saver.save_transposed_param(
+            &block_weight_name(i, "attn.c_v"),
+            block.attn.c_v.weight.val(),
+        );
+        saver.save_transposed_param(
+            &block_weight_name(i, "attn.c_proj"),
+            block.attn.c_proj.weight.val(),
+        );
 
         if has_ve(i, gpt.config.n_layer) &&
             let Some(ref gate_linear) = block.attn.ve_gate {
-                saver.save_transposed_param(
-                    &format!("transformer.h.{}.attn.ve_gate.weight", i),
-                    gate_linear.weight.val());
-            }
+            saver.save_transposed_param(
+                &block_weight_name(i, "attn.ve_gate"),
+                gate_linear.weight.val(),
+            );
+        }
 
-        saver.save_transposed_param(&format!("transformer.h.{}.mlp.c_fc.weight", i),
-            block.mlp.c_fc.weight.val());
-        saver.save_transposed_param(&format!("transformer.h.{}.mlp.c_proj.weight", i),
-            block.mlp.c_proj.weight.val());
+        saver.save_transposed_param(
+            &block_weight_name(i, "mlp.c_fc"),
+            block.mlp.c_fc.weight.val(),
+        );
+        saver.save_transposed_param(
+            &block_weight_name(i, "mlp.c_proj"),
+            block.mlp.c_proj.weight.val(),
+        );
     }
 
     let mut ve_cnt = 0;
     for i in 0..gpt.config.n_layer {
         if has_ve(i, gpt.config.n_layer) {
-            saver.save_param(&format!("value_embeds.{}.weight", i),
+            saver.save_param(&value_embed_weight_name(i),
                 gpt.value_embeds[ve_cnt].weight.val());
             ve_cnt += 1;
         }
@@ -175,8 +186,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
     for (name, buffer) in &saver.buffers {
         let shape = &saver.shapes[name];
         let view = safetensors::tensor::TensorView::new(
-            safetensors::tensor::Dtype::F32,
-            shape.clone(), buffer,
+            safetensors::tensor::Dtype::F32, shape.clone(), buffer,
         ).map_err(|e| format!("Failed to create TensorView for '{}': {:?}", name, e))?;
         tensors_map.insert(name.clone(), view);
     }
@@ -192,9 +202,9 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
         let device = crate::common::init_device();
         use crate::common::ModelBackend;
 
-        let config = crate::gpt::GptConfig { sequence_len: 16, vocab_size: 32,
-            n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
-            window_pattern: "L".to_string(), quantization: None,
+        let config = crate::gpt::GptConfig { sequence_len: 16, vocab_size: 32, n_layer: 2,
+            n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
+            quantization: None,
         };
 
         // 1. Create a dummy source model
@@ -206,41 +216,62 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
 
         // 3. Create a target model and load the saved safetensors back
         let mut model_dst = Gpt::<ModelBackend>::new(config, &device);
-        load_safetensors_to_gpt(&mut model_dst, path, &device)
-            .expect("Failed to load safetensors");
+        load_safetensors_to_gpt(&mut model_dst, path, &device).expect("Failed to load safetensors");
+
+        fn assert_tensor_exact_eq<B: Backend, const D: usize>(
+            left: Tensor<B, D>, right: Tensor<B, D>, message: &str) {
+            let diff = crate::common::scalar_to_f32((left - right).abs().sum().into_scalar());
+            assert_eq!(diff, 0.0, "{}", message);
+        }
 
         // 4. Assert that all weights are identical
-        assert_tensor_exact_eq(model_src.wte.weight.val(), model_dst.wte.weight.val(),
-            "wte weight mismatch");
-        assert_tensor_exact_eq(model_src.lm_head.weight.val(), model_dst.lm_head.weight.val(),
-            "lm_head weight mismatch");
+        assert_tensor_exact_eq(
+            model_src.wte.weight.val(),
+            model_dst.wte.weight.val(),
+            "wte weight mismatch",
+        );
+        assert_tensor_exact_eq(
+            model_src.lm_head.weight.val(),
+            model_dst.lm_head.weight.val(),
+            "lm_head weight mismatch",
+        );
 
         for i in 0..model_src.config.n_layer {
             let (src_block, dst_block) = (&model_src.h[i], &model_dst.h[i]);
 
-            assert_tensor_exact_eq(src_block.attn.c_q.weight.val(), dst_block.attn.c_q.weight.val(),
-                &format!("c_q weight mismatch at layer {}", i));
-            assert_tensor_exact_eq(src_block.attn.c_k.weight.val(), dst_block.attn.c_k.weight.val(),
-                &format!("c_k weight mismatch at layer {}", i));
-            assert_tensor_exact_eq(src_block.attn.c_v.weight.val(), dst_block.attn.c_v.weight.val(),
-                &format!("c_v weight mismatch at layer {}", i));
-            assert_tensor_exact_eq(src_block.attn.c_proj.weight.val(),
+            assert_tensor_exact_eq(
+                src_block.attn.c_q.weight.val(),
+                dst_block.attn.c_q.weight.val(),
+                &format!("c_q weight mismatch at layer {}", i),
+            );
+            assert_tensor_exact_eq(
+                src_block.attn.c_k.weight.val(),
+                dst_block.attn.c_k.weight.val(),
+                &format!("c_k weight mismatch at layer {}", i),
+            );
+            assert_tensor_exact_eq(
+                src_block.attn.c_v.weight.val(),
+                dst_block.attn.c_v.weight.val(),
+                &format!("c_v weight mismatch at layer {}", i),
+            );
+            assert_tensor_exact_eq(
+                src_block.attn.c_proj.weight.val(),
                 dst_block.attn.c_proj.weight.val(),
-                &format!("c_proj weight mismatch at layer {}", i));
-            assert_tensor_exact_eq(src_block.mlp.c_fc.weight.val(), dst_block.mlp.c_fc.weight.val(),
-                &format!("c_fc weight mismatch at layer {}", i));
-            assert_tensor_exact_eq(src_block.mlp.c_proj.weight.val(),
+                &format!("c_proj weight mismatch at layer {}", i),
+            );
+            assert_tensor_exact_eq(
+                src_block.mlp.c_fc.weight.val(),
+                dst_block.mlp.c_fc.weight.val(),
+                &format!("c_fc weight mismatch at layer {}", i),
+            );
+            assert_tensor_exact_eq(
+                src_block.mlp.c_proj.weight.val(),
                 dst_block.mlp.c_proj.weight.val(),
-                &format!("mlp c_proj weight mismatch at layer {}", i));
+                &format!("mlp c_proj weight mismatch at layer {}", i),
+            );
         }
 
         // Clean up temporary file
         std::fs::remove_file(path).ok();
-    }
-
-    #[cfg(test)] fn assert_tensor_exact_eq<B: Backend, const D: usize>(left: Tensor<B, D>,
-        right: Tensor<B, D>, message: &str) {
-        let diff = crate::common::scalar_to_f32((left - right).abs().sum().into_scalar());
-        assert_eq!(diff, 0.0, "{}", message);
     }
 //}

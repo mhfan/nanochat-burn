@@ -1,12 +1,14 @@
 
 use std::collections::VecDeque;
+
 use burn::tensor::{Int, Shape, Tensor, TensorData, backend::Backend};
 
 use crate::{engine::calculator::use_calculator,
-    gpt::{ForwardLayer, Gpt, KVCache}, tokenizer::BpeTokenizer,
+    gpt::{DEFAULT_PAGE_SIZE, ForwardLayer, Gpt, KVCache}, tokenizer::BpeTokenizer,
 };
 
 /// Tracks self-regressive token generation state per sample
+#[derive(Clone)]
 pub struct GeneratorState<B: Backend> {
     pub cache: KVCache<B>,
     pub current_tokens: Vec<Vec<usize>>,
@@ -34,29 +36,28 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             .flatten().map(|&t| t as i32).collect();
 
         let idx = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])), device,
-        );
+            TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])), device);
 
         let head_dim = self.model.config.n_embd / self.model.config.n_head;
         let mut cache = KVCache::new_paged(
             self.model.config.n_layer, num_samples, self.model.config.sequence_len,
-            self.model.config.n_kv_head, head_dim, 8, device,
+            self.model.config.n_kv_head, head_dim, DEFAULT_PAGE_SIZE, device,
         );
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
 
         // Extract the logits at the last token position
-        let last_logits = logits_3d.slice([0..num_samples,
-                (prompt_len - 1)..prompt_len, 0..self.model.config.vocab_size,
-        ]).reshape([num_samples, self.model.config.vocab_size]);
+        let last_logits = logits_3d.slice([
+                0..num_samples, (prompt_len - 1)..prompt_len,
+                0..self.model.config.vocab_size,
+            ]).reshape([num_samples, self.model.config.vocab_size]);
 
-        let current_tokens = vec![prompt_tokens.to_vec(); num_samples];
-        let forced_tokens = vec![VecDeque::new(); num_samples];
-        let in_python_block = vec![false; num_samples];
-        let python_expr_tokens = vec![Vec::new(); num_samples];
-        let completed = vec![false; num_samples];
-
-        let state = GeneratorState { cache, current_tokens, forced_tokens,
-            in_python_block, python_expr_tokens, completed, step: prompt_len,
+        let state = GeneratorState { cache,
+            current_tokens: vec![prompt_tokens.to_vec(); num_samples],
+            forced_tokens: vec![VecDeque::new(); num_samples],
+            in_python_block: vec![false; num_samples],
+            python_expr_tokens: vec![Vec::new(); num_samples],
+            completed: vec![false; num_samples],
+            step: prompt_len,
         };
 
         (state, last_logits)
@@ -157,16 +158,13 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             );
             cur_logits = next_logits;
 
-            for i in 0..num_samples {
-                if !completed[i] {
-                    let token = token_column[i];
-                    let mask = token_masks[i];
-                    if token == special_tokens.assistant_end || token == special_tokens.bos {
-                        completed[i] = true;
-                    } else {
-                        results[i].push(token);
-                        masks[i].push(mask);
-                    }
+            for (i, (&token, &mask)) in token_column.iter().zip(&token_masks).enumerate() {
+                if completed[i] { continue; }
+                if token == special_tokens.assistant_end || token == special_tokens.bos {
+                    completed[i] = true;
+                } else {
+                    results[i].push(token);
+                    masks[i].push(mask);
                 }
             }
         }
@@ -177,8 +175,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 
 /// Dynamic sample selection based on temperature, top_k, and repetition penalties
 pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
-    top_k: Option<usize>, repetition_penalty: f32,
-    generated_tokens: &[Vec<usize>]) -> Vec<usize> {
+    top_k: Option<usize>, repetition_penalty: f32, generated_tokens: &[Vec<usize>]) -> Vec<usize> {
     let shape: [usize; 2] = logits.shape().dims();
     let (batch_size, vocab_size) = (shape[0], shape[1]);
 
@@ -242,7 +239,10 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let mut chosen_idx = indices[0];
         for &idx in &indices {
             cum_sum += exp_logits[idx];
-            if r <= cum_sum { chosen_idx = idx; break; }
+            if r <= cum_sum {
+                chosen_idx = idx;
+                break;
+            }
         }
         sampled_ids.push(chosen_idx);
     }
@@ -256,8 +256,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let corpus = vec!["Interactive chat agent with Tool-Use integration."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
-        let config = crate::gpt::GptConfig { sequence_len: 8,
-            n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 32, quantization: None,
+        let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 32, quantization: None,
             window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
         };
 
@@ -278,15 +278,9 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let corpus = vec!["Interactive chat agent with Tool-Use integration."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
-        let config = crate::gpt::GptConfig {
-            sequence_len: 32,
-            n_layer: 1,
-            n_head: 2,
-            n_kv_head: 1,
-            n_embd: 32,
-            window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(),
-            quantization: None,
+        let config = crate::gpt::GptConfig { sequence_len: 32, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(),
+            vocab_size: tokenizer.get_vocab_size(), quantization: None,
         };
 
         use crate::common::ModelBackend;
