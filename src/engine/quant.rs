@@ -1,5 +1,9 @@
 
-use burn::{module::{Module, Param}, nn::Linear, tensor::{Int, Tensor, backend::Backend}};
+use burn::{module::{Module, Param}, nn::Linear,
+    tensor::{ElementConversion, Int, Tensor, backend::Backend,
+        quantization::{QuantLevel, QuantScheme, QuantStore, QuantValue},
+    },
+};
 
 use crate::gpt::ForwardLayer;
 
@@ -26,11 +30,22 @@ impl<B: Backend> ForwardLayer<B> for LinearOrQuantized<B> {
 
 #[derive(Module, Debug)]
 pub struct QuantizedLinear<B: Backend> {
-    pub packed_weights: Tensor<B, 2, Int>, // [I_packed, O]
-    pub scales: Tensor<B, 3>,              // [I_blocks, 1, O]
+    weights: QuantizedWeights<B>,
     pub bias: Option<Param<Tensor<B, 1>>>, // [O]
     pub bits: usize,                       // 8 or 4
     pub block_size: usize,                 // Block size (e.g. 32, 64, or 0 for row-wise)
+}
+
+#[derive(Module, Debug)]
+enum QuantizedWeights<B: Backend> {
+    Native(Tensor<B, 2>), // [O, I], preserving contiguous quantization blocks
+    Packed(PackedWeights<B>),
+}
+
+#[derive(Module, Debug)]
+struct PackedWeights<B: Backend> {
+    values: Tensor<B, 2, Int>, // [I / pack_factor, O]
+    scales: Tensor<B, 3>,      // [I_blocks, 1, O]
 }
 
 impl<B: Backend> ForwardLayer<B> for QuantizedLinear<B> {
@@ -40,64 +55,64 @@ impl<B: Backend> ForwardLayer<B> for QuantizedLinear<B> {
 }
 
 impl<B: Backend> QuantizedLinear<B> {
-    /// Perform the forward pass with dynamic in-place de-quantization
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let shape = input.shape().dims::<D>();
         let in_features = shape[D - 1];
-
-        // 1. Reshape D-dimensional input to 2D
         let flattened = input.reshape([-1, in_features as i32]);
+        let (mut output, out_features) = match &self.weights {
+            QuantizedWeights::Native(weight) => {
+                (flattened.matmul(weight.clone().swap_dims(0, 1)), weight.shape().dims::<2>()[0])
+            }
+            QuantizedWeights::Packed(weight) => {
+                let weight = weight.dequantize(self.bits, self.block_size);
+                let out_features = weight.shape().dims::<2>()[1];
+                (flattened.matmul(weight), out_features)
+            }
+        };
 
-        // 2. De-quantize packed weights
-        let w_float = self.dequantize();
-        let out_features = w_float.shape().dims::<2>()[1];
-
-        // 3. Matrix multiplication: Y = X * W
-        // input: [B, I], w_float: [I, O] -> Y: [B, O]
-        let mut output = flattened.matmul(w_float);
-
-        // 4. Add optional bias
-        if let Some(ref bias) = self.bias {
+        if let Some(bias) = &self.bias {
             output = output + bias.val().unsqueeze_dim(0);
         }
 
-        // 5. Reshape back to D-dimensional
         let mut out_shape = shape;
         out_shape[D - 1] = out_features;
         output.reshape(out_shape)
     }
 
-    /// De-quantize packed integer weights to float weights of shape [I, O]
+    /// Dequantize the stored weights to `[in_features, out_features]`.
     pub fn dequantize(&self) -> Tensor<B, 2> {
-        let packed = self.packed_weights.clone();
-        let [i_packed, o] = packed.shape().dims::<2>();
-        let (pack_factor, base, offset) = quant_layout(self.bits);
-        let mut cur = packed;
+        match &self.weights {
+            QuantizedWeights::Native(weight) => weight.clone().dequantize().swap_dims(0, 1),
+            QuantizedWeights::Packed(weight) => weight.dequantize(self.bits, self.block_size),
+        }
+    }
+
+    /// Whether forward uses Burn's packed quantized matmul directly.
+    pub fn uses_native_weights(&self) -> bool {
+        matches!(self.weights, QuantizedWeights::Native(_))
+    }
+}
+
+impl<B: Backend> PackedWeights<B> {
+    fn dequantize(&self, bits: usize, block_size: usize) -> Tensor<B, 2> {
+        let [i_packed, o] = self.values.shape().dims::<2>();
+        let (pack_factor, mask, offset) = quant_layout(bits);
         let mut q_floats = Vec::<Tensor<B, 3>>::with_capacity(pack_factor);
-        for _ in 0..pack_factor {
-            let cur_q = cur.clone() / base;
-            let next_cur =
-                cur_q.clone() - (cur.clone() - cur_q.clone() * base).lower_elem(0).int();
-            let rem = cur.clone() - next_cur.clone() * base;
-            q_floats.push((rem.float() - offset).unsqueeze_dim(2));
-            cur = next_cur;
+        for shift in (0..32).step_by(bits) {
+            let values = self.values.clone().bitwise_right_shift_scalar(shift.elem())
+                .bitwise_and_scalar(mask.elem());
+            q_floats.push((values.float() - offset).unsqueeze_dim(2));
         }
 
         let q_unpacked =
             Tensor::cat(q_floats, 2).swap_dims(1, 2).reshape([i_packed * pack_factor, o]);
-
         let i = q_unpacked.shape().dims::<2>()[0];
-        let scales_val = self.scales.clone();
-        let i_blocks = scales_val.shape().dims::<3>()[0];
 
-        if self.block_size > 0 {
-            // Block-wise scaling
-            let reshaped = q_unpacked.reshape([i_blocks, self.block_size, o]);
-            let scaled = reshaped * scales_val;
-            scaled.reshape([i, o])
+        if block_size > 0 {
+            let i_blocks = self.scales.shape().dims::<3>()[0];
+            (q_unpacked.reshape([i_blocks, block_size, o]) * self.scales.clone()).reshape([i, o])
         } else {
-            // Row-wise scaling
-            q_unpacked * scales_val.reshape([1, o])
+            q_unpacked * self.scales.clone().reshape([1, o])
         }
     }
 }
@@ -108,55 +123,71 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
     -> QuantizedLinear<B> {
     assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
 
-    // Weight has shape [I, O] in Burn's Linear layer
     let weight = linear.weight.val();
-    let [i, o] = weight.shape().dims::<2>();
-    let (pack_factor, base, offset) = quant_layout(bits);
+    let [i, _] = weight.shape().dims::<2>();
+    let (pack_factor, ..) = quant_layout(bits);
     assert!(i % pack_factor == 0,
         "input dimension {} must be divisible by pack factor {} for W{} quantization",
         i, pack_factor, bits);
 
-    let block_size_actual = effective_block_size(bits, block_size);
-    let (max_val, max_q) = (offset - 1.0, (base - 1) as f32);
+    let block_size = effective_block_size(bits, block_size);
+    if block_size > 0 {
+        assert!(i % block_size == 0,
+            "input dimension {} must be divisible by quantization block size {}", i, block_size);
+    }
 
-    let (q_weight, scales) = if block_size_actual > 0 {
-        assert!(i % block_size_actual == 0,
-            "input dimension {} must be divisible by quantization block size {}",
-            i, block_size_actual);
-        let num_blocks = i / block_size_actual;
-        let reshaped = weight.reshape([num_blocks, block_size_actual, o]);
-        let max_abs = reshaped.clone().abs().max_dim(1);
-        let block_scales = (max_abs / max_val).clamp(1e-6, 1e6);
-        let q_shifted = (reshaped / block_scales.clone()).round() + offset;
-        let q_flat = q_shifted.clamp(0.0, max_q).reshape([i, o]);
-
-        (q_flat, block_scales)
+    let weights = if native_quantization_supported(i, block_size) {
+        QuantizedWeights::Native(quantize_native(weight, bits, block_size))
     } else {
-        let max_abs = weight.clone().abs().max_dim(0); // [1, o]
-        let channel_scales = (max_abs / max_val).clamp(1e-6, 1e6);
-
-        let reshaped_scales = channel_scales.clone().reshape([1, o]);
-        let q_shifted = (weight / reshaped_scales).round() + offset;
-        let clamped = q_shifted.clamp(0.0, max_q);
-
-        (clamped, channel_scales.reshape([1, 1, o]))
+        QuantizedWeights::Packed(quantize_packed(weight, bits, block_size))
     };
 
-    // Pack the quantized floats into packed i32 integers
-    let (num_packed, mut coeff) = (i / pack_factor, base);
+    QuantizedLinear { weights, bias: linear.bias, bits, block_size }
+}
+
+fn quantize_native<B: Backend>(weight: Tensor<B, 2>, bits: usize,
+    block_size: usize) -> Tensor<B, 2> {
+    let block_size = if block_size == 0 { weight.shape().dims::<2>()[0] } else { block_size };
+    let scheme = QuantScheme::default()
+        .with_value(if bits == 8 { QuantValue::Q8S } else { QuantValue::Q4S })
+        .with_level(QuantLevel::block([block_size as u8]))
+        .with_store(QuantStore::PackedU32(0));
+
+    weight.swap_dims(0, 1).quantize_dynamic(&scheme)
+}
+
+fn quantize_packed<B: Backend>(weight: Tensor<B, 2>, bits: usize,
+    block_size: usize) -> PackedWeights<B> {
+    let [i, o] = weight.shape().dims::<2>();
+    let (pack_factor, mask, offset) = quant_layout(bits);
+    let max_val = offset - 1.0;
+
+    #[allow(clippy::manual_checked_ops)]
+    let (q_weight, scales) = if block_size > 0 {
+        let num_blocks = i / block_size;
+        let reshaped = weight.reshape([num_blocks, block_size, o]);
+        let scales = (reshaped.clone().abs().max_dim(1) / max_val).clamp(1e-6, 1e6);
+        let quantized = (reshaped / scales.clone()).round() + offset;
+        (quantized.clamp(0.0, mask as f32).reshape([i, o]), scales)
+    } else {
+        let scales = (weight.clone().abs().max_dim(0) / max_val).clamp(1e-6, 1e6);
+        let quantized = (weight / scales.clone()).round() + offset;
+        (quantized.clamp(0.0, mask as f32), scales.reshape([1, 1, o]))
+    };
+
+    let num_packed = i / pack_factor;
     let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
-    let mut packed_weights =
+    let mut values =
         q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
+    let mut coefficient = mask + 1;
     for k in 1..pack_factor {
         let slice =
             q_reshaped.clone().slice([0..num_packed, k..k + 1, 0..o]).reshape([num_packed, o]);
-        packed_weights = packed_weights + slice.mul_scalar(coeff);
-        if k + 1 < pack_factor { coeff *= base; }
+        values = values + slice.mul_scalar(coefficient);
+        if k + 1 < pack_factor { coefficient *= mask + 1; }
     }
 
-    QuantizedLinear { packed_weights, scales, bias: linear.bias, bits,
-        block_size: block_size_actual,
-    }
+    PackedWeights { values, scales }
 }
 
 pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
@@ -178,10 +209,15 @@ pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
 
 fn quant_layout(bits: usize) -> (usize, i32, f32) {
     match bits {
-        8 => (4, 256, 128.0),
-        4 => (8, 16, 8.0),
+        8 => (4, 0xff, 128.0),
+        4 => (8, 0x0f, 8.0),
         _ => panic!("quantization bits must be 4 or 8"),
     }
+}
+
+fn native_quantization_supported(input_dim: usize, block_size: usize) -> bool {
+    let native_block_size = if block_size == 0 { input_dim } else { block_size };
+    cfg!(not(feature = "ndarray")) && native_block_size <= u8::MAX as usize
 }
 
 fn effective_block_size(bits: usize, block_size: usize) -> usize {
@@ -205,7 +241,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
         assert_eq!(q_linear.bits, 8);
         assert_eq!(q_linear.block_size, 0);
-        assert_eq!(q_linear.packed_weights.shape().dims(), [16, 128]); // 64 / 4 = 16
+        assert_eq!(q_linear.uses_native_weights(), cfg!(not(feature = "ndarray")));
 
         // Dequantize and check difference
         let dequantized = q_linear.dequantize();
@@ -231,7 +267,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
         assert_eq!(q_linear.bits, 4);
         assert_eq!(q_linear.block_size, 32);
-        assert_eq!(q_linear.packed_weights.shape().dims(), [8, 128]); // 64 / 8 = 8
+        assert_eq!(q_linear.uses_native_weights(), cfg!(not(feature = "ndarray")));
 
         // Dequantize and check difference
         let dequantized = q_linear.dequantize();
@@ -256,20 +292,33 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
             bias: Some(Param::from_tensor(bias.clone())),
         };
 
-        let q_linear = quantize_linear(linear.clone(), 8, 32);
-
         // Input shape [2, 8, 64]
         let input = Tensor::<ModelBackend, 3>::random([2, 8, 64],
             Distribution::Normal(0.0, 1.0), &device);
-
         let out_std = linear.forward(input.clone());
-        let out_quant = q_linear.forward(input);
 
-        assert_eq!(out_std.shape().dims(), [2, 8, 128]);
-        assert_eq!(out_quant.shape().dims(), [2, 8, 128]);
+        for (bits, tolerance) in [(8, 0.05), (4, 0.5)] {
+            let out_quant = quantize_linear(linear.clone(), bits, 32).forward(input.clone());
+            assert_eq!(out_quant.shape().dims(), [2, 8, 128]);
+            let diff = crate::common::scalar_to_f32(
+                (out_std.clone() - out_quant).abs().mean().into_scalar());
+            assert!(diff < tolerance, "W{} forward difference too high: {}", bits, diff);
+        }
+    }
 
-        let diff =
-            crate::common::scalar_to_f32((out_std - out_quant).abs().mean().into_scalar());
-        assert!(diff < 0.05, "Forward difference too high: {}", diff);
+    #[test] fn test_large_rowwise_quantization_uses_portable_fallback() {
+        let device = crate::common::init_device();
+        let weight = Tensor::<ModelBackend, 2>::random([256, 32],
+            Distribution::Normal(0.0, 1.0), &device);
+        let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
+
+        let q_linear = quantize_linear(linear, 8, 0);
+
+        assert!(!q_linear.uses_native_weights());
+        let dequantized = q_linear.dequantize();
+        assert_eq!(dequantized.shape().dims(), [256, 32]);
+        let diff = crate::common::scalar_to_f32(
+            (dequantized - weight).abs().mean().into_scalar());
+        assert!(diff < 0.02, "Error too high: {}", diff);
     }
 }
