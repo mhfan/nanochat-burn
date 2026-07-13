@@ -38,6 +38,25 @@ pub struct GptConfig {
 }
 
 impl GptConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.sequence_len == 0 { return Err("sequence_len must be greater than zero"); }
+        if self.vocab_size == 0 { return Err("vocab_size must be greater than zero"); }
+        if self.n_layer == 0 { return Err("n_layer must be greater than zero"); }
+        if self.n_head == 0 { return Err("n_head must be greater than zero"); }
+        if self.n_kv_head == 0 { return Err("n_kv_head must be greater than zero"); }
+        if self.n_embd == 0 { return Err("n_embd must be greater than zero"); }
+        if self.n_head % self.n_kv_head != 0 { return Err("n_kv_head must divide n_head"); }
+        if self.n_embd % self.n_head != 0 { return Err("n_head must divide n_embd"); }
+        if (self.n_embd / self.n_head) % 2 != 0 { return Err("attention head size must be even"); }
+        if let Some(quantization) = &self.quantization && !matches!(quantization.bits, 4 | 8) {
+            return Err("quantization bits must be 4 or 8");
+        }
+        if !self.window_pattern.bytes().all(|byte| matches!(byte, b'S' | b's' | b'L' | b'l')) {
+            return Err("window_pattern may only contain S and L");
+        }
+        Ok(())
+    }
+
     pub fn compute_window_sizes(&self) -> Vec<i32> {
         let short_window = ((self.sequence_len as f32 / 4.0 / 128.0).ceil() * 128.0) as i32;
         let pattern = self.window_pattern.to_ascii_uppercase().into_bytes();
@@ -52,7 +71,9 @@ impl GptConfig {
     }
 }
 
-pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool { layer_idx % 2 == (n_layer - 1) % 2 }
+pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
+    n_layer > 0 && layer_idx % 2 == (n_layer - 1) % 2
+}
 
 fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize,
     device: &B::Device) -> Tensor<B, 4> {
@@ -97,22 +118,11 @@ pub struct KVCache<B: Backend> {
     pub k_page_pool: Vec<Tensor<B, 4>>,
     // Layer -> [max_num_pages, page_size, n_kv_head, head_dim]
     pub v_page_pool: Vec<Tensor<B, 4>>,
-    pub block_table: Tensor<B, 2, Int>, // [B, max_pages_per_seq]
     pub page_size: usize,
     pub max_pages_per_seq: usize,
 }
 
 impl<B: Backend> KVCache<B> {
-    pub fn new(n_layer: usize, device: &B::Device) -> Self {
-        Self {
-            k_page_pool: Vec::with_capacity(n_layer),
-            v_page_pool: Vec::with_capacity(n_layer),
-            block_table: Tensor::<B, 2, Int>::zeros([1, 1], device),
-            page_size: DEFAULT_PAGE_SIZE,
-            max_pages_per_seq: 1,
-        }
-    }
-
     pub fn new_allocated(n_layer: usize, batch_size: usize, max_seq_len: usize,
         n_kv_head: usize, head_dim: usize, device: &B::Device) -> Self {
         Self::new_paged(n_layer, batch_size, max_seq_len, n_kv_head,
@@ -121,6 +131,11 @@ impl<B: Backend> KVCache<B> {
 
     pub fn new_paged(n_layer: usize, batch_size: usize, max_seq_len: usize,
         n_kv_head: usize, head_dim: usize, page_size: usize, device: &B::Device) -> Self {
+        assert!(n_layer > 0, "cache must contain at least one layer");
+        assert!(batch_size > 0, "cache batch size must be greater than zero");
+        assert!(max_seq_len > 0, "cache sequence length must be greater than zero");
+        assert!(n_kv_head > 0 && head_dim > 0, "cache head dimensions must be non-zero");
+        assert!(page_size > 0, "page size must be greater than zero");
         let max_pages_per_seq = max_seq_len.div_ceil(page_size);
         let max_num_pages = batch_size * max_pages_per_seq;
 
@@ -130,11 +145,7 @@ impl<B: Backend> KVCache<B> {
                     Tensor::zeros(pool_shape.clone(), device),
             )}).unzip();
 
-        let data: Vec<_> = (0..(batch_size * max_pages_per_seq) as i32).collect();
-        let block_table = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(data, Shape::new([batch_size, max_pages_per_seq])), device);
-
-        Self { k_page_pool, v_page_pool, block_table, page_size, max_pages_per_seq }
+        Self { k_page_pool, v_page_pool, page_size, max_pages_per_seq }
     }
 }
 
@@ -143,7 +154,7 @@ const VE_GATE_INPUT_DIM: usize = 12;
 const SMEAR_GATE_INPUT_DIM: usize = 24;
 const LOGIT_CLIP_VAL: f32 = 15.0;
 const ROPE_BASE_FREQ: f32 = 100000.0;
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 8;
+const DEFAULT_PAGE_SIZE: usize = 8;
 
 fn param<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Param<Tensor<B, D>> {
     Param::from_tensor(tensor)
@@ -188,7 +199,7 @@ pub struct CausalSelfAttention<B: Backend, L = Linear<B>> {
 impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
     fn prepare_qkv(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>, cos: Tensor<B, 4>,
         sin: Tensor<B, 4>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
-        let [b, t, _] = x.shape().dims();
+        let [b, t, channels] = x.shape().dims();
 
         let q = self.c_q.forward_layer(x.clone()).reshape([b, t, self.n_head, self.head_dim]);
         let k =
@@ -198,7 +209,7 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
 
         if let (Some(ve_tensor), Some(ve_gate_linear)) = (ve, self.ve_gate.as_ref()) {
             let ve_reshaped = ve_tensor.reshape([b, t, self.n_kv_head, self.head_dim]);
-            let x_slice = x.slice([0..b, 0..t, 0..VE_GATE_INPUT_DIM]);
+            let x_slice = x.slice([0..b, 0..t, 0..channels.min(VE_GATE_INPUT_DIM)]);
             let gate_logits = ve_gate_linear.forward_layer(x_slice);
             let gate = ((gate_logits * -1.0).exp() + 1.0).recip() * 3.0; // range (0, 3)
             let gate_unsqueezed = gate.reshape([b, t, self.n_kv_head, 1]);
@@ -231,10 +242,8 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         self.c_proj.forward_layer(y)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, layer_idx: usize, cache: &mut KVCache<B>,
-        step: usize) -> Tensor<B, 3> {
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let (b, t, _) = (shape[0], shape[1], shape[2]);
         let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
@@ -263,15 +272,15 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
                             0..self.n_kv_head, 0..self.head_dim,
                         ]).reshape(shape);
 
-                    cache.k_page_pool[layer_idx] =
-                        cache.k_page_pool[layer_idx].clone().slice_assign([
+                    cache.k_page_pool[self.layer_idx] =
+                        cache.k_page_pool[self.layer_idx].clone().slice_assign([
                                 physical_page_id..physical_page_id + 1,
                                 offset_start..offset_end,
                                 0..self.n_kv_head,
                                 0..self.head_dim,
                             ], k_slice);
-                    cache.v_page_pool[layer_idx] =
-                        cache.v_page_pool[layer_idx].clone().slice_assign([
+                    cache.v_page_pool[self.layer_idx] =
+                        cache.v_page_pool[self.layer_idx].clone().slice_assign([
                                 physical_page_id..physical_page_id + 1,
                                 offset_start..offset_end,
                                 0..self.n_kv_head,
@@ -290,14 +299,14 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
                 let physical_page_end = physical_page_start + num_pages;
 
                 let shape = [1, num_pages * cache.page_size, self.n_kv_head, self.head_dim];
-                let k_pages = cache.k_page_pool[layer_idx].clone().slice([
+                let k_pages = cache.k_page_pool[self.layer_idx].clone().slice([
                         physical_page_start..physical_page_end,
                         0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
                     ]).reshape(shape);
                 let k_seq =
                     k_pages.slice([0..1, 0..num_tokens, 0..self.n_kv_head, 0..self.head_dim]);
 
-                let v_pages = cache.v_page_pool[layer_idx].clone().slice([
+                let v_pages = cache.v_page_pool[self.layer_idx].clone().slice([
                         physical_page_start..physical_page_end,
                         0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
                     ]).reshape(shape);
@@ -347,13 +356,11 @@ pub struct Block<B: Backend, L = Linear<B>> {
 }
 
 impl<B: Backend, L: ForwardLayer<B>> Block<B, L> {
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, layer_idx: usize, cache: &mut KVCache<B>,
-        step: usize) -> Tensor<B, 3> {
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
         let x = x.clone() +
             self.attn.forward_with_cache(rms_norm(x.clone(), 1e-5),
-                ve, cos, sin, layer_idx, cache, step);
+                ve, cos, sin, cache, step);
         x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
     }
 
@@ -380,6 +387,7 @@ pub struct Gpt<B: Backend, L = Linear<B>> {
 
 impl<B: Backend> Gpt<B, Linear<B>> {
     pub fn new(config: GptConfig, device: &B::Device) -> Self {
+        config.validate().unwrap_or_else(|message| panic!("invalid GPT config: {message}"));
         let padded_vocab_size = config.vocab_size.div_ceil(64) * 64;
         let n_embd = config.n_embd;
         let head_dim = n_embd / config.n_head;
@@ -402,7 +410,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 let c_v = random_linear(n_embd, kv_dim, init, device);
                 let c_proj = zero_linear(n_embd, n_embd, device);
                 let ve_gate = if has_ve(i, config.n_layer) {
-                    Some(random_linear(VE_GATE_INPUT_DIM, config.n_kv_head,
+                    Some(random_linear(n_embd.min(VE_GATE_INPUT_DIM), config.n_kv_head,
                         Distribution::Uniform(0.0, 0.02), device))
                 } else { None };
 
@@ -434,7 +442,8 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let x0_lambdas = tensor_param(x0_init, device);
 
         let smear_gate =
-            random_linear(SMEAR_GATE_INPUT_DIM, 1, Distribution::Uniform(0.0, 0.02), device);
+            random_linear(n_embd.min(SMEAR_GATE_INPUT_DIM), 1,
+                Distribution::Uniform(0.0, 0.02), device);
         let smear_lambda = param(Tensor::zeros([1], device));
         let backout_lambda = tensor_param(vec![0.2], device);
 
@@ -471,19 +480,23 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         step: usize) -> Tensor<B, 3> {
         let shape: [usize; 2] = idx.shape().dims();
         let (batch_size, seq_len) = (shape[0], shape[1]);
+        assert!(seq_len > 0, "input must contain at least one token");
+        if cache_opt.is_some() {
+            assert!(step + seq_len <= self.config.sequence_len,
+                "cached sequence exceeds model sequence length");
+        }
 
         let head_dim = self.config.n_embd / self.config.n_head;
-        let (cos, sin) = if seq_len > 1 {
-            self.precompute_rotary_embeddings(0, seq_len, head_dim, &idx.device())
-        } else {
-            self.precompute_rotary_embeddings(step, 1, head_dim, &idx.device())
-        };
+        let start_pos = if cache_opt.is_some() { step } else { 0 };
+        let (cos, sin) =
+            self.precompute_rotary_embeddings(start_pos, seq_len, head_dim, &idx.device());
 
         let x_normed = rms_norm(self.wte.forward(idx.clone()), 1e-5);
 
         let mut x = if seq_len > 1 {
             let x_slice =
-                x_normed.clone().slice([0..batch_size, 1..seq_len, 0..SMEAR_GATE_INPUT_DIM]);
+                x_normed.clone().slice([
+                    0..batch_size, 1..seq_len, 0..self.config.n_embd.min(SMEAR_GATE_INPUT_DIM)]);
             let gate_logits = self.smear_gate.forward_layer(x_slice);
             let gate = ((gate_logits * -1.0).exp() + 1.0).recip() *
                 self.smear_lambda.clone().val().reshape([1, 1, 1]);
@@ -513,7 +526,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             } else { None };
 
             if let Some(ref mut cache) = cache_opt {
-                x = self.h[i].forward_with_cache(x, ve, cos.clone(), sin.clone(), i, cache, step);
+                x = self.h[i].forward_with_cache(x, ve, cos.clone(), sin.clone(), cache, step);
             } else {
                 x = self.h[i].forward(x, ve, cos.clone(), sin.clone());
             }
@@ -610,18 +623,17 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     }
 
     pub fn quantize(self, bits: usize, block_size: usize) -> Gpt<B, LinearOrQuantized<B>> {
-        use crate::engine::quant::quantize_linear;
-        self.convert_blocks(|lin| {
-            LinearOrQuantized::Quantized(quantize_linear(lin, bits, block_size))
-        })
+        use crate::engine::quant::quantize_linear_or_standard;
+        assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
+        self.convert_blocks(|linear| quantize_linear_or_standard(linear, bits, block_size))
     }
 }
 
 //#[cfg(test)] mod tests { use super::*;
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
-        let config = GptConfig { sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 4,
-            n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
+        let config = GptConfig { sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(), quantization: None,
         };
 
         use crate::common::ModelAutodiffBackend;
@@ -638,6 +650,67 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         assert!(crate::common::scalar_to_f32(loss_val) >= 0.0);
 
         let _grads = loss.backward();
+    }
+
+    #[test] fn test_gpt_config_validation() {
+        let mut config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
+            n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
+        };
+        assert!(config.validate().is_ok());
+        config.n_kv_head = 3;
+        assert_eq!(config.validate(), Err("n_kv_head must divide n_head"));
+    }
+
+    #[test] fn test_cached_chunk_matches_incremental_forward() {
+        let device = crate::common::init_device();
+        let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
+            n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
+        };
+
+        use crate::common::ModelBackend;
+        let mut gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
+        gpt.h[0].attn.c_proj = random_linear(32, 32,
+            Distribution::Uniform(-0.1, 0.1), &device);
+
+        let head_dim = gpt.config.n_embd / gpt.config.n_head;
+        let mut chunk_cache = KVCache::new_paged(
+            1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
+        let mut incremental_cache = KVCache::new_paged(
+            1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
+
+        let prompt = Tensor::<ModelBackend, 2, Int>::from_data([[12, 45, 67]], &device);
+        gpt.forward_with_cache(prompt.clone(), &mut chunk_cache, 0);
+        gpt.forward_with_cache(prompt, &mut incremental_cache, 0);
+
+        let chunk = Tensor::<ModelBackend, 2, Int>::from_data([[68, 69]], &device);
+        let chunk_logits = gpt.forward_with_cache(chunk, &mut chunk_cache, 3);
+        let first = gpt.forward_with_cache(
+            Tensor::<ModelBackend, 2, Int>::from_data([[68]], &device),
+            &mut incremental_cache, 3);
+        let second = gpt.forward_with_cache(
+            Tensor::<ModelBackend, 2, Int>::from_data([[69]], &device),
+            &mut incremental_cache, 4);
+        let incremental_logits = Tensor::cat(vec![first, second], 1);
+
+        let diff = crate::common::scalar_to_f32(
+            (chunk_logits - incremental_logits).abs().max().into_scalar());
+        assert!(diff < 1e-5, "chunked cache logits differ by {diff}");
+    }
+
+    #[test] fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
+        let device = crate::common::init_device();
+        let config = GptConfig { sequence_len: 8, vocab_size: 280, n_layer: 1, n_head: 4,
+            n_kv_head: 1, n_embd: 64, window_pattern: "L".to_string(), quantization: None,
+        };
+
+        use crate::common::ModelBackend;
+        let gpt = Gpt::<ModelBackend>::new(config, &device).quantize(4, 0);
+        assert!(matches!(&gpt.h[0].attn.c_q, LinearOrQuantized::Quantized(_)));
+        assert!(matches!(gpt.h[0].attn.ve_gate.as_ref(), Some(LinearOrQuantized::Standard(_))));
+        assert!(matches!(&gpt.smear_gate, LinearOrQuantized::Standard(_)));
+
+        let logits = gpt.forward(Tensor::<ModelBackend, 2, Int>::zeros([1, 4], &device), None);
+        assert_eq!(logits.shape().dims(), [1, 4, 280]);
     }
 
     #[test] fn test_paged_attention_roundtrip() {

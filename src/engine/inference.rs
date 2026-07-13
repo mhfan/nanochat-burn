@@ -1,11 +1,46 @@
 
 use std::collections::VecDeque;
 
-use burn::tensor::{Int, Shape, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Tensor, backend::Backend};
 
-use crate::{engine::calculator::use_calculator,
-    gpt::{DEFAULT_PAGE_SIZE, ForwardLayer, Gpt, KVCache}, tokenizer::BpeTokenizer,
+use crate::{common::int_tensor_2d, engine::calculator::use_calculator,
+    gpt::{ForwardLayer, Gpt, KVCache}, tokenizer::BpeTokenizer,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingConfig {
+    pub temperature: f32,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: f32,
+}
+
+impl SamplingConfig {
+    pub const fn greedy() -> Self {
+        Self { temperature: 0.0, top_k: None, repetition_penalty: 1.0 }
+    }
+
+    fn validate(self) {
+        assert!(self.temperature >= 0.0, "temperature must be non-negative");
+        assert!(self.top_k != Some(0), "top_k must be greater than zero");
+        assert!(self.repetition_penalty > 0.0, "repetition penalty must be positive");
+    }
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self { temperature: 1.0, top_k: None, repetition_penalty: 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GenerationConfig {
+    pub max_tokens: usize,
+    pub sampling: SamplingConfig,
+}
+
+impl Default for GenerationConfig {
+    fn default() -> Self { Self { max_tokens: 128, sampling: SamplingConfig::default() } }
+}
 
 /// Tracks self-regressive token generation state per sample
 #[derive(Clone)]
@@ -32,16 +67,19 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
         device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
+        assert!(prompt_len > 0, "prompt must contain at least one token");
+        assert!(num_samples > 0, "num_samples must be greater than zero");
+        assert!(prompt_len <= self.model.config.sequence_len,
+            "prompt length exceeds model sequence length");
         let batch_idx_data: Vec<i32> = std::iter::repeat_n(prompt_tokens, num_samples)
             .flatten().map(|&t| t as i32).collect();
 
-        let idx = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(batch_idx_data, Shape::new([num_samples, prompt_len])), device);
+        let idx = int_tensor_2d(batch_idx_data, [num_samples, prompt_len], device);
 
         let head_dim = self.model.config.n_embd / self.model.config.n_head;
-        let mut cache = KVCache::new_paged(
+        let mut cache = KVCache::new_allocated(
             self.model.config.n_layer, num_samples, self.model.config.sequence_len,
-            self.model.config.n_kv_head, head_dim, DEFAULT_PAGE_SIZE, device,
+            self.model.config.n_kv_head, head_dim, device,
         );
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
 
@@ -65,16 +103,15 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 
     /// Perform a single self-regressive token generation step
     pub fn step_generation(&self, state: &mut GeneratorState<B>, logits: Tensor<B, 2>,
-        temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
-        device: &B::Device) -> (Vec<usize>, Vec<u8>, Tensor<B, 2>) {
+        sampling: SamplingConfig, device: &B::Device) -> (Vec<usize>, Vec<u8>, Tensor<B, 2>) {
         let num_samples = state.current_tokens.len();
+        assert!(state.step < self.model.config.sequence_len,
+            "generation exceeded model sequence length");
 
         let special_tokens = self.tokenizer.special_token_ids();
 
         // Sample candidate tokens
-        let sampled_tokens = sample_next_token(
-            logits, temperature, top_k, repetition_penalty, &state.current_tokens,
-        );
+        let sampled_tokens = sample_next_token(logits, sampling, &state.current_tokens);
 
         let mut next_token_column = Vec::with_capacity(num_samples);
         let mut is_sampled_mask = Vec::with_capacity(num_samples);
@@ -116,13 +153,9 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             }
         }
 
-        let next_idx = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(
-                next_token_column.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                Shape::new([num_samples, 1]),
-            ),
-            device,
-        );
+        let next_idx = int_tensor_2d(
+            next_token_column.iter().map(|&token| token as i32).collect(),
+            [num_samples, 1], device);
 
         let next_logits_3d =
             self.model.forward_with_cache(next_idx, &mut state.cache, state.step);
@@ -135,11 +168,9 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         (next_token_column, is_sampled_mask, next_logits)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Non-streaming batch generation interface returning (results, masks)
     pub fn generate_batch(&self, prompt_tokens: &[usize], num_samples: usize,
-        max_tokens: usize, temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
-        device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
+        config: GenerationConfig, device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
 
         let special_tokens = self.tokenizer.special_token_ids();
@@ -148,13 +179,15 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         let mut masks = vec![vec![0; prompt_tokens.len()]; num_samples];
         let mut completed = vec![false; num_samples];
 
+        let available_tokens = self.model.config.sequence_len.saturating_sub(prompt_tokens.len());
+        let max_tokens = config.max_tokens.min(available_tokens);
         for step_idx in 0..max_tokens {
             if completed.iter().all(|&c| c) { break; }
             if step_idx > 0 && step_idx % 20 == 0 {
                 tracing::info!("    Generated {}/{} tokens...", step_idx, max_tokens);
             }
             let (token_column, token_masks, next_logits) = self.step_generation(
-                &mut state, cur_logits, temperature, top_k, repetition_penalty, device,
+                &mut state, cur_logits, config.sampling, device,
             );
             cur_logits = next_logits;
 
@@ -174,10 +207,13 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 }
 
 /// Dynamic sample selection based on temperature, top_k, and repetition penalties
-pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
-    top_k: Option<usize>, repetition_penalty: f32, generated_tokens: &[Vec<usize>]) -> Vec<usize> {
+pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
+    generated_tokens: &[Vec<usize>]) -> Vec<usize> {
+    sampling.validate();
     let shape: [usize; 2] = logits.shape().dims();
     let (batch_size, vocab_size) = (shape[0], shape[1]);
+    assert!(vocab_size > 0, "cannot sample from an empty vocabulary");
+    assert_eq!(generated_tokens.len(), batch_size, "token history batch size mismatch");
 
     let logits_vec = crate::common::tensor_data_to_f32_vec(logits.into_data());
     let mut sampled_ids = Vec::with_capacity(batch_size);
@@ -187,42 +223,41 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let mut sample_logits = logits_vec[start..start + vocab_size].to_vec();
 
         // 1. Repetition penalty
-        if repetition_penalty != 1.0 {
+        if sampling.repetition_penalty != 1.0 {
             let unique_history: std::collections::HashSet<_> =
                 generated_tokens[b].iter().copied().collect();
             for &t in &unique_history {
                 if t < vocab_size {
                     let val = sample_logits[t];
                     if val > 0.0 {
-                        sample_logits[t] = val / repetition_penalty;
+                        sample_logits[t] = val / sampling.repetition_penalty;
                     } else {
-                        sample_logits[t] = val * repetition_penalty;
+                        sample_logits[t] = val * sampling.repetition_penalty;
                     }
                 }
             }
         }
 
         // 2. Argmax if temperature is 0
-        if temperature == 0.0 {
+        if sampling.temperature == 0.0 {
             let (mut max_val, mut max_idx) = (sample_logits[0], 0);
             for (idx, &val) in sample_logits.iter().enumerate() {
-                if val > max_val { (max_val, max_idx) = (val, idx); }
+                if val.total_cmp(&max_val).is_gt() { (max_val, max_idx) = (val, idx); }
             }
             sampled_ids.push(max_idx);
             continue;
         }
 
         // 3. Scale by temperature
-        for val in sample_logits.iter_mut() { *val /= temperature; }
+        for val in sample_logits.iter_mut() { *val /= sampling.temperature; }
 
         // 4. Top-K filtering
         let mut indices: Vec<usize> = (0..vocab_size).collect();
-        if let Some(k) = top_k {
+        if let Some(k) = sampling.top_k {
             let k = k.min(vocab_size);
             if k < vocab_size {
-                indices.select_nth_unstable_by(k, |&i, &j| {
-                    sample_logits[j].partial_cmp(&sample_logits[i]).unwrap()
-                });
+                indices.select_nth_unstable_by(k,
+                    |&i, &j| sample_logits[j].total_cmp(&sample_logits[i]));
                 for &idx in &indices[k..] { sample_logits[idx] = -1e9; }
             }
         }
@@ -288,8 +323,12 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, temperature: f32,
         let engine = InferenceEngine::new(gpt, tokenizer);
 
         let prompt_tokens = vec![1, 2, 3];
-        let (results, masks) =
-            engine.generate_batch(&prompt_tokens, 2, 5, 1.0, Some(5), 1.0, &device);
+        let config = GenerationConfig { max_tokens: 5,
+            sampling: SamplingConfig {
+                temperature: 1.0, top_k: Some(5), repetition_penalty: 1.0,
+            },
+        };
+        let (results, masks) = engine.generate_batch(&prompt_tokens, 2, config, &device);
 
         assert_eq!(results.len(), 2);
         assert_eq!(masks.len(), 2);

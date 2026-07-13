@@ -2,7 +2,8 @@
 use std::{env, io::{self, Write}, time::Instant};
 
 use nanochat_burn::{common::{ModelBackend, init_device},
-    engine::inference::InferenceEngine, gpt::{Gpt, GptConfig, QuantizationConfig},
+    engine::inference::{InferenceEngine, SamplingConfig},
+    gpt::{Gpt, GptConfig, QuantizationConfig},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
 };
 
@@ -71,6 +72,9 @@ fn main() {
     };
 
     let engine = InferenceEngine::new(gpt, tokenizer.clone());
+    let sampling = SamplingConfig {
+        temperature: 0.7, top_k: Some(50), repetition_penalty: 1.2,
+    };
 
     // Initialize conversation state
     let mut conversation = Conversation { messages: vec![] };
@@ -122,13 +126,9 @@ fn main() {
         let mut assistant_response_tokens = Vec::new();
 
         for _ in 0..256 {
-            if state.completed[0] { break; }
-            let (next_tokens, _, next_logits) = engine.step_generation(&mut state, cur_logits,
-                0.7,      // Temperature
-                Some(50), // Top-K
-                1.2,      // Repetition penalty
-                &device,
-            );
+            if state.completed[0] || state.step >= engine.model.config.sequence_len { break; }
+            let (next_tokens, _, next_logits) =
+                engine.step_generation(&mut state, cur_logits, sampling, &device);
             cur_logits = next_logits;
 
             let token = next_tokens[0];

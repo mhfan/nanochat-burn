@@ -60,9 +60,9 @@ impl MessageContent {
         }
     }
 
-    fn expect_simple(&self, role: &str) -> String {
+    fn expect_simple<'a>(&'a self, role: &str) -> &'a str {
         match self {
-            Self::Simple(s) => s.clone(),
+            Self::Simple(s) => s,
             Self::Parts(_) => panic!("{role} message cannot have multipart content"),
         }
     }
@@ -118,6 +118,8 @@ impl BpeTokenizer {
     /// Train a BPE tokenizer from an iterator of documents/texts.
     pub fn train_from_iterator<I, S>(text_iterator: I, vocab_size: usize) -> Self
         where I: IntoIterator<Item = S>, S: AsRef<str>, {
+        assert!(vocab_size >= 256 + SPECIAL_TOKENS.len(),
+            "vocabulary must contain all byte and special tokens");
         // 1. Split into unique words with counts
         let mut word_counts = HashMap::<Vec<u8>, usize>::new();
         let regex = Self::get_split_regex();
@@ -141,8 +143,8 @@ impl BpeTokenizer {
 
         // Represent words as a list of their token IDs
         // Initially, each byte is its own token
-        let mut words: Vec<(Vec<u8>, Vec<usize>)> = word_counts.keys()
-            .map(|w| (w.clone(), w.iter().map(|&b| b as usize).collect())).collect();
+        let mut words: Vec<(usize, Vec<usize>)> = word_counts.into_iter()
+            .map(|(word, count)| (count, word.into_iter().map(usize::from).collect())).collect();
 
         let vocab_size_no_special = vocab_size.saturating_sub(SPECIAL_TOKENS.len());
         let mut current_vocab_size = 256;
@@ -150,11 +152,10 @@ impl BpeTokenizer {
         while current_vocab_size < vocab_size_no_special {
             // Count frequencies of adjacent pairs
             let mut pair_counts = HashMap::<(usize, usize), usize>::new();
-            for (word_bytes, tokens) in &words {
-                let count = *word_counts.get(word_bytes).unwrap_or(&1);
+            for (count, tokens) in &words {
                 for i in 0..tokens.len().saturating_sub(1) {
                     pair_counts.entry((tokens[i], tokens[i + 1]))
-                        .and_modify(|c| *c += count).or_insert(count);
+                        .and_modify(|frequency| *frequency += *count).or_insert(*count);
                 }
             }
 
@@ -174,7 +175,7 @@ impl BpeTokenizer {
                 // Merge this pair in all word token lists
                 for (_, tokens) in &mut words {
                     let mut i = 0;
-                    let mut merged_tokens = Vec::new();
+                    let mut merged_tokens = Vec::with_capacity(tokens.len());
                     while i < tokens.len() {
                         if i + 1 < tokens.len() && tokens[i] == pair.0 && tokens[i + 1] == pair.1 {
                             merged_tokens.push(new_token_id);
@@ -322,29 +323,24 @@ impl BpeTokenizer {
         }
     }
 
-    fn normalize_messages(conversation: &Conversation) -> Cow<'_, [ConversationMessage]> {
-        if !matches!(conversation.messages.first(), Some(message) if message.role == "system") {
-            return Cow::Borrowed(&conversation.messages);
+    fn normalize_messages(messages: &[ConversationMessage]) -> Cow<'_, [ConversationMessage]> {
+        if !matches!(messages.first(), Some(message) if message.role == "system") {
+            return Cow::Borrowed(messages);
         }
 
-        assert!(conversation.messages.len() >= 2,
-            "System message must be followed by a user message"
-        );
-        assert_eq!(conversation.messages[1].role, "user",
-            "System message must be followed by a user message"
-        );
+        assert!(messages.len() >= 2, "System message must be followed by a user message");
+        assert_eq!(messages[1].role, "user", "System message must be followed by a user message");
 
-        let system_content = conversation.messages[0].content.expect_simple("System");
-        let user_content = conversation.messages[1].content.expect_simple("User");
-        let mut messages = conversation.messages.clone();
-        messages[1].content =
+        let system_content = messages[0].content.expect_simple("System");
+        let user_content = messages[1].content.expect_simple("User");
+        let mut normalized = messages.to_vec();
+        normalized[1].content =
             MessageContent::Simple(format!("{}\n\n{}", system_content, user_content));
-        messages.remove(0);
-        Cow::Owned(messages)
+        normalized.remove(0);
+        Cow::Owned(normalized)
     }
 
-    /// Render a Chat conversation into sequence token IDs and attention target masks
-    pub fn render_conversation(&self, conversation: &Conversation, max_tokens: usize)
+    fn render_messages(&self, messages: &[ConversationMessage], max_tokens: usize)
         -> (Vec<usize>, Vec<i32>) {
         let (mut ids, mut mask) = (Vec::new(), Vec::new());
         let tokens = self.render_token_ids();
@@ -354,7 +350,7 @@ impl BpeTokenizer {
             ids.extend_from_slice(token_ids);
         };
 
-        let messages = Self::normalize_messages(conversation);
+        let messages = Self::normalize_messages(messages);
         assert!(!messages.is_empty(), "Conversation must have at least one message");
         add_tokens(&[tokens.bos], 0);
 
@@ -414,15 +410,19 @@ impl BpeTokenizer {
         (ids, mask)
     }
 
+    /// Render a Chat conversation into sequence token IDs and attention target masks
+    pub fn render_conversation(&self, conversation: &Conversation, max_tokens: usize)
+        -> (Vec<usize>, Vec<i32>) {
+        self.render_messages(&conversation.messages, max_tokens)
+    }
+
     /// Render a Chat conversation priming the Assistant for completion (useful in RL)
     pub fn render_for_completion(&self, conversation: &Conversation) -> Vec<usize> {
-        let mut conversation = conversation.clone();
-        assert!(!conversation.messages.is_empty(), "Conversation cannot be empty");
-        assert_eq!(conversation.messages.last().unwrap().role,
-            "assistant", "Last message must be from the Assistant");
-        conversation.messages.pop(); // Remove assistant message
+        let (last, prompt) = conversation.messages.split_last()
+            .expect("Conversation cannot be empty");
+        assert_eq!(last.role, "assistant", "Last message must be from the Assistant");
 
-        let (mut ids, _) = self.render_conversation(&conversation, usize::MAX);
+        let (mut ids, _) = self.render_messages(prompt, usize::MAX);
         ids.push(self.required_special("<|assistant_start|>"));
         ids
     }

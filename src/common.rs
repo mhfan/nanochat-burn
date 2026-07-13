@@ -1,9 +1,12 @@
 
+use std::{fs::File, io::{self, BufRead, BufReader}, path::Path};
+
 #[cfg(feature = "ndarray")] use burn::backend::ndarray::NdArray;
 #[cfg(not(feature = "ndarray"))] use burn::backend::wgpu::Wgpu;
 use burn::{prelude::ToElement, backend::autodiff::Autodiff,
-    tensor::{DType, backend::BackendTypes, f16},
+    tensor::{DType, Int, Tensor, TensorData, backend::{Backend, BackendTypes}, f16},
 };
+use serde::de::DeserializeOwned;
 
 /// 定义默认的 GPU 后端与自动微分包装
 //pub type ModelBackend = Wgpu;
@@ -47,6 +50,21 @@ pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
 }
 
 pub fn scalar_to_f32<E: ToElement>(value: E) -> f32 { value.to_f32() }
+
+pub(crate) fn int_tensor_2d<B: Backend>(data: Vec<i32>, shape: [usize; 2],
+    device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::from_data(TensorData::new(data, shape), device)
+}
+
+pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Result<Vec<T>> {
+    BufReader::new(File::open(path)?).lines()
+        .filter_map(|line| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            other => Some(other.and_then(|line| {
+                serde_json::from_str(line.trim()).map_err(io::Error::other)
+            })),
+        }).collect()
+}
 
 //#[cfg(test)] mod tests { use super::*;
     /// 执行数值校验与反向传播管道验证

@@ -1,15 +1,24 @@
 
-use burn::tensor::{Int, Shape, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Int, Tensor, backend::Backend};
 
-use crate::{engine::inference::{GeneratorState, InferenceEngine, sample_next_token},
+use crate::{common::int_tensor_2d,
+    engine::inference::{GenerationConfig, GeneratorState, InferenceEngine, SamplingConfig,
+        sample_next_token},
     gpt::{ForwardLayer, Gpt}, tokenizer::BpeTokenizer,
 };
 
 fn token_tensor<B: Backend>(tokens: &[usize], device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::<B, 2, Int>::from_data(
-        TensorData::new(tokens.iter().map(|&t| t as i32).collect(),
-            Shape::new([1, tokens.len()])), device,
-    )
+    int_tensor_2d(tokens.iter().map(|&token| token as i32).collect(), [1, tokens.len()], device)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpeculativeConfig {
+    pub generation: GenerationConfig,
+    pub draft_tokens: usize,
+}
+
+impl Default for SpeculativeConfig {
+    fn default() -> Self { Self { generation: GenerationConfig::default(), draft_tokens: 4 } }
 }
 
 /// Coordinates speculative decoding state
@@ -32,6 +41,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     SpeculativeInferenceEngine<B, LTarget, LDraft> {
     pub fn new(target_model: Gpt<B, LTarget>, draft_model: Gpt<B, LDraft>,
         tokenizer: BpeTokenizer) -> Self {
+        assert_eq!(target_model.config.vocab_size, draft_model.config.vocab_size,
+            "target and draft models must use the same vocabulary");
         Self {
             target_engine: InferenceEngine::new(target_model, tokenizer.clone()),
             draft_engine: InferenceEngine::new(draft_model, tokenizer.clone()),
@@ -60,17 +71,20 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         state.draft_state = draft_state;
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Perform speculative decoding steps: draft K tokens,
     /// evaluate in parallel, and verify losslessly
     pub fn step_speculative(&self, state: &mut SpeculativeState<B>, target_logits: Tensor<B, 2>,
-        k_spec: usize, temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
-        device: &B::Device) -> (Vec<usize>, Tensor<B, 2>, bool) {
+        draft_tokens_per_step: usize, sampling: SamplingConfig, device: &B::Device)
+        -> (Vec<usize>, Tensor<B, 2>, bool) {
         let special_tokens = self.tokenizer.special_token_ids();
+        let sequence_len = self.target_engine.model.config.sequence_len
+            .min(self.draft_engine.model.config.sequence_len);
+        let draft_tokens_per_step = draft_tokens_per_step
+            .min(sequence_len.saturating_sub(state.step + 1));
 
         // 1. Autoregressively draft K tokens using the fast Draft Model
         let last_tok = *state.current_tokens.last().unwrap();
-        let mut draft_tokens = Vec::with_capacity(k_spec);
+        let mut draft_tokens = Vec::with_capacity(draft_tokens_per_step);
         let draft_vocab_size = self.draft_engine.model.config.vocab_size;
         let mut cur_draft_logits = self.draft_engine.model
             .forward_with_cache(token_tensor(&[last_tok], device),
@@ -79,11 +93,10 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let mut temp_draft_state = state.draft_state.clone();
         temp_draft_state.step = state.step;
 
-        for _ in 0..k_spec {
+        for _ in 0..draft_tokens_per_step {
             if temp_draft_state.completed[0] { break; }
             let (sampled_toks, _, next_logits) = self.draft_engine.step_generation(
-                &mut temp_draft_state, cur_draft_logits, temperature, top_k,
-                repetition_penalty, device,
+                &mut temp_draft_state, cur_draft_logits, sampling, device,
             );
             draft_tokens.push(sampled_toks[0]);
             cur_draft_logits = next_logits;
@@ -92,8 +105,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         if draft_tokens.is_empty() {
             // Nothing drafted, fall back to single target model step
             let (sampled_toks, _, next_logits) = self.target_engine.step_generation(
-                &mut state.target_state, target_logits, temperature, top_k, repetition_penalty,
-                device,
+                &mut state.target_state, target_logits, sampling, device,
             );
             let token = sampled_toks[0];
             state.current_tokens.push(token);
@@ -127,8 +139,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 target_logits_3d.clone().slice([0..1, (i - 1)..i]).reshape([1, vocab_size])
             };
 
-            let target_pred_toks = sample_next_token(target_logits_for_verify,
-                temperature, top_k, repetition_penalty, &state.target_state.current_tokens);
+            let target_pred_toks = sample_next_token(
+                target_logits_for_verify, sampling, &state.target_state.current_tokens);
             let target_pred_tok = target_pred_toks[0];
 
             if draft_tok == target_pred_tok {
@@ -149,9 +161,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                     let next_target_logits = target_logits_3d.clone()
                         .slice([0..1, i..(i + 1)]).reshape([1, vocab_size]);
 
-                    let last_pred_toks = sample_next_token(next_target_logits.clone(),
-                        temperature, top_k, repetition_penalty,
-                        &state.target_state.current_tokens);
+                    let last_pred_toks = sample_next_token(
+                        next_target_logits.clone(), sampling, &state.target_state.current_tokens);
                     let last_pred_tok = last_pred_toks[0];
 
                     accepted_tokens.push(last_pred_tok);
@@ -200,17 +211,19 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         (accepted_tokens, final_next_logits, is_finished)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// High-level generation loop returning the fully generated token sequence
-    pub fn generate(&self, prompt_tokens: &[usize], max_tokens: usize, k_spec: usize,
-        temperature: f32, top_k: Option<usize>, repetition_penalty: f32,
+    pub fn generate(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
         device: &B::Device) -> Vec<usize> {
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, device);
-        let max_total_len = prompt_tokens.len() + max_tokens;
+        let max_total_len = (prompt_tokens.len() + config.generation.max_tokens)
+            .min(self.target_engine.model.config.sequence_len)
+            .min(self.draft_engine.model.config.sequence_len);
 
         while state.current_tokens.len() < max_total_len {
+            let remaining = max_total_len - state.current_tokens.len();
+            let draft_tokens = config.draft_tokens.min(remaining.saturating_sub(1));
             let (_, next_logits, is_finished) = self.step_speculative(
-                &mut state, cur_logits, k_spec, temperature, top_k, repetition_penalty, device,
+                &mut state, cur_logits, draft_tokens, config.generation.sampling, device,
             );
             cur_logits = next_logits;
             if is_finished { break; }
@@ -253,7 +266,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let mut target_res = prompt_tokens.clone();
         for _ in 0..3 {
             let (toks, _, next_logits) = target_engine
-                .step_generation(&mut target_state, target_logits, 0.0, None, 1.0, &device);
+                .step_generation(&mut target_state, target_logits,
+                    SamplingConfig::greedy(), &device);
             target_res.push(toks[0]);
             target_logits = next_logits;
             let special_tokens = tokenizer.special_token_ids();
@@ -263,7 +277,11 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         }
 
         // 2. Generate with Speculative Decoding (deterministic greedy: temperature = 0.0, K = 2)
-        let spec_res = spec_engine.generate(&prompt_tokens, 3, 2, 0.0, None, 1.0, &device);
+        let config = SpeculativeConfig {
+            generation: GenerationConfig { max_tokens: 3, sampling: SamplingConfig::greedy() },
+            draft_tokens: 2,
+        };
+        let spec_res = spec_engine.generate(&prompt_tokens, config, &device);
 
         // 3. Verify Lossless Parity (outputs must be mathematically identical!)
         assert_eq!(spec_res, target_res,

@@ -1,7 +1,9 @@
 use std::{
     fs,
+    io::{self, Read},
     path::Path,
-    process::Command,
+    process::{Command, ExitStatus, Stdio},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -28,6 +30,30 @@ impl ExecutionResult {
     fn timeout() -> Self {
         Self { timeout: true, ..Self::failure("Execution timed out (process killed)") }
     }
+
+    fn from_output(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
+        let success = status.success();
+        Self {
+            success,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            error: (!success).then(|| "Process exited with non-zero status".to_string()),
+            timeout: false,
+        }
+    }
+}
+
+fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        pipe.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, String> {
+    reader.join().map_err(|_| "Output reader thread panicked".to_string())?
+        .map_err(|error| format!("Failed to read process output: {error}"))
 }
 
 struct TempFileGuard<'a>(&'a Path);
@@ -54,12 +80,14 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let _guard = TempFileGuard(&temp_file_path);
 
     let mut child = match Command::new("python3").arg(&temp_file_path)
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn() {
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             return ExecutionResult::failure(format!("Failed to spawn python3 process: {}", e));
         }
     };
+    let stdout_reader = read_pipe(child.stdout.take().expect("stdout pipe must be available"));
+    let stderr_reader = read_pipe(child.stderr.take().expect("stderr pipe must be available"));
 
     let start_time = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -67,37 +95,31 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = match child.wait_with_output() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        return ExecutionResult::failure(format!(
-                            "Failed to read process output: {}", e
-                        ));
-                    }
+                let stdout = match join_pipe(stdout_reader) {
+                    Ok(output) => output,
+                    Err(error) => return ExecutionResult::failure(error),
                 };
-
-                let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr_str = String::from_utf8_lossy(&output.stderr).into_owned();
-
-                return ExecutionResult {
-                    success: status.success(),
-                    timeout: false,
-                    stdout: stdout_str,
-                    stderr: stderr_str,
-                    error: if status.success() { None } else {
-                        Some("Process exited with non-zero status".to_string())
-                    },
+                let stderr = match join_pipe(stderr_reader) {
+                    Ok(output) => output,
+                    Err(error) => return ExecutionResult::failure(error),
                 };
+                return ExecutionResult::from_output(status, stdout, stderr);
             }
             Ok(None) => {
                 if start_time.elapsed() >= timeout {
                     let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = join_pipe(stdout_reader);
+                    let _ = join_pipe(stderr_reader);
                     return ExecutionResult::timeout();
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_pipe(stdout_reader);
+                let _ = join_pipe(stderr_reader);
                 return ExecutionResult::failure(format!(
                     "Error while waiting for child process: {}", e
                 ));
@@ -126,5 +148,11 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
         let result = execute_code("raise ValueError('Oops')", 5);
         assert!(!result.success);
         assert!(result.stderr.contains("ValueError: Oops"));
+    }
+
+    #[test] fn test_sandbox_drains_large_output() {
+        let result = execute_code("print('x' * 200000)", 5);
+        assert!(result.success);
+        assert_eq!(result.stdout.trim().len(), 200000);
     }
 //}

@@ -50,10 +50,11 @@ impl<B: Backend> QuantizedLinear<B> {
 
         // 2. De-quantize packed weights
         let w_float = self.dequantize();
+        let out_features = w_float.shape().dims::<2>()[1];
 
         // 3. Matrix multiplication: Y = X * W
         // input: [B, I], w_float: [I, O] -> Y: [B, O]
-        let mut output = flattened.matmul(w_float.clone());
+        let mut output = flattened.matmul(w_float);
 
         // 4. Add optional bias
         if let Some(ref bias) = self.bias {
@@ -62,7 +63,7 @@ impl<B: Backend> QuantizedLinear<B> {
 
         // 5. Reshape back to D-dimensional
         let mut out_shape = shape;
-        out_shape[D - 1] = w_float.shape().dims::<2>()[1]; // out_features
+        out_shape[D - 1] = out_features;
         output.reshape(out_shape)
     }
 
@@ -106,7 +107,6 @@ impl<B: Backend> QuantizedLinear<B> {
 /// into a QuantizedLinear layer in-place
 pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: usize)
     -> QuantizedLinear<B> {
-    let _device = linear.weight.device();
     assert!(bits == 4 || bits == 8, "quantization bits must be 4 or 8");
 
     // Weight has shape [I, O] in Burn's Linear layer
@@ -140,7 +140,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
         let max_abs = reshaped.clone().abs().max_dim(1);
 
         // Prevent division by zero
-        let block_scales = (max_abs.clone() / max_val).clamp(1e-6, 1e6);
+        let block_scales = (max_abs / max_val).clamp(1e-6, 1e6);
 
         // Quantize
         let q_shifted = (reshaped / block_scales.clone()).round() + offset;
@@ -150,7 +150,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
     } else {
         // Row-wise quantization (scales has shape [1, 1, O])
         let max_abs = weight.clone().abs().max_dim(0); // [1, o]
-        let channel_scales = (max_abs.clone() / max_val).clamp(1e-6, 1e6);
+        let channel_scales = (max_abs / max_val).clamp(1e-6, 1e6);
 
         let reshaped_scales = channel_scales.clone().reshape([1, o]);
         let q_shifted = (weight / reshaped_scales).round() + offset;
@@ -177,8 +177,29 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
     }
 }
 
+pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
+    block_size: usize) -> LinearOrQuantized<B> {
+    let input_dim = linear.weight.val().shape().dims::<2>()[0];
+    let (pack_factor, _, _) = quant_layout(bits);
+    let block_size = if bits == 4 && block_size == 0 { 64 } else { block_size };
+    let supported = input_dim % pack_factor == 0 &&
+        (block_size == 0 || input_dim % block_size == 0);
+
+    if supported {
+        LinearOrQuantized::Quantized(quantize_linear(linear, bits, block_size))
+    } else {
+        tracing::debug!(input_dim, bits, block_size,
+            "keeping layer in floating point because its input shape cannot be packed");
+        LinearOrQuantized::Standard(linear)
+    }
+}
+
 fn quant_layout(bits: usize) -> (usize, i32, f32) {
-    if bits == 8 { (4, 256, 128.0) } else { (8, 16, 8.0) }
+    match bits {
+        8 => (4, 256, 128.0),
+        4 => (8, 16, 8.0),
+        _ => panic!("quantization bits must be 4 or 8"),
+    }
 }
 
 #[cfg(test)] mod tests { use super::*;

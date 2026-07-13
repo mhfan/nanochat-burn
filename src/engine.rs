@@ -1,9 +1,9 @@
 
 use std::time::Instant;
 
-use burn::tensor::{Int, Shape, Tensor, TensorData, backend::{AutodiffBackend, Backend}};
+use burn::tensor::backend::{AutodiffBackend, Backend};
 
-use crate::{common::scalar_to_f32, dataloader::DistributedDataLoader,
+use crate::{common::{int_tensor_2d, scalar_to_f32}, dataloader::DistributedDataLoader,
     gpt::Gpt, optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
@@ -29,6 +29,37 @@ pub struct TrainingConfig {
     pub device_batch_size: usize,
     pub sequence_length: usize,
     pub total_batch_size: usize,
+}
+
+impl TrainingConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.num_iterations == 0 { return Err("num_iterations must be greater than zero"); }
+        if self.device_batch_size == 0 { return Err("device_batch_size must be greater than zero"); }
+        if self.sequence_length == 0 { return Err("sequence_length must be greater than zero"); }
+        if self.total_batch_size < self.device_batch_size ||
+            self.total_batch_size % self.device_batch_size != 0 {
+            return Err("total_batch_size must be a multiple of device_batch_size");
+        }
+        if self.warmup_steps > self.num_iterations { return Err("warmup exceeds training length"); }
+        if !(0.0..=1.0).contains(&self.warmdown_ratio) {
+            return Err("warmdown_ratio must be between zero and one");
+        }
+        if !(0.0..=1.0).contains(&self.final_lr_frac) {
+            return Err("final_lr_frac must be between zero and one");
+        }
+        if !self.learning_rate.is_finite() || self.learning_rate < 0.0 {
+            return Err("learning_rate must be finite and non-negative");
+        }
+        if !self.weight_decay.is_finite() || self.weight_decay < 0.0 {
+            return Err("weight_decay must be finite and non-negative");
+        }
+        Ok(())
+    }
+
+    pub fn gradient_accumulation_steps(&self) -> usize {
+        assert!(self.device_batch_size > 0, "device_batch_size must be greater than zero");
+        self.total_batch_size / self.device_batch_size
+    }
 }
 
 /// Compute the learning rate multiplier using a linear warmup followed by a constant phase
@@ -82,11 +113,6 @@ pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
     token_bytes
 }
 
-fn int_tensor_2d<B: Backend>(data: Vec<i32>, shape: Shape,
-    device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::<B, 2, Int>::from_data(TensorData::new(data, shape), device)
-}
-
 /// Evaluate validation Bits Per Byte (BPB) on a given DataLoader.
 pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDataLoader,
     steps: usize, token_bytes: &[usize], device: &B::Device) -> f32 {
@@ -96,8 +122,8 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
         let Some(batch) = loader.next_batch().await else { break; };
         let t = model.config.sequence_len;
         let b = batch.x.len() / t;
-        let x_tensor = int_tensor_2d(batch.x, Shape::new([b, t]), device);
-        let y_tensor = int_tensor_2d(batch.y, Shape::new([b, t]), device);
+        let x_tensor = int_tensor_2d(batch.x, [b, t], device);
+        let y_tensor = int_tensor_2d(batch.y, [b, t], device);
 
         let logits = model.forward(x_tensor, None);
         let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
@@ -134,6 +160,9 @@ pub struct TrainingEngine<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> TrainingEngine<B> {
     pub fn new(model: Gpt<B>, config: TrainingConfig, tokenizer: &BpeTokenizer) -> Self {
+        config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
+        assert_eq!(config.sequence_length, model.config.sequence_len,
+            "training and model sequence lengths must match");
         let optimizer = MuonAdamW::new(model.config.n_layer);
         let token_bytes = get_token_bytes(tokenizer);
         Self { model, optimizer, config, token_bytes, step: 0,
@@ -145,17 +174,15 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     pub async fn train_step(&mut self, loader: &mut DistributedDataLoader,
         device: &B::Device) -> f32 {
         let start_time = Instant::now(); // Single node / mock DDP
-        let tokens_per_fwdbwd = self.config.device_batch_size * self.config.sequence_length;
-        let grad_accum_steps = self.config.total_batch_size / tokens_per_fwdbwd;
+        let grad_accum_steps = self.config.gradient_accumulation_steps();
 
         let (mut accumulator, mut step_loss) =
             (burn::optim::GradientsAccumulator::new(), 0.0f32);
 
         for _ in 0..grad_accum_steps {
             if let Some(batch) = loader.next_batch().await {
-                let shape =
-                    Shape::new([self.config.device_batch_size, self.config.sequence_length]);
-                let x_tensor = int_tensor_2d(batch.x, shape.clone(), device);
+                let shape = [self.config.device_batch_size, self.config.sequence_length];
+                let x_tensor = int_tensor_2d(batch.x, shape, device);
                 let y_tensor = int_tensor_2d(batch.y, shape, device);
 
                 let logits = self.model.forward(x_tensor, None);
@@ -221,6 +248,14 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         let wd = get_weight_decay(50, 100, 0.28);
         assert!(wd > 0.0 && wd <= 0.28);
+
+        let config = TrainingConfig { num_iterations: 10, warmup_steps: 1,
+            warmdown_ratio: 0.5, final_lr_frac: 0.1, learning_rate: 1e-3,
+            weight_decay: 0.1, device_batch_size: 2, sequence_length: 16,
+            total_batch_size: 4,
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(config.gradient_accumulation_steps(), 2);
     }
 
     #[tokio::test] async fn test_bpb_and_engine_instantiation() {

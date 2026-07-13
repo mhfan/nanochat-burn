@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, marker::PhantomData, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use burn::{module::Param, tensor::{Shape, Tensor, TensorData, backend::Backend}};
 use safetensors::SafeTensors;
@@ -19,11 +19,23 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path, device
     let tensors = SafeTensors::deserialize(&file_data)
         .map_err(|e| format!("Failed to parse safetensors: {:?}", e))?;
 
-    let get_f32_data = |name: &str| -> Result<(Vec<f32>, Vec<usize>), String> {
+    let get_f32_data = |name: &str, expected_rank: usize| -> Result<(Vec<f32>, Vec<usize>), String> {
         let view = tensors.tensor(name)
             .map_err(|e| format!("Tensor '{}' not found in safetensors: {:?}", name, e))?;
+        if view.dtype() != safetensors::tensor::Dtype::F32 {
+            return Err(format!("Tensor '{name}' must use F32 storage, got {:?}", view.dtype()));
+        }
         let shape: Vec<usize> = view.shape().to_vec();
+        if  shape.len() != expected_rank {
+            return Err(format!("Tensor '{name}' must have rank {expected_rank}, got {}",
+                shape.len()));
+        }
         let data = view.data();
+        let expected_bytes = shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+        if  data.len() != expected_bytes {
+            return Err(format!("Tensor '{name}' has {} bytes, expected {expected_bytes}",
+                data.len()));
+        }
         let f32_data = match bytemuck::try_cast_slice::<u8, f32>(data) {
             Ok(slice) => slice.to_vec(),
             Err(_) => data.chunks_exact(4)
@@ -33,7 +45,7 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path, device
     };
 
     let load_param = |name: &str| -> Result<Tensor<B, 2>, String> {
-        let (data, shape) = get_f32_data(name)?;
+        let (data, shape) = get_f32_data(name, 2)?;
         Ok(Tensor::<B, 2>::from_data(TensorData::new(data, Shape::from(shape)), device))
     };
 
@@ -41,7 +53,7 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path, device
         |name: &str| -> Result<Tensor<B, 2>, String> { Ok(load_param(name)?.transpose()) };
 
     let load_vector = |name: &str| -> Result<Tensor<B, 1>, String> {
-        let (data, shape) = get_f32_data(name)?;
+        let (data, shape) = get_f32_data(name, 1)?;
         Ok(Tensor::<B, 1>::from_data(TensorData::new(data, Shape::from(shape)), device))
     };
 
@@ -90,40 +102,37 @@ pub fn load_safetensors_to_gpt<B: Backend>(gpt: &mut Gpt<B>, path: &Path, device
     Ok(())
 }
 
-struct ParamSaver<B: Backend> {
-    buffers: HashMap<String, Vec<u8>>,
-    shapes: HashMap<String, Vec<usize>>,
-    _phantom: PhantomData<B>,
+struct SavedTensor {
+    bytes: Vec<u8>,
+    shape: Vec<usize>,
 }
 
-impl<B: Backend> ParamSaver<B> {
-    fn new() -> Self {
-        Self { buffers: HashMap::new(), shapes: HashMap::new(), _phantom: PhantomData }
-    }
+#[derive(Default)]
+struct ParamSaver { tensors: BTreeMap<String, SavedTensor> }
 
-    fn save_tensor<const D: usize>(&mut self, name: &str, tensor: Tensor<B, D>) {
-        let f32_data = crate::common::tensor_data_to_f32_vec(tensor.clone().into_data());
+impl ParamSaver {
+    fn save_tensor<B: Backend, const D: usize>(&mut self, name: &str, tensor: Tensor<B, D>) {
         let shape = tensor.shape().dims::<D>().to_vec();
-        let u8_data = bytemuck::cast_slice::<f32, u8>(&f32_data).to_vec();
-        self.buffers.insert(name.to_string(), u8_data);
-        self.shapes.insert(name.to_string(), shape);
+        let data = crate::common::tensor_data_to_f32_vec(tensor.into_data());
+        let bytes = bytemuck::cast_slice::<f32, u8>(&data).to_vec();
+        self.tensors.insert(name.to_string(), SavedTensor { bytes, shape });
     }
 
-    fn save_param(&mut self, name: &str, tensor: Tensor<B, 2>) {
+    fn save_param<B: Backend>(&mut self, name: &str, tensor: Tensor<B, 2>) {
         self.save_tensor(name, tensor);
     }
 
-    fn save_transposed_param(&mut self, name: &str, tensor: Tensor<B, 2>) {
+    fn save_transposed_param<B: Backend>(&mut self, name: &str, tensor: Tensor<B, 2>) {
         self.save_tensor(name, tensor.transpose());
     }
 
-    fn save_vector(&mut self, name: &str, tensor: Tensor<B, 1>) {
+    fn save_vector<B: Backend>(&mut self, name: &str, tensor: Tensor<B, 1>) {
         self.save_tensor(name, tensor);
     }
 }
 
 pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<(), String> {
-    let mut saver = ParamSaver::new();
+    let mut saver = ParamSaver::default();
 
     saver.save_param("transformer.wte.weight", gpt.wte.weight.val());
     saver.save_transposed_param("lm_head.weight", gpt.lm_head.weight.val());
@@ -182,11 +191,10 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
     saver.save_vector("backout_lambda", gpt.backout_lambda.val());
 
     // 6. Serialize to BTreeMap of TensorViews and write to file
-    let mut tensors_map = std::collections::BTreeMap::new();
-    for (name, buffer) in &saver.buffers {
-        let shape = &saver.shapes[name];
+    let mut tensors_map = BTreeMap::new();
+    for (name, tensor) in &saver.tensors {
         let view = safetensors::tensor::TensorView::new(
-            safetensors::tensor::Dtype::F32, shape.clone(), buffer,
+            safetensors::tensor::Dtype::F32, tensor.shape.clone(), &tensor.bytes,
         ).map_err(|e| format!("Failed to create TensorView for '{}': {:?}", name, e))?;
         tensors_map.insert(name.clone(), view);
     }

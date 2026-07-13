@@ -3,7 +3,8 @@ use std::{path::{Path, PathBuf}, time::Instant};
 
 use burn::tensor::backend::AutodiffBackend;
 
-use crate::{dataloader::DistributedDataLoader, dataset::pretokenize_text_to_bin,
+use crate::{dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
+    dataset::pretokenize_text_to_bin,
     engine::{TrainingConfig, TrainingEngine}, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
 };
 
@@ -79,16 +80,9 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     let mut engine = TrainingEngine::new(model, training_config.clone(), &tokenizer);
 
     // 4. Initialize DataLoader
-    let mut loader = DistributedDataLoader::new(
-        vec![bin_path],
-        training_config.device_batch_size,
-        training_config.sequence_length,
-        0, // rank
-        1, // world_size
-        0, // shard_idx
-        0, // token_offset
-        0, // epoch
-    );
+    let loader_config = DistributedDataLoaderConfig::single_process(
+        training_config.device_batch_size, training_config.sequence_length);
+    let mut loader = DistributedDataLoader::new(vec![bin_path], loader_config);
 
     tracing::info!("Starting pretraining optimization iterations...");
     let start_time = Instant::now();

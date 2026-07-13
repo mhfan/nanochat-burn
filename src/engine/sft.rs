@@ -1,15 +1,14 @@
 
 use std::{iter, path::Path, time::Instant};
 
-use burn::tensor::{Int, Tensor, backend::AutodiffBackend};
+use burn::tensor::backend::AutodiffBackend;
 
-use crate::{common::scalar_to_f32, dataset::SftDataset,
+use crate::{common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
     engine::{get_lr_multiplier, get_weight_decay}, gpt::{Gpt, GptConfig},
     optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 pub struct SftPacker {
-    pub cursor: usize,
     pub conversations: Vec<(Vec<usize>, Vec<i32>)>,
 }
 
@@ -18,7 +17,7 @@ impl SftPacker {
         let mut conversations: Vec<_> = dataset.conversations.iter()
             .map(|conv| tokenizer.render_conversation(conv, usize::MAX)).collect();
         conversations.sort_by_key(|(conv, _)| conv.len());
-        SftPacker { conversations, cursor: 0 }
+        SftPacker { conversations }
     }
 
     pub fn next_batch(&mut self, batch_size: usize, max_seq_len: usize, bos_token: usize)
@@ -42,16 +41,17 @@ impl SftPacker {
                     let (conv, conv_mask) = self.conversations.remove(idx_limit - 1);
                     mask_row.extend(conv_mask);
                     row.extend(conv);
+                } else if row.is_empty() && !self.conversations.is_empty() {
+                    let (mut conv, mut conv_mask) = self.conversations.remove(0);
+                    conv.truncate(row_capacity);
+                    conv_mask.truncate(row_capacity);
+                    row.extend(conv);
+                    mask_row.extend(conv_mask);
                 } else {
                     content_len = row.len();
                     row.extend(iter::repeat_n(bos_token, remaining));
                     mask_row.extend(iter::repeat_n(0, remaining));
                     padded = true;
-                    break;
-                }
-
-                if self.conversations.is_empty() {
-                    self.cursor = 0;
                     break;
                 }
             }
@@ -67,6 +67,8 @@ impl SftPacker {
 
 fn flatten_sft_batch(rows: &[Vec<usize>], mask_rows: &[Vec<i32>], row_lengths: &[usize],
     max_seq_len: usize) -> (Vec<i32>, Vec<i32>) {
+    assert_eq!(rows.len(), mask_rows.len(), "SFT row/mask count mismatch");
+    assert_eq!(rows.len(), row_lengths.len(), "SFT row/length count mismatch");
     let mut flat_inputs = Vec::with_capacity(rows.len() * max_seq_len);
     let mut flat_targets = Vec::with_capacity(rows.len() * max_seq_len);
 
@@ -126,10 +128,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let (flat_inputs, flat_targets) =
             flatten_sft_batch(&rows, &mask_rows, &row_lengths, max_seq_len);
 
-        let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)
-            .reshape([batch_size, max_seq_len]);
-        let targets_tensor = Tensor::<B, 1, Int>::from_data(flat_targets.as_slice(), device)
-            .reshape([batch_size, max_seq_len]);
+        let inputs_tensor = int_tensor_2d(flat_inputs, [batch_size, max_seq_len], device);
+        let targets_tensor = int_tensor_2d(flat_targets, [batch_size, max_seq_len], device);
 
         let logits = model.forward(inputs_tensor, None);
         let loss = model.compute_loss(logits, targets_tensor);
@@ -182,5 +182,13 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         assert_eq!(row_lengths.len(), batch_size);
 
         assert_eq!(rows[0].len(), max_seq_len + 1);
+
+        let mut oversized = SftPacker {
+            conversations: vec![(vec![1; 64], vec![1; 64])],
+        };
+        let (rows, masks, _) = oversized.next_batch(1, 16, bos_token);
+        assert_eq!(rows[0].len(), 17);
+        assert_eq!(masks[0].len(), 17);
+        assert!(oversized.conversations.is_empty());
     }
 //}

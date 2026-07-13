@@ -1,11 +1,12 @@
 
-use std::{fs::File, io::{self, BufRead, BufReader}, path::Path};
+use std::path::Path;
 
-use burn::tensor::{Int, Tensor, backend::Backend};
+use burn::tensor::backend::Backend;
 use serde::Deserialize;
 
-use crate::{gpt::Gpt,
-    engine::{inference::InferenceEngine, sandbox::execute_code},
+use crate::{common::{extract_answer, int_tensor_2d, read_jsonl}, gpt::Gpt,
+    engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
+        sandbox::execute_code},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage},
 };
 
@@ -18,17 +19,8 @@ pub struct EvalItem {
 }
 
 pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalItem>> {
-    BufReader::new(File::open(path)?).lines()
-        .filter_map(|line| match line {
-            Ok(line) if line.trim().is_empty() => None,
-            other =>
-                Some(other.and_then(|line| {
-                    serde_json::from_str(line.trim()).map_err(io::Error::other)
-                })),
-        }).collect()
+    read_jsonl(path)
 }
-
-use crate::common::extract_answer;
 
 fn prompt_tokens(tokenizer: &BpeTokenizer, item: &EvalItem) -> Vec<usize> {
     tokenizer.render_for_completion(&Conversation { messages: item.messages.clone() })
@@ -36,7 +28,8 @@ fn prompt_tokens(tokenizer: &BpeTokenizer, item: &EvalItem) -> Vec<usize> {
 
 fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeTokenizer,
     prompt_tokens: &[usize], device: &B::Device) -> String {
-    let (rollouts, _) = engine.generate_batch(prompt_tokens, 1, 128, 0.0, None, 1.0, device);
+    let config = GenerationConfig { max_tokens: 128, sampling: SamplingConfig::greedy() };
+    let (rollouts, _) = engine.generate_batch(prompt_tokens, 1, config, device);
     tokenizer.decode(&rollouts[0][prompt_tokens.len()..])
 }
 
@@ -48,9 +41,8 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
         let prompt_tokens = prompt_tokens(tokenizer, item);
         let prompt_len = prompt_tokens.len();
 
-        let inputs = Tensor::<B, 1, Int>::from_data(
-            prompt_tokens.iter().map(|&t| t as i32).collect::<Vec<_>>().as_slice(), device,
-        ).reshape([1, prompt_len]);
+        let inputs = int_tensor_2d(
+            prompt_tokens.iter().map(|&token| token as i32).collect(), [1, prompt_len], device);
 
         let (logits, vocab_size) = (model.forward(inputs, None), model.config.vocab_size);
         let last_logits = logits

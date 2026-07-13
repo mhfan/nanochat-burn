@@ -15,6 +15,32 @@ pub struct Batch {
 
 pub struct DistributedDataLoader { receiver: Receiver<Batch>, }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DistributedDataLoaderConfig {
+    pub batch_size: usize,
+    pub sequence_length: usize,
+    pub rank: usize,
+    pub world_size: usize,
+    pub start_shard_idx: usize,
+    pub start_token_offset: usize,
+    pub start_epoch: usize,
+}
+
+impl DistributedDataLoaderConfig {
+    pub fn single_process(batch_size: usize, sequence_length: usize) -> Self {
+        Self { batch_size, sequence_length, rank: 0, world_size: 1,
+            start_shard_idx: 0, start_token_offset: 0, start_epoch: 0,
+        }
+    }
+
+    fn validate(self) {
+        assert!(self.batch_size > 0, "batch size must be greater than zero");
+        assert!(self.sequence_length > 0, "sequence length must be greater than zero");
+        assert!(self.world_size > 0, "world size must be greater than zero");
+        assert!(self.rank < self.world_size, "rank must be smaller than world size");
+    }
+}
+
 fn push_lm_rows(tokens: &[u32], batch_size: usize, sequence_length: usize, x: &mut Vec<i32>,
     y: &mut Vec<i32>) {
     for row in tokens.chunks_exact(sequence_length + 1).take(batch_size) {
@@ -24,10 +50,10 @@ fn push_lm_rows(tokens: &[u32], batch_size: usize, sequence_length: usize, x: &m
 }
 
 impl DistributedDataLoader {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(dataset_paths: Vec<PathBuf>, batch_size: usize, sequence_length: usize,
-        rank: usize, world_size: usize, start_shard_idx: usize, start_token_offset: usize,
-        start_epoch: usize) -> Self {
+    pub fn new(dataset_paths: Vec<PathBuf>, config: DistributedDataLoaderConfig) -> Self {
+        config.validate();
+        let DistributedDataLoaderConfig { batch_size, sequence_length, rank, world_size,
+            start_shard_idx, start_token_offset, start_epoch } = config;
         let (sender, receiver) = channel(4); // double buffering prefetching
         tokio::spawn(async move {
             let dataset = match PretrainingDataset::new(&dataset_paths) {
@@ -162,8 +188,11 @@ impl SftDataLoader {
         pretokenize_text_to_bin(&t2_txt, &t2_bin, &tokenizer).unwrap();
 
         // World size = 2, Rank 0 gets t1.bin (shard 0), Rank 1 gets t2.bin (shard 1)
+        let config = DistributedDataLoaderConfig { batch_size: 2, sequence_length: 2,
+            rank: 0, world_size: 2, start_shard_idx: 0, start_token_offset: 0, start_epoch: 1,
+        };
         let mut loader_r0 =
-            DistributedDataLoader::new(vec![t1_bin.clone(), t2_bin.clone()], 2, 2, 0, 2, 0, 0, 1);
+            DistributedDataLoader::new(vec![t1_bin.clone(), t2_bin.clone()], config);
 
         let batch = loader_r0.next_batch().await.unwrap();
         assert_eq!(batch.shard_idx, 0); // Rank 0 assigned shard 0

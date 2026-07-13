@@ -1,14 +1,16 @@
 
 use std::{path::Path, time::Instant};
 
-use burn::tensor::{Int, Tensor, backend::AutodiffBackend};
+use burn::tensor::{Tensor, backend::AutodiffBackend};
 
-use crate::{common::{extract_answer, scalar_to_f32}, dataset::SftDataset,
-    engine::inference::InferenceEngine, gpt::{Gpt, GptConfig},
+use crate::{common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
+    engine::inference::{GenerationConfig, InferenceEngine, SamplingConfig},
+    gpt::{Gpt, GptConfig},
     optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 fn grpo_advantages(rewards: &[f32]) -> Vec<f32> {
+    assert!(!rewards.is_empty(), "cannot calculate advantages for an empty reward set");
     let mean = rewards.iter().sum::<f32>() / rewards.len() as f32;
     let variance =
         rewards.iter().map(|&r| (r - mean).powi(2)).sum::<f32>() / rewards.len() as f32;
@@ -18,6 +20,8 @@ fn grpo_advantages(rewards: &[f32]) -> Vec<f32> {
 
 fn flatten_rollouts(rollouts: &[Vec<usize>], masks: &[Vec<u8>], max_len: usize,
     pad_token: usize) -> (Vec<i32>, Vec<i32>) {
+    assert_eq!(rollouts.len(), masks.len(), "rollout/mask count mismatch");
+    assert!(max_len > 1, "rollout length must be greater than one");
     let row_len = max_len - 1;
     let mut flat_inputs = Vec::with_capacity(rollouts.len() * row_len);
     let mut flat_targets = Vec::with_capacity(rollouts.len() * row_len);
@@ -60,14 +64,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let assistant_end = tokenizer.special_token_ids().assistant_end;
 
     // 2. Initialize Model and Optimizer
-    let config = GptConfig {
-        sequence_len: 256,
-        n_layer: 4,
-        n_head: 4,
-        n_kv_head: 2,
-        n_embd: 64,
-        window_pattern: "L".to_string(),
-        vocab_size: tokenizer.get_vocab_size(),
+    let config = GptConfig { sequence_len: 256, n_layer: 4, n_head: 4, n_kv_head: 2, n_embd: 64,
+        window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
         quantization: None,
     };
 
@@ -104,8 +102,13 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             // Sample rollouts (returns both results and precise masks)
             tracing::info!("  Rollout for question {}/{} (conv {}), prompt len = {}...",
                 q_idx + 1, batch_size, conv_idx, prompt_len);
-            let (rollouts, masks) = inference_engine.generate_batch(&prompt_tokens,
-                num_samples, 128, 1.0, Some(50), 1.0, device);
+            let generation = GenerationConfig { max_tokens: 128,
+                sampling: SamplingConfig {
+                    temperature: 1.0, top_k: Some(50), repetition_penalty: 1.0,
+                },
+            };
+            let (rollouts, masks) =
+                inference_engine.generate_batch(&prompt_tokens, num_samples, generation, device);
 
             // Get ground truth answer from conversation
             let last_msg = conversation.messages.last().unwrap();
@@ -148,10 +151,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let (flat_inputs, flat_targets) =
             flatten_rollouts(&all_rollouts, &all_masks, max_len, assistant_end);
 
-        let inputs_tensor = Tensor::<B, 1, Int>::from_data(flat_inputs.as_slice(), device)
-            .reshape([num_sequences, max_len - 1]);
-        let targets_tensor = Tensor::<B, 1, Int>::from_data(flat_targets.as_slice(), device)
-            .reshape([num_sequences, max_len - 1]);
+        let inputs_tensor = int_tensor_2d(flat_inputs, [num_sequences, max_len - 1], device);
+        let targets_tensor = int_tensor_2d(flat_targets, [num_sequences, max_len - 1], device);
 
         // Forward and backward passes
         tracing::info!("  Running training forward pass...");
