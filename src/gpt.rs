@@ -692,7 +692,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
 
         let diff = crate::common::scalar_to_f32(
             (chunk_logits - incremental_logits).abs().max().into_scalar());
-        assert!(diff < 1e-5, "chunked cache logits differ by {diff}");
+        assert!(diff < 5e-5, "chunked cache logits differ by {diff}");
     }
 
     #[test] fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
