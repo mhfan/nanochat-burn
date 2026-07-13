@@ -1,6 +1,5 @@
 
 use std::path::Path;
-
 use burn::tensor::backend::Backend;
 use serde::Deserialize;
 
@@ -56,9 +55,8 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
         });
 
         let best_letter = letters .iter().filter_map(|letter| {
-                tokenizer.encode_ordinary(letter).first().copied().and_then(|token_id| {
-                    logits_vec.get(token_id).map(|&logit| (letter, logit))
-                })
+                tokenizer.encode_ordinary(letter).first().copied()
+                    .and_then(|token_id| logits_vec.get(token_id).map(|&logit| (letter, logit)))
             }).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(letter, _)| letter.clone()).unwrap_or_default();
 
@@ -75,8 +73,8 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
-        let generated_text = generate_completion(&inference_engine, tokenizer,
-            &prompt_tokens(tokenizer, item), device);
+        let generated_text = generate_completion(&inference_engine,
+            tokenizer, &prompt_tokens(tokenizer, item), device);
 
         let ground_truth_text = item.messages.last().unwrap().content.to_string_content();
         let (pred_ans, gt_ans) =

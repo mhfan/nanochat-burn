@@ -357,7 +357,8 @@ pub struct Block<B: Backend, L = Linear<B>> {
 
 impl<B: Backend, L: ForwardLayer<B>> Block<B, L> {
     pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>,
+        step: usize) -> Tensor<B, 3> {
         let x = x.clone() +
             self.attn.forward_with_cache(rms_norm(x.clone(), 1e-5),
                 ve, cos, sin, cache, step);
@@ -403,8 +404,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 embedding(Tensor::random([padded_vocab_size, kv_dim], init, device))).collect();
 
         let window_sizes = config.compute_window_sizes();
-        let h: Vec<_> = (0..config.n_layer)
-            .map(|i| {
+        let h: Vec<_> = (0..config.n_layer).map(|i| {
                 let c_q = random_linear(n_embd, config.n_head * head_dim, init, device);
                 let c_k = random_linear(n_embd, kv_dim, init, device);
                 let c_v = random_linear(n_embd, kv_dim, init, device);
@@ -427,8 +427,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 let mlp = MLP { c_fc, c_proj: c_proj_mlp, _phantom: PhantomData };
 
                 Block { attn, mlp }
-            })
-            .collect();
+            }).collect();
 
         let lm_head =
             random_linear(n_embd, padded_vocab_size, Distribution::Normal(0.0, 0.001), device);
@@ -441,8 +440,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let resid_lambdas = tensor_param(resid_init, device);
         let x0_lambdas = tensor_param(x0_init, device);
 
-        let smear_gate =
-            random_linear(n_embd.min(SMEAR_GATE_INPUT_DIM), 1,
+        let smear_gate = random_linear(n_embd.min(SMEAR_GATE_INPUT_DIM), 1,
                 Distribution::Uniform(0.0, 0.02), device);
         let smear_lambda = param(Tensor::zeros([1], device));
         let backout_lambda = tensor_param(vec![0.2], device);
@@ -494,8 +492,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         let x_normed = rms_norm(self.wte.forward(idx.clone()), 1e-5);
 
         let mut x = if seq_len > 1 {
-            let x_slice =
-                x_normed.clone().slice([
+            let x_slice = x_normed.clone().slice([
                     0..batch_size, 1..seq_len, 0..self.config.n_embd.min(SMEAR_GATE_INPUT_DIM)]);
             let gate_logits = self.smear_gate.forward_layer(x_slice);
             let gate = ((gate_logits * -1.0).exp() + 1.0).recip() *
@@ -548,19 +545,20 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         self.forward_inner(idx, Some(cache), step)
     }
 
-    pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>,
-    ) -> Tensor<B, 3> {
+    pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>)
+        -> Tensor<B, 3> {
         self.forward_inner(idx, None, 0)
     }
 
-    pub fn compute_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
+    pub fn compute_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>)
+        -> Tensor<B, 1> {
         let unreduced = self.compute_unreduced_loss(logits, targets.clone());
         let num_valid = targets.reshape([-1]).not_equal_elem(-1).float().sum().clamp(1.0, 1e9);
         unreduced.sum() / num_valid
     }
 
-    pub fn compute_unreduced_loss(&self, logits: Tensor<B, 3>,
-        targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
+    pub fn compute_unreduced_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>)
+        -> Tensor<B, 1> {
         let shape: [usize; 3] = logits.shape().dims();
         let (b, t, v) = (shape[0], shape[1], shape[2]);
         let flat_logits = logits.reshape([b * t, v]).clamp(-50.0, 50.0);
@@ -580,7 +578,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
 
 impl<B: Backend> Gpt<B, Linear<B>> {
     fn convert_blocks<F>(self, f: F) -> Gpt<B, LinearOrQuantized<B>>
-    where F: Fn(Linear<B>) -> LinearOrQuantized<B> {
+        where F: Fn(Linear<B>) -> LinearOrQuantized<B> {
         let h = self.h.into_iter().map(|block| {
                 let Block { attn, mlp } = block;
 
@@ -629,7 +627,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
         let config = GptConfig { sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 2,
@@ -652,6 +650,9 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let _grads = loss.backward();
     }
 
+    use crate::common::ModelBackend;
+    type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
+
     #[test] fn test_gpt_config_validation() {
         let mut config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
             n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
@@ -667,7 +668,6 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
-        use crate::common::ModelBackend;
         let mut gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
         gpt.h[0].attn.c_proj = random_linear(32, 32,
             Distribution::Uniform(-0.1, 0.1), &device);
@@ -678,17 +678,15 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let mut incremental_cache = KVCache::new_paged(
             1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
 
-        let prompt = Tensor::<ModelBackend, 2, Int>::from_data([[12, 45, 67]], &device);
+        let prompt = Int2DModelTensor::from_data([[12, 45, 67]], &device);
         gpt.forward_with_cache(prompt.clone(), &mut chunk_cache, 0);
         gpt.forward_with_cache(prompt, &mut incremental_cache, 0);
 
-        let chunk = Tensor::<ModelBackend, 2, Int>::from_data([[68, 69]], &device);
+        let chunk = Int2DModelTensor::from_data([[68, 69]], &device);
         let chunk_logits = gpt.forward_with_cache(chunk, &mut chunk_cache, 3);
-        let first = gpt.forward_with_cache(
-            Tensor::<ModelBackend, 2, Int>::from_data([[68]], &device),
+        let first = gpt.forward_with_cache(Int2DModelTensor::from_data([[68]], &device),
             &mut incremental_cache, 3);
-        let second = gpt.forward_with_cache(
-            Tensor::<ModelBackend, 2, Int>::from_data([[69]], &device),
+        let second = gpt.forward_with_cache(Int2DModelTensor::from_data([[69]], &device),
             &mut incremental_cache, 4);
         let incremental_logits = Tensor::cat(vec![first, second], 1);
 
@@ -703,13 +701,12 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             n_kv_head: 1, n_embd: 64, window_pattern: "L".to_string(), quantization: None,
         };
 
-        use crate::common::ModelBackend;
         let gpt = Gpt::<ModelBackend>::new(config, &device).quantize(4, 0);
         assert!(matches!(&gpt.h[0].attn.c_q, LinearOrQuantized::Quantized(_)));
         assert!(matches!(gpt.h[0].attn.ve_gate.as_ref(), Some(LinearOrQuantized::Standard(_))));
         assert!(matches!(&gpt.smear_gate, LinearOrQuantized::Standard(_)));
 
-        let logits = gpt.forward(Tensor::<ModelBackend, 2, Int>::zeros([1, 4], &device), None);
+        let logits = gpt.forward(Int2DModelTensor::zeros([1, 4], &device), None);
         assert_eq!(logits.shape().dims(), [1, 4, 280]);
     }
 
@@ -719,7 +716,6 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
-        use crate::common::ModelBackend;
         let gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
 
         let prompt = [12, 45, 67];
@@ -728,7 +724,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let idx_data: Vec<_> = std::iter::repeat_n(prompt, num_samples).flatten().collect();
 
         // Prefill index tensor
-        let prefill_idx = Tensor::<ModelBackend, 2, Int>::from_data(
+        let prefill_idx = Int2DModelTensor::from_data(
             TensorData::new(idx_data, Shape::new([num_samples, prompt_len])), &device);
 
         let head_dim = gpt.config.n_embd / gpt.config.n_head;
@@ -747,7 +743,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             let mut step_logits = vec![logits.clone()];
 
             // 2. Autoregressive steps
-            let mut current_token = Tensor::<ModelBackend, 2, Int>::from_data(
+            let mut current_token = Int2DModelTensor::from_data(
                 TensorData::new(vec![68i32; num_samples], Shape::new([num_samples, 1])), &device);
 
             for step_idx in 0..2 {
@@ -755,7 +751,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 let logits_step = gpt.forward_with_cache(current_token.clone(), &mut cache, step);
                 step_logits.push(logits_step.clone());
 
-                current_token = Tensor::<ModelBackend, 2, Int>::from_data(
+                current_token = Int2DModelTensor::from_data(
                     TensorData::new(vec![69i32; num_samples], Shape::new([num_samples, 1])),
                     &device,
                 );
@@ -776,4 +772,4 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 "Logits differ between page_size=2 and page_size=4 at step {}", step);
         }
     }
-//}
+}

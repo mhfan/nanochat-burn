@@ -28,9 +28,7 @@ struct HealthResponse {
 }
 
 // Custom Stream wrapper to avoid tokio-stream dependency
-struct SseStream {
-    rx: mpsc::Receiver<Result<Event, Infallible>>,
-}
+struct SseStream { rx: mpsc::Receiver<Result<Event, Infallible>>, }
 
 impl futures_core::Stream for SseStream {
     type Item = Result<Event, Infallible>;
@@ -152,9 +150,7 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         let top_k = payload.top_k.or(Some(50));
         let temp = payload.temperature.unwrap_or(0.7);
         let max_tok = payload.max_tokens.unwrap_or(256);
-        let sampling = SamplingConfig {
-            temperature: temp, top_k, repetition_penalty: 1.2,
-        };
+        let sampling = SamplingConfig { temperature: temp, top_k, repetition_penalty: 1.2, };
 
         let (mut gen_state, mut cur_logits) =
             engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
@@ -162,9 +158,8 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         for _ in 0..max_tok {
             if gen_state.completed[0] ||
                 gen_state.step >= engine_ref.engine.model.config.sequence_len { break; }
-            let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(
-                &mut gen_state, cur_logits, sampling, &engine_ref.device,
-            );
+            let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(&mut gen_state,
+                cur_logits, sampling, &engine_ref.device);
             cur_logits = next_logits;
             let text = tokenizer.decode(&[next_tokens[0]]);
 

@@ -25,9 +25,11 @@ fn main() {
     // In a real SFT deployment, a pre-saved tokenizer JSON is loaded.
     let corpus = vec![
         "Hello! How can I help you today?",
-        "The planets of the solar system are: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
+        "The planets of the solar system are: \
+            Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
         "The capital of France is Paris.",
-        "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / 5<|python_end|><|output_start|>2<|output_end|>.",
+        "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / \
+            5<|python_end|><|output_start|>2<|output_end|>.",
         "System programming in Rust is extremely safe, concurrent, and high-performance.",
     ];
     let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
@@ -148,8 +150,8 @@ fn main() {
 
         let total_time = start_time.elapsed().as_secs_f64();
         let tok_per_sec = token_count as f64 / total_time;
-        println!("\x1b[90m[Benchmark: TFT: {:.2}ms | Speed: {:.2} tok/sec | Total generated: {} tokens]\x1b[0m",
-            tft * 1000.0, tok_per_sec, token_count);
+        println!("\x1b[90m[Benchmark: TFT: {:.2}ms | Speed: {:.2} tok/sec | \
+            Total generated: {} tokens]\x1b[0m", tft * 1000.0, tok_per_sec, token_count);
 
         // Save generated tokens back to conversation
         let response_text = tokenizer.decode(&assistant_response_tokens);

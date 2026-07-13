@@ -1,6 +1,5 @@
 
 use std::{path::{Path, PathBuf}, time::Instant};
-
 use burn::tensor::backend::AutodiffBackend;
 
 use crate::{dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},

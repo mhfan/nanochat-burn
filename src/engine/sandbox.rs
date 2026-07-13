@@ -1,10 +1,6 @@
-use std::{
-    fs,
-    io::{self, Read},
-    path::Path,
-    process::{Command, ExitStatus, Stdio},
-    thread::JoinHandle,
-    time::{Duration, Instant},
+
+use std::{fs, io::{self, Read}, path::Path,
+    process::{Command, ExitStatus, Stdio}, thread::JoinHandle, time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone)]
@@ -33,12 +29,10 @@ impl ExecutionResult {
 
     fn from_output(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
         let success = status.success();
-        Self {
-            success,
+        Self { success, timeout: false,
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             error: (!success).then(|| "Process exited with non-zero status".to_string()),
-            timeout: false,
         }
     }
 }
@@ -58,9 +52,7 @@ fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, String>
 
 struct TempFileGuard<'a>(&'a Path);
 
-impl<'a> Drop for TempFileGuard<'a> {
-    fn drop(&mut self) { let _ = fs::remove_file(self.0); }
-}
+impl<'a> Drop for TempFileGuard<'a> { fn drop(&mut self) { let _ = fs::remove_file(self.0); } }
 
 pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let tmp_dir = Path::new(".cache/tmp");
@@ -89,8 +81,7 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let stdout_reader = read_pipe(child.stdout.take().expect("stdout pipe must be available"));
     let stderr_reader = read_pipe(child.stderr.take().expect("stderr pipe must be available"));
 
-    let start_time = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
+    let (start_time, timeout) = (Instant::now(), Duration::from_secs(timeout_secs));
 
     loop {
         match child.try_wait() {

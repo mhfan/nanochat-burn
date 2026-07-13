@@ -1,6 +1,5 @@
 
 use std::time::Instant;
-
 use burn::tensor::backend::{AutodiffBackend, Backend};
 
 use crate::{common::{int_tensor_2d, scalar_to_f32}, dataloader::DistributedDataLoader,
@@ -199,10 +198,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         // Apply optimizer update step
         let g = accumulator.grads();
-        let lrm = get_lr_multiplier(
-            self.step, self.config.num_iterations, self.config.warmup_steps,
-            self.config.warmdown_ratio, self.config.final_lr_frac,
-        );
+        let lrm = get_lr_multiplier(self.step, self.config.num_iterations,
+            self.config.warmup_steps, self.config.warmdown_ratio, self.config.final_lr_frac);
         let lr = self.config.learning_rate * lrm;
         let wd =
             get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
@@ -215,14 +212,12 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         // backward pass.
 
         let elapsed = start_time.elapsed().as_secs_f64();
-        if self.step > 10 {
-            self.total_training_time_secs += elapsed;
-        }
+        if self.step > 10 { self.total_training_time_secs += elapsed; }
 
         // Compute debiased smoothed loss
         let ema_beta = 0.9f32;
         self.smooth_train_loss = if self.step == 0 { step_loss } else {
-                ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss
+            ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss
         };
         let debiased_loss =
             self.smooth_train_loss / (1.0 - ema_beta.powi((self.step + 1) as i32));

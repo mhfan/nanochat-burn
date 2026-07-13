@@ -1,6 +1,5 @@
 
 use std::{collections::BTreeMap, path::Path};
-
 use burn::{module::Param, tensor::{Shape, Tensor, TensorData, backend::Backend}};
 use safetensors::SafeTensors;
 
@@ -140,39 +139,25 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
     for i in 0..gpt.config.n_layer {
         let block = &gpt.h[i];
 
-        saver.save_transposed_param(
-            &block_weight_name(i, "attn.c_q"),
-            block.attn.c_q.weight.val(),
-        );
-        saver.save_transposed_param(
-            &block_weight_name(i, "attn.c_k"),
-            block.attn.c_k.weight.val(),
-        );
-        saver.save_transposed_param(
-            &block_weight_name(i, "attn.c_v"),
-            block.attn.c_v.weight.val(),
-        );
-        saver.save_transposed_param(
-            &block_weight_name(i, "attn.c_proj"),
-            block.attn.c_proj.weight.val(),
-        );
+        saver.save_transposed_param(&block_weight_name(i, "attn.c_q"),
+            block.attn.c_q.weight.val());
+        saver.save_transposed_param(&block_weight_name(i, "attn.c_k"),
+            block.attn.c_k.weight.val());
+        saver.save_transposed_param(&block_weight_name(i, "attn.c_v"),
+            block.attn.c_v.weight.val());
+        saver.save_transposed_param(&block_weight_name(i, "attn.c_proj"),
+            block.attn.c_proj.weight.val());
 
         if has_ve(i, gpt.config.n_layer) &&
             let Some(ref gate_linear) = block.attn.ve_gate {
-            saver.save_transposed_param(
-                &block_weight_name(i, "attn.ve_gate"),
-                gate_linear.weight.val(),
-            );
+            saver.save_transposed_param(&block_weight_name(i, "attn.ve_gate"),
+                gate_linear.weight.val());
         }
 
-        saver.save_transposed_param(
-            &block_weight_name(i, "mlp.c_fc"),
-            block.mlp.c_fc.weight.val(),
-        );
-        saver.save_transposed_param(
-            &block_weight_name(i, "mlp.c_proj"),
-            block.mlp.c_proj.weight.val(),
-        );
+        saver.save_transposed_param(&block_weight_name(i, "mlp.c_fc"),
+            block.mlp.c_fc.weight.val());
+        saver.save_transposed_param(&block_weight_name(i, "mlp.c_proj"),
+            block.mlp.c_proj.weight.val());
     }
 
     let mut ve_cnt = 0;
@@ -233,50 +218,32 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
         }
 
         // 4. Assert that all weights are identical
-        assert_tensor_exact_eq(
-            model_src.wte.weight.val(),
-            model_dst.wte.weight.val(),
-            "wte weight mismatch",
-        );
-        assert_tensor_exact_eq(
-            model_src.lm_head.weight.val(),
-            model_dst.lm_head.weight.val(),
-            "lm_head weight mismatch",
-        );
+        assert_tensor_exact_eq(model_src.wte.weight.val(),
+                               model_dst.wte.weight.val(), "wte weight mismatch");
+        assert_tensor_exact_eq(model_src.lm_head.weight.val(),
+                               model_dst.lm_head.weight.val(), "lm_head weight mismatch");
 
         for i in 0..model_src.config.n_layer {
             let (src_block, dst_block) = (&model_src.h[i], &model_dst.h[i]);
 
             assert_tensor_exact_eq(
-                src_block.attn.c_q.weight.val(),
-                dst_block.attn.c_q.weight.val(),
-                &format!("c_q weight mismatch at layer {}", i),
-            );
+                src_block.attn.c_q.weight.val(), dst_block.attn.c_q.weight.val(),
+                &format!("c_q weight mismatch at layer {}", i));
             assert_tensor_exact_eq(
-                src_block.attn.c_k.weight.val(),
-                dst_block.attn.c_k.weight.val(),
-                &format!("c_k weight mismatch at layer {}", i),
-            );
+                src_block.attn.c_k.weight.val(), dst_block.attn.c_k.weight.val(),
+                &format!("c_k weight mismatch at layer {}", i));
             assert_tensor_exact_eq(
-                src_block.attn.c_v.weight.val(),
-                dst_block.attn.c_v.weight.val(),
-                &format!("c_v weight mismatch at layer {}", i),
-            );
+                src_block.attn.c_v.weight.val(), dst_block.attn.c_v.weight.val(),
+                &format!("c_v weight mismatch at layer {}", i));
             assert_tensor_exact_eq(
-                src_block.attn.c_proj.weight.val(),
-                dst_block.attn.c_proj.weight.val(),
-                &format!("c_proj weight mismatch at layer {}", i),
-            );
+                src_block.attn.c_proj.weight.val(), dst_block.attn.c_proj.weight.val(),
+                &format!("c_proj weight mismatch at layer {}", i));
             assert_tensor_exact_eq(
-                src_block.mlp.c_fc.weight.val(),
-                dst_block.mlp.c_fc.weight.val(),
-                &format!("c_fc weight mismatch at layer {}", i),
-            );
+                src_block.mlp.c_fc.weight.val(), dst_block.mlp.c_fc.weight.val(),
+                &format!("c_fc weight mismatch at layer {}", i));
             assert_tensor_exact_eq(
-                src_block.mlp.c_proj.weight.val(),
-                dst_block.mlp.c_proj.weight.val(),
-                &format!("mlp c_proj weight mismatch at layer {}", i),
-            );
+                src_block.mlp.c_proj.weight.val(), dst_block.mlp.c_proj.weight.val(),
+                &format!("mlp c_proj weight mismatch at layer {}", i));
         }
 
         // Clean up temporary file

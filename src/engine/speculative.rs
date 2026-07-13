@@ -222,9 +222,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         while state.current_tokens.len() < max_total_len {
             let remaining = max_total_len - state.current_tokens.len();
             let draft_tokens = config.draft_tokens.min(remaining.saturating_sub(1));
-            let (_, next_logits, is_finished) = self.step_speculative(
-                &mut state, cur_logits, draft_tokens, config.generation.sampling, device,
-            );
+            let (_, next_logits, is_finished) = self.step_speculative(&mut state,
+                cur_logits, draft_tokens, config.generation.sampling, device);
             cur_logits = next_logits;
             if is_finished { break; }
         }
@@ -271,15 +270,13 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             target_res.push(toks[0]);
             target_logits = next_logits;
             let special_tokens = tokenizer.special_token_ids();
-            if toks[0] == special_tokens.assistant_end || toks[0] == special_tokens.bos {
-                break;
-            }
+            if toks[0] == special_tokens.assistant_end ||
+                toks[0] == special_tokens.bos { break; }
         }
 
         // 2. Generate with Speculative Decoding (deterministic greedy: temperature = 0.0, K = 2)
-        let config = SpeculativeConfig {
+        let config = SpeculativeConfig { draft_tokens: 2,
             generation: GenerationConfig { max_tokens: 3, sampling: SamplingConfig::greedy() },
-            draft_tokens: 2,
         };
         let spec_res = spec_engine.generate(&prompt_tokens, config, &device);
 

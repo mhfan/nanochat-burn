@@ -1,6 +1,5 @@
 
 use std::path::PathBuf;
-
 use tokio::sync::mpsc::{Receiver, channel};
 
 use crate::{tokenizer::BpeTokenizer, dataset::{PretrainingDataset, SftDataset}};
@@ -74,8 +73,7 @@ impl DistributedDataLoader {
 
             let num_needed = batch_size * (sequence_length + 1);
             if shards_assigned.iter().all(|&idx| dataset.shards[idx].num_tokens < num_needed) {
-                eprintln!(
-                    "DDP Rank {} has no shard large enough for one batch: need {} tokens",
+                eprintln!("DDP Rank {} has no shard large enough for one batch: need {} tokens",
                     rank, num_needed
                 );
                 return;

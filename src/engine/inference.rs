@@ -1,6 +1,5 @@
 
 use std::collections::VecDeque;
-
 use burn::tensor::{Tensor, backend::Backend};
 
 use crate::{common::int_tensor_2d, engine::calculator::use_calculator,
@@ -27,9 +26,7 @@ impl SamplingConfig {
 }
 
 impl Default for SamplingConfig {
-    fn default() -> Self {
-        Self { temperature: 1.0, top_k: None, repetition_penalty: 1.0 }
-    }
+    fn default() -> Self { Self { temperature: 1.0, top_k: None, repetition_penalty: 1.0 } }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,12 +121,11 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             }
 
             let next_tok_opt = state.forced_tokens[i].pop_front();
-            let is_forced = next_tok_opt.is_some();
             let next_tok = next_tok_opt.unwrap_or(sampled_tokens[i]);
 
             next_token_column.push(next_tok);
             state.current_tokens[i].push(next_tok);
-            is_sampled_mask.push(if is_forced { 0 } else { 1 });
+            is_sampled_mask.push(if next_tok_opt.is_some() { 0 } else { 1 });
 
             if next_tok == special_tokens.assistant_end || next_tok == special_tokens.bos {
                 state.completed[i] = true;
@@ -186,9 +182,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             if step_idx > 0 && step_idx % 20 == 0 {
                 tracing::info!("    Generated {}/{} tokens...", step_idx, max_tokens);
             }
-            let (token_column, token_masks, next_logits) = self.step_generation(
-                &mut state, cur_logits, config.sampling, device,
-            );
+            let (token_column, token_masks, next_logits) =
+                self.step_generation(&mut state, cur_logits, config.sampling, device);
             cur_logits = next_logits;
 
             for (i, (&token, &mask)) in token_column.iter().zip(&token_masks).enumerate() {
@@ -229,11 +224,11 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
             for &t in &unique_history {
                 if t < vocab_size {
                     let val = sample_logits[t];
-                    if val > 0.0 {
-                        sample_logits[t] = val / sampling.repetition_penalty;
+                    sample_logits[t] = if val > 0.0 {
+                        val / sampling.repetition_penalty
                     } else {
-                        sample_logits[t] = val * sampling.repetition_penalty;
-                    }
+                        val * sampling.repetition_penalty
+                    };
                 }
             }
         }
@@ -269,9 +264,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
         let sum_exp: f32 = exp_logits.iter().sum();
         for v in exp_logits.iter_mut() { *v /= sum_exp; }
 
-        let mut cum_sum = 0.0f32;
+        let (mut cum_sum, mut chosen_idx) = (0.0f32, indices[0]);
         let r: f32 = rand::random();
-        let mut chosen_idx = indices[0];
         for &idx in &indices {
             cum_sum += exp_logits[idx];
             if r <= cum_sum {

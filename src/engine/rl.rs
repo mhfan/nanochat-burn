@@ -1,12 +1,10 @@
 
 use std::{path::Path, time::Instant};
-
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 
 use crate::{common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
     engine::inference::{GenerationConfig, InferenceEngine, SamplingConfig},
-    gpt::{Gpt, GptConfig},
-    optim::MuonAdamW, tokenizer::BpeTokenizer,
+    gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 fn grpo_advantages(rewards: &[f32]) -> Vec<f32> {
@@ -27,9 +25,8 @@ fn flatten_rollouts(rollouts: &[Vec<usize>], masks: &[Vec<u8>], max_len: usize,
     let mut flat_targets = Vec::with_capacity(rollouts.len() * row_len);
 
     for (rollout, mask) in rollouts.iter().zip(masks) {
-        flat_inputs.extend(
-            (0..row_len).map(|idx| rollout.get(idx).copied().unwrap_or(pad_token) as i32),
-        );
+        flat_inputs.extend((0..row_len).map(|idx|
+            rollout.get(idx).copied().unwrap_or(pad_token) as i32));
         flat_targets.extend((1..max_len).map(|j| {
             if mask.get(j).copied().unwrap_or(0) == 1 {
                 rollout.get(j).map(|&tok| tok as i32).unwrap_or(-1)

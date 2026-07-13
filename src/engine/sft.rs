@@ -1,6 +1,5 @@
 
 use std::{iter, path::Path, time::Instant};
-
 use burn::tensor::backend::AutodiffBackend;
 
 use crate::{common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
@@ -183,9 +182,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
 
         assert_eq!(rows[0].len(), max_seq_len + 1);
 
-        let mut oversized = SftPacker {
-            conversations: vec![(vec![1; 64], vec![1; 64])],
-        };
+        let mut oversized = SftPacker { conversations: vec![(vec![1; 64], vec![1; 64])] };
         let (rows, masks, _) = oversized.next_batch(1, 16, bos_token);
         assert_eq!(rows[0].len(), 17);
         assert_eq!(masks[0].len(), 17);

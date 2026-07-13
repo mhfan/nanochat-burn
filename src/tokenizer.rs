@@ -98,7 +98,10 @@ impl BpeTokenizer {
     fn get_split_regex() -> &'static Regex {
         static REGEX: OnceLock<Regex> = OnceLock::new();
         REGEX.get_or_init(|| {
-            Regex::new(r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+")
+            Regex::new(concat!(
+                r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|",
+                r" ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+",
+            ))
                 .expect("Failed to compile BPE split pattern regex")
         })
     }
@@ -132,10 +135,10 @@ impl BpeTokenizer {
             }
         }
 
-        // 2. Initialize vocabulary with base bytes 0..=255
+        // 2. Initialize vocabulary with base bytes 0..256
         let mut mergeable_ranks = HashMap::<Vec<u8>, usize>::new();
         let mut temp_inverse = HashMap::<usize, Vec<u8>>::new();
-        for b in 0..=255 {
+        for b in 0..256 {
             let byte_seq = vec![b as u8];
             mergeable_ranks.insert(byte_seq.clone(), b);
             temp_inverse.insert(b, byte_seq);
@@ -216,10 +219,8 @@ impl BpeTokenizer {
         let mut parts: Vec<(usize, usize)> = (0..piece.len()).map(|i| (i, 1)).collect();
 
         loop {
-            let best_pair_idx = (0..parts.len() - 1)
-                .filter_map(|i| {
-                    let start = parts[i].0;
-                    let len = parts[i].1 + parts[i + 1].1;
+            let best_pair_idx = (0..parts.len() - 1).filter_map(|i| {
+                    let (start, len) = (parts[i].0, parts[i].1 + parts[i + 1].1);
                     self.mergeable_ranks.get(&piece[start..start + len]).map(|&rank| (i, rank))
                 }).min_by_key(|&(_, rank)| rank).map(|(i, _)| i);
 
@@ -229,9 +230,7 @@ impl BpeTokenizer {
             } else { break; }
         }
 
-        parts
-            .into_iter()
-            .map(|(start, len)| {
+        parts.into_iter().map(|(start, len)| {
                 let seq = &piece[start..start + len];
                 if seq.len() == 1 { seq[0] as usize } else {
                     *self.mergeable_ranks.get(seq).unwrap_or(&(seq[0] as usize))
@@ -274,8 +273,8 @@ impl BpeTokenizer {
     }
 
     pub fn special_token_ids(&self) -> SpecialTokenIds {
-        let get =
-            |token: &str, fallback| self.special_tokens.get(token).copied().unwrap_or(fallback);
+        let get = |token: &str, fallback|
+            self.special_tokens.get(token).copied().unwrap_or(fallback);
         SpecialTokenIds {
             bos: self.get_bos_token_id(),
             assistant_end: get("<|assistant_end|>", FALLBACK_ASSISTANT_END),

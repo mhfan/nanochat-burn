@@ -120,9 +120,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
 
     let block_size_actual = if bits == 4 && block_size == 0 {
         64 // Default block size of 64 for W4
-    } else {
-        block_size
-    };
+    } else { block_size };
 
     let (max_val, offset, max_q) =
         if bits == 8 { (127.0, 128.0, 255.0) } else { (7.0, 8.0, 15.0) };
@@ -160,11 +158,10 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
     };
 
     // Pack the quantized floats into packed i32 integers
-    let num_packed = i / pack_factor;
+    let (num_packed, mut coeff) = (i / pack_factor, base);
     let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
     let mut packed_weights =
         q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
-    let mut coeff = base;
     for k in 1..pack_factor {
         let slice =
             q_reshaped.clone().slice([0..num_packed, k..k + 1, 0..o]).reshape([num_packed, o]);
@@ -180,7 +177,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
 pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
     block_size: usize) -> LinearOrQuantized<B> {
     let input_dim = linear.weight.val().shape().dims::<2>()[0];
-    let (pack_factor, _, _) = quant_layout(bits);
+    let (pack_factor, ..) = quant_layout(bits);
     let block_size = if bits == 4 && block_size == 0 { 64 } else { block_size };
     let supported = input_dim % pack_factor == 0 &&
         (block_size == 0 || input_dim % block_size == 0);
