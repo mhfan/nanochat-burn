@@ -53,7 +53,7 @@ pub struct MuonAdamW<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> MuonAdamW<B> {
     pub fn new(n_layer: usize) -> Self {
-        let value_embeds = (0..n_layer).map(|_| None).collect();
+        let value_embeds = (0..n_layer).filter(|&i| has_ve(i, n_layer)).map(|_| None).collect();
         let h = (0..n_layer).map(|_| BlockMuonState::default()).collect();
         Self {
             wte: None,
@@ -70,6 +70,13 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
 
     pub fn step(&mut self, gpt: &mut Gpt<B>, grads: &GradientsParams, lr: f32,
         step: usize, weight_decay: f32) {
+        assert!(step > 0, "optimizer step must be one-based");
+        assert!(lr.is_finite() && lr >= 0.0, "learning rate must be finite and non-negative");
+        assert!(weight_decay.is_finite() && weight_decay >= 0.0,
+            "weight decay must be finite and non-negative");
+        assert_eq!(self.h.len(), gpt.h.len(), "optimizer/model layer count mismatch");
+        assert_eq!(self.value_embeds.len(), gpt.value_embeds.len(),
+            "optimizer/model value embedding count mismatch");
         let model_dim = gpt.config.n_embd as f32;
         let dmodel_lr_scale = (model_dim / 768.0).powf(-0.5);
 
@@ -198,8 +205,8 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
 
 fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     state: &mut Option<MuonState<B, 2>>, hyper: MuonHyper) -> Tensor<B, 2> {
-    let shape: [usize; 2] = p.shape().dims();
-    let (rows, cols) = (shape[0], shape[1]);
+    let [rows, cols] = p.shape().dims();
+    let shape = [rows, cols];
     let red_dim = if rows >= cols { 1 } else { 0 };
 
     let s = state.get_or_insert_with(|| {
@@ -264,7 +271,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     p - update
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_muon_orthogonalization() {
         use crate::common::ModelBackend;
         let device = crate::common::init_device();
@@ -278,4 +285,4 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         let shape: [usize; 2] = new_p.shape().dims();
         assert_eq!(shape, [2, 2]);
     }
-//}
+}

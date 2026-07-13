@@ -73,3 +73,4 @@ lto = true
 
 [lints.clippy]
 needless_range_loop = "allow"
+manual_is_multiple_of = "allow"

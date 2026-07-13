@@ -17,6 +17,8 @@ impl PretrainingDataset {
     pub fn new<P: AsRef<Path>>(paths: &[P]) -> io::Result<Self> {
         let shards = paths.iter().map(|p| {
                 let path = p.as_ref().to_path_buf();
+                // SAFETY: The read-only mapping owns its OS mapping after `File` is dropped and
+                // this module never mutates the file through another handle.
                 let mmap = unsafe { Mmap::map(&File::open(&path)?)? };
                 if mmap.len() % std::mem::size_of::<u32>() != 0 {
                     return Err(io::Error::new(io::ErrorKind::InvalidData,
@@ -41,7 +43,7 @@ impl PretrainingDataset {
         let byte_end = (token_offset + len) * 4;
         let bytes = &shard.mmap[byte_start..byte_end];
         match bytemuck::try_cast_slice::<u8, u32>(bytes) {
-            Ok(tokens_u32) => tokens_u32.to_vec(),
+            Ok(tokens_u32) => tokens_u32.iter().copied().map(u32::from_le).collect(),
             Err(_) => bytes.chunks_exact(4)
                 .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect(),
         }
@@ -72,17 +74,21 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
     text_path: P, bin_path: Q, tokenizer: &BpeTokenizer) -> io::Result<()> {
     let content = fs::read_to_string(text_path)?;
     let tokens = tokenizer.encode_ordinary(&content);
-    let tokens_u32: Vec<_> = tokens.into_iter().map(|tok| tok as u32).collect();
+    let tokens_u32: Vec<_> = tokens.into_iter().map(|token| {
+        u32::try_from(token).map(u32::to_le).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "token ID exceeds u32 storage")
+        })
+    }).collect::<io::Result<_>>()?;
     let bytes = bytemuck::cast_slice::<u32, u8>(&tokens_u32);
     File::create(bin_path)?.write_all(bytes)?;
     Ok(())
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_bin_pretokenization_and_mmap_dataset() {
         let temp_dir = std::env::temp_dir();
         let text_path = temp_dir.join("test_pretrain.txt");
-        let  bin_path = temp_dir.join("test_pretrain.bin");
+        let bin_path = temp_dir.join("test_pretrain.bin");
 
         fs::write(&text_path, "System programming in Rust is elegant and fast.").unwrap();
 
@@ -106,4 +112,4 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
         let _ = fs::remove_file(text_path);
         let _ = fs::remove_file(bin_path);
     }
-//}
+}

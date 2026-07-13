@@ -2,8 +2,7 @@
 /// Safe handcrafted mathematical and string expression evaluator in pure Rust.
 /// Supports basic arithmetic (+, -, *, /, parentheses) and ".count()" string queries.
 pub fn use_calculator(expr: &str) -> Option<String> {
-    let expr_clean = expr.replace(',', "");
-    let expr_trimmed = expr_clean.trim();
+    let expr_trimmed = expr.trim();
 
     // 1. String count matching: e.g. "strawberry".count("r")
     if expr_trimmed.contains(".count(") &&
@@ -12,8 +11,10 @@ pub fn use_calculator(expr: &str) -> Option<String> {
     }
 
     // 2. Arithmetic expression evaluation
-    parse_and_eval_arithmetic(expr_trimmed)
-        .map(|val| if val.fract() == 0.0 { (val as i64).to_string() } else { val.to_string() })
+    parse_and_eval_arithmetic(&expr_trimmed.replace(',', "")).filter(|value| value.is_finite())
+        .map(|value| if value.fract() == 0.0 {
+            (value as i64).to_string()
+        } else { value.to_string() })
 }
 
 fn parse_and_eval_count(s: &str) -> Option<usize> {
@@ -26,9 +27,9 @@ fn parse_and_eval_count(s: &str) -> Option<usize> {
     let arg = suffix[..suffix.len() - 1].trim();
 
     let main_str = extract_quoted_string(prefix)?;
-    let  sub_str = extract_quoted_string(arg)?;
+    let sub_str = extract_quoted_string(arg)?;
 
-    if sub_str.is_empty() { return Some(main_str.len() + 1); }
+    if sub_str.is_empty() { return Some(main_str.chars().count() + 1); }
     Some(main_str.matches(&sub_str).count())
 }
 
@@ -97,7 +98,7 @@ impl<'a> Parser<'a> {
                 Some('/') => {
                     self.consume();
                     let right = self.parse_factor()?;
-                    if  right == 0.0 { return None; }
+                    if right == 0.0 { return None; }
                     val /= right;
                 }
                 _ => break,
@@ -147,7 +148,7 @@ fn parse_and_eval_arithmetic(s: &str) -> Option<f64> {
     if parser.pos == s.len() { Some(val) } else { None }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_calculator_arithmetic() {
         assert_eq!(use_calculator("5 + 3 * 2"), Some("11".to_string()));
         assert_eq!(use_calculator("(5 + 3) * 2"), Some("16".to_string()));
@@ -160,5 +161,7 @@ fn parse_and_eval_arithmetic(s: &str) -> Option<f64> {
         assert_eq!(use_calculator("\"strawberry\".count(\"r\")"), Some("3".to_string()));
         assert_eq!(use_calculator("'banana'.count('an')"), Some("2".to_string()));
         assert_eq!(use_calculator("\"hello\".count(\"l\")"), Some("2".to_string()));
+        assert_eq!(use_calculator("\"a,b\".count(\",\")"), Some("1".to_string()));
+        assert_eq!(use_calculator("\"你好\".count(\"\")"), Some("3".to_string()));
     }
-//}
+}

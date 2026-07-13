@@ -1,7 +1,9 @@
 
-use std::{fs, io::{self, Read}, path::Path,
+use std::{fs::{self, File, OpenOptions}, io::{self, Read, Write}, path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio}, thread::JoinHandle, time::{Duration, Instant},
 };
+
+const MAX_OUTPUT_BYTES: u64 = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -40,7 +42,7 @@ impl ExecutionResult {
 fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
     std::thread::spawn(move || {
         let mut output = Vec::new();
-        pipe.read_to_end(&mut output)?;
+        pipe.by_ref().take(MAX_OUTPUT_BYTES).read_to_end(&mut output)?;
         Ok(output)
     })
 }
@@ -50,9 +52,22 @@ fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, String>
         .map_err(|error| format!("Failed to read process output: {error}"))
 }
 
-struct TempFileGuard<'a>(&'a Path);
+struct TempFileGuard(PathBuf);
 
-impl<'a> Drop for TempFileGuard<'a> { fn drop(&mut self) { let _ = fs::remove_file(self.0); } }
+impl Drop for TempFileGuard { fn drop(&mut self) { let _ = fs::remove_file(&self.0); } }
+
+fn create_temp_script(directory: &Path) -> io::Result<(PathBuf, File)> {
+    for _ in 0..16 {
+        let path = directory.join(format!("sandbox_{}.py", rand::random::<u64>()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists,
+        "failed to allocate a unique sandbox script name"))
+}
 
 pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     let tmp_dir = Path::new(".cache/tmp");
@@ -60,18 +75,19 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
         return ExecutionResult::failure(format!("Failed to create temp directory: {}", e));
     }
 
-    // Generate a unique file name
-    let file_id = rand::random::<u32>();
-    let temp_file_path = tmp_dir.join(format!("sandbox_{}.py", file_id));
-
-    if let Err(e) = fs::write(&temp_file_path, code) {
+    let (temp_file_path, mut temp_file) = match create_temp_script(tmp_dir) {
+        Ok(result) => result,
+        Err(e) => return ExecutionResult::failure(format!("Failed to create script: {e}")),
+    };
+    let _guard = TempFileGuard(temp_file_path.clone());
+    if let Err(e) = temp_file.write_all(code.as_bytes()) {
         return ExecutionResult::failure(format!("Failed to write Python code to file: {}", e));
     }
+    drop(temp_file);
 
-    // Create the RAII guard to delete the file when leaving this function
-    let _guard = TempFileGuard(&temp_file_path);
-
-    let mut child = match Command::new("python3").arg(&temp_file_path)
+    let script_name = temp_file_path.file_name().expect("temporary script must have a file name");
+    let mut child = match Command::new("python3").args(["-I", "-B"]).arg(script_name)
+        .current_dir(tmp_dir)
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -119,7 +135,7 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_sandbox_success() {
         let result = execute_code("print('hello from sandbox')", 5);
         assert!(result.success);
@@ -146,4 +162,4 @@ pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
         assert!(result.success);
         assert_eq!(result.stdout.trim().len(), 200000);
     }
-//}
+}

@@ -120,6 +120,9 @@ pub struct KVCache<B: Backend> {
     pub v_page_pool: Vec<Tensor<B, 4>>,
     pub page_size: usize,
     pub max_pages_per_seq: usize,
+    pub batch_size: usize,
+    pub max_seq_len: usize,
+    pub token_history: Option<Tensor<B, 2, Int>>,
 }
 
 impl<B: Backend> KVCache<B> {
@@ -145,11 +148,61 @@ impl<B: Backend> KVCache<B> {
                     Tensor::zeros(pool_shape.clone(), device),
             )}).unzip();
 
-        Self { k_page_pool, v_page_pool, page_size, max_pages_per_seq }
+        Self { k_page_pool, v_page_pool, page_size, max_pages_per_seq,
+            batch_size, max_seq_len, token_history: None,
+        }
+    }
+
+    fn update(&mut self, layer_idx: usize, k: Tensor<B, 4>, v: Tensor<B, 4>, step: usize)
+        -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [batch_size, seq_len, n_kv_head, head_dim] = k.shape().dims();
+        assert_eq!(v.shape().dims(), [batch_size, seq_len, n_kv_head, head_dim],
+            "key/value cache shape mismatch");
+        assert!(layer_idx < self.k_page_pool.len() && layer_idx < self.v_page_pool.len(),
+            "cache does not contain model layer {layer_idx}");
+        assert_eq!(batch_size, self.batch_size, "cache batch size mismatch");
+        let end = step.checked_add(seq_len).expect("cache position overflow");
+        assert!(end <= self.max_seq_len, "cached sequence exceeds cache capacity");
+
+        let (start_page, end_page) = (step / self.page_size, (end - 1) / self.page_size);
+        for batch_idx in 0..batch_size {
+            for page in start_page..=end_page {
+                let (pos_start, pos_end) =
+                    (step.max(page * self.page_size), end.min((page + 1) * self.page_size));
+                let (token_start, token_end) = (pos_start - step, pos_end - step);
+                let offset_start = pos_start % self.page_size;
+                let offset_end = offset_start + token_end - token_start;
+                let physical_page = batch_idx * self.max_pages_per_seq + page;
+                let source = [batch_idx..batch_idx + 1, token_start..token_end,
+                    0..n_kv_head, 0..head_dim];
+                let target = [physical_page..physical_page + 1, offset_start..offset_end,
+                    0..n_kv_head, 0..head_dim];
+                let shape = [1, token_end - token_start, n_kv_head, head_dim];
+
+                self.k_page_pool[layer_idx] = self.k_page_pool[layer_idx].clone()
+                    .slice_assign(target.clone(), k.clone().slice(source.clone()).reshape(shape));
+                self.v_page_pool[layer_idx] = self.v_page_pool[layer_idx].clone()
+                    .slice_assign(target, v.clone().slice(source).reshape(shape));
+            }
+        }
+
+        let num_pages = end.div_ceil(self.page_size);
+        let sequences = |pool: &Tensor<B, 4>| {
+            (0..batch_size).map(|batch_idx| {
+                let page_start = batch_idx * self.max_pages_per_seq;
+                pool.clone().slice([
+                        page_start..page_start + num_pages, 0..self.page_size,
+                        0..n_kv_head, 0..head_dim,
+                    ])
+                    .reshape([1, num_pages * self.page_size, n_kv_head, head_dim])
+                    .slice([0..1, 0..end, 0..n_kv_head, 0..head_dim])
+            }).collect::<Vec<_>>()
+        };
+        (Tensor::cat(sequences(&self.k_page_pool[layer_idx]), 0),
+            Tensor::cat(sequences(&self.v_page_pool[layer_idx]), 0))
     }
 }
 
-// Constant values replacing magic numbers (Issue #16)
 const VE_GATE_INPUT_DIM: usize = 12;
 const SMEAR_GATE_INPUT_DIM: usize = 24;
 const LOGIT_CLIP_VAL: f32 = 15.0;
@@ -242,83 +295,11 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         self.c_proj.forward_layer(y)
     }
 
-    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
-        let shape: [usize; 3] = x.shape().dims();
-        let (b, t, _) = (shape[0], shape[1], shape[2]);
+    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>, cos: Tensor<B, 4>,
+        sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
+        let [_, t, _] = x.shape().dims();
         let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
-
-        let (full_k, full_v) = {
-            // 1. Write the new keys and values into the physical page pools (page-wise
-            //    assignments)
-            for b_idx in 0..b {
-                let start_page = step / cache.page_size;
-                let end_page = (step + t - 1) / cache.page_size;
-                for p in start_page..=end_page {
-                    let pos_start = std::cmp::max(step, p * cache.page_size);
-                    let pos_end = std::cmp::min(step + t, (p + 1) * cache.page_size);
-                    let (t_start, t_end) = (pos_start - step, pos_end - step);
-                    let offset_start = pos_start % cache.page_size;
-                    let offset_end = offset_start + (t_end - t_start);
-                    let physical_page_id = b_idx * cache.max_pages_per_seq + p;
-
-                    let shape = [1, t_end - t_start, self.n_kv_head, self.head_dim];
-                    let k_slice = k.clone().slice([
-                            b_idx..b_idx + 1, t_start..t_end,
-                            0..self.n_kv_head, 0..self.head_dim,
-                        ]).reshape(shape);
-                    let v_slice = v.clone().slice([
-                            b_idx..b_idx + 1, t_start..t_end,
-                            0..self.n_kv_head, 0..self.head_dim,
-                        ]).reshape(shape);
-
-                    cache.k_page_pool[self.layer_idx] =
-                        cache.k_page_pool[self.layer_idx].clone().slice_assign([
-                                physical_page_id..physical_page_id + 1,
-                                offset_start..offset_end,
-                                0..self.n_kv_head,
-                                0..self.head_dim,
-                            ], k_slice);
-                    cache.v_page_pool[self.layer_idx] =
-                        cache.v_page_pool[self.layer_idx].clone().slice_assign([
-                                physical_page_id..physical_page_id + 1,
-                                offset_start..offset_end,
-                                0..self.n_kv_head,
-                                0..self.head_dim,
-                            ], v_slice,);
-                }
-            }
-
-            // 2. Reconstruct contiguous history for attention using contiguous slice + reshape
-            let num_tokens = step + t;
-            let num_pages = num_tokens.div_ceil(cache.page_size);
-            let (mut k_seqs, mut v_seqs) = (Vec::with_capacity(b), Vec::with_capacity(b));
-
-            for b_idx in 0..b {
-                let physical_page_start = b_idx * cache.max_pages_per_seq;
-                let physical_page_end = physical_page_start + num_pages;
-
-                let shape = [1, num_pages * cache.page_size, self.n_kv_head, self.head_dim];
-                let k_pages = cache.k_page_pool[self.layer_idx].clone().slice([
-                        physical_page_start..physical_page_end,
-                        0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
-                    ]).reshape(shape);
-                let k_seq =
-                    k_pages.slice([0..1, 0..num_tokens, 0..self.n_kv_head, 0..self.head_dim]);
-
-                let v_pages = cache.v_page_pool[self.layer_idx].clone().slice([
-                        physical_page_start..physical_page_end,
-                        0..cache.page_size, 0..self.n_kv_head, 0..self.head_dim,
-                    ]).reshape(shape);
-                let v_seq =
-                    v_pages.slice([0..1, 0..num_tokens, 0..self.n_kv_head, 0..self.head_dim]);
-
-                k_seqs.push(k_seq);
-                v_seqs.push(v_seq);
-            }
-
-            (Tensor::cat(k_seqs, 0), Tensor::cat(v_seqs, 0))
-        };
+        let (full_k, full_v) = cache.update(self.layer_idx, k, v, step);
 
         let mask = self.mask.clone().slice([0..1, 0..1, step..step + t, 0..step + t]);
         self.compute_attention(q, full_k, full_v, mask)
@@ -473,16 +454,59 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         (cos, sin)
     }
 
+    fn smear_embeddings(&self, x: Tensor<B, 3>, previous: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
+        let [batch_size, seq_len, n_embd] = x.shape().dims();
+        let start = usize::from(previous.is_none());
+        if seq_len <= start { return x; }
+
+        let current = x.clone().slice([0..batch_size, start..seq_len, 0..n_embd]);
+        let predecessors = if let Some(previous) = previous {
+            if seq_len == 1 { previous } else {
+                Tensor::cat(vec![previous,
+                    x.clone().slice([0..batch_size, 0..seq_len - 1, 0..n_embd])], 1)
+            }
+        } else {    x.clone().slice([0..batch_size, 0..seq_len - 1, 0..n_embd]) };
+        let gate_input = current.clone().slice([
+            0..batch_size, 0..seq_len - start, 0..n_embd.min(SMEAR_GATE_INPUT_DIM)]);
+        let gate = ((self.smear_gate.forward_layer(gate_input) * -1.0).exp() + 1.0).recip() *
+            self.smear_lambda.clone().val().reshape([1, 1, 1]);
+        let smeared = current + gate * predecessors;
+
+        if start == 0 { smeared } else {
+            Tensor::cat(vec![x.slice([0..batch_size, 0..1, 0..n_embd]), smeared], 1)
+        }
+    }
+
+    fn smear_embeddings_with_cache(&self, idx: Tensor<B, 2, Int>, x: Tensor<B, 3>,
+        cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
+        let [batch_size, seq_len, _] = x.shape().dims();
+        assert_eq!(idx.shape().dims(), [batch_size, seq_len], "token embedding shape mismatch");
+        assert_eq!(batch_size, cache.batch_size, "cache batch size mismatch");
+        let end = step.checked_add(seq_len).expect("cache position overflow");
+        assert!(end <= cache.max_seq_len, "cached sequence exceeds cache capacity");
+
+        let history = cache.token_history.take().unwrap_or_else(|| {
+            assert_eq!(step, 0, "cache has no token history before position {step}");
+            Tensor::<B, 2, Int>::zeros([batch_size, cache.max_seq_len], &idx.device())
+        });
+        assert_eq!(history.shape().dims(), [batch_size, cache.max_seq_len],
+            "cache token history shape mismatch");
+        let previous = (step > 0).then(|| {
+            let previous_idx = history.clone().slice([0..batch_size, step - 1..step]);
+            rms_norm(self.wte.forward(previous_idx), 1e-5)
+        });
+        let output = self.smear_embeddings(x, previous);
+        cache.token_history = Some(history.slice_assign([0..batch_size, step..end], idx));
+        output
+    }
+
     #[allow(clippy::single_range_in_vec_init)]
     fn forward_inner(&self, idx: Tensor<B, 2, Int>, mut cache_opt: Option<&mut KVCache<B>>,
         step: usize) -> Tensor<B, 3> {
-        let shape: [usize; 2] = idx.shape().dims();
-        let (batch_size, seq_len) = (shape[0], shape[1]);
+        let [batch_size, seq_len] = idx.shape().dims();
         assert!(seq_len > 0, "input must contain at least one token");
-        if cache_opt.is_some() {
-            assert!(step + seq_len <= self.config.sequence_len,
-                "cached sequence exceeds model sequence length");
-        }
+        let end = step.checked_add(seq_len).expect("sequence position overflow");
+        assert!(end <= self.config.sequence_len, "input exceeds model sequence length");
 
         let head_dim = self.config.n_embd / self.config.n_head;
         let start_pos = if cache_opt.is_some() { step } else { 0 };
@@ -491,19 +515,9 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
 
         let x_normed = rms_norm(self.wte.forward(idx.clone()), 1e-5);
 
-        let mut x = if seq_len > 1 {
-            let x_slice = x_normed.clone().slice([
-                    0..batch_size, 1..seq_len, 0..self.config.n_embd.min(SMEAR_GATE_INPUT_DIM)]);
-            let gate_logits = self.smear_gate.forward_layer(x_slice);
-            let gate = ((gate_logits * -1.0).exp() + 1.0).recip() *
-                self.smear_lambda.clone().val().reshape([1, 1, 1]);
-            let x_prev =
-                x_normed.clone().slice([0..batch_size, 0..seq_len - 1, 0..self.config.n_embd]);
-            let x_cur =
-                x_normed.clone().slice([0..batch_size, 1..seq_len, 0..self.config.n_embd]);
-            let x_first = x_normed.clone().slice([0..batch_size, 0..1, 0..self.config.n_embd]);
-            Tensor::cat(vec![x_first, x_cur + gate * x_prev], 1)
-        } else { x_normed };
+        let mut x = if let Some(cache) = cache_opt.as_mut() {
+                 self.smear_embeddings_with_cache(idx.clone(), x_normed, cache, step)
+        } else { self.smear_embeddings(x_normed, None) };
 
         let (x0, mut x_backout) = (x.clone(), None);
         let backout_layer = self.config.n_layer / 2;
@@ -662,15 +676,15 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         assert_eq!(config.validate(), Err("n_kv_head must divide n_head"));
     }
 
-    #[test] fn test_cached_chunk_matches_incremental_forward() {
+    #[test] fn test_cached_forward_matches_full_and_incremental_forward() {
         let device = crate::common::init_device();
         let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
             n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         };
 
         let mut gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
-        gpt.h[0].attn.c_proj = random_linear(32, 32,
-            Distribution::Uniform(-0.1, 0.1), &device);
+        gpt.h[0].attn.c_proj = random_linear(32, 32, Distribution::Uniform(-0.1, 0.1), &device);
+        gpt.smear_lambda = tensor_param(vec![1.0], &device);
 
         let head_dim = gpt.config.n_embd / gpt.config.n_head;
         let mut chunk_cache = KVCache::new_paged(
@@ -678,6 +692,9 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let mut incremental_cache = KVCache::new_paged(
             1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
 
+        let full_logits = gpt.forward(
+                Int2DModelTensor::from_data([[12, 45, 67, 68, 69]], &device), None)
+            .slice([0..1, 3..5, 0..gpt.config.vocab_size]);
         let prompt = Int2DModelTensor::from_data([[12, 45, 67]], &device);
         gpt.forward_with_cache(prompt.clone(), &mut chunk_cache, 0);
         gpt.forward_with_cache(prompt, &mut incremental_cache, 0);
@@ -690,9 +707,15 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             &mut incremental_cache, 4);
         let incremental_logits = Tensor::cat(vec![first, second], 1);
 
-        let diff = crate::common::scalar_to_f32(
-            (chunk_logits - incremental_logits).abs().max().into_scalar());
-        assert!(diff < 5e-5, "chunked cache logits differ by {diff}");
+        let incremental_diff = crate::common::scalar_to_f32(
+            (chunk_logits - incremental_logits.clone()).abs().max().into_scalar());
+        assert!(incremental_diff < 5e-5,
+            "chunked cache logits differ from incremental logits by {incremental_diff}");
+
+        let full_diff = crate::common::scalar_to_f32(
+            (full_logits - incremental_logits).abs().max().into_scalar());
+        assert!(full_diff < 5e-5,
+            "cached logits differ from full forward logits by {full_diff}");
     }
 
     #[test] fn test_w4_quantization_keeps_unsupported_gate_layers_float() {

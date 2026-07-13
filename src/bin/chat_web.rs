@@ -1,7 +1,7 @@
 
 use std::{convert::Infallible, env, sync::Arc};
 
-use axum::{Json, Router, routing::{get, post},
+use axum::{Json, Router, http::StatusCode, routing::{get, post},
     response::{Html, IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
 use nanochat_burn::{
@@ -25,6 +25,39 @@ struct ChatRequest {
 struct HealthResponse {
     status: &'static str,
     device: String,
+}
+
+fn validate_request(request: &ChatRequest) -> Result<(), String> {
+    if request.messages.is_empty() { return Err("messages must not be empty".to_string()); }
+    let offset = usize::from(request.messages[0].role == "system");
+    if offset == request.messages.len() {
+        return Err("system message must be followed by a user message".to_string());
+    }
+    if offset == 1 && matches!(request.messages[0].content, MessageContent::Parts(_)) {
+        return Err("system message cannot use multipart content".to_string());
+    }
+    for (index, message) in request.messages.iter().enumerate().skip(offset) {
+        let expected = if (index - offset) % 2 == 0 { "user" } else { "assistant" };
+        if message.role != expected {
+            return Err(format!("message {index} must have role '{expected}'"));
+        }
+        if message.role != "assistant" && matches!(message.content, MessageContent::Parts(_)) {
+            return Err(format!("message {index} cannot use multipart content"));
+        }
+        if let MessageContent::Parts(parts) = &message.content &&
+            parts.iter().any(|part| !matches!(part.part_type.as_str(),
+                "text" | "python" | "python_output")) {
+            return Err(format!("message {index} contains an unknown part type"));
+        }
+    }
+    if request.messages.last().is_none_or(|message| message.role != "user") {
+        return Err("conversation must end with a user message".to_string());
+    }
+    if request.temperature.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err("temperature must be finite and non-negative".to_string());
+    }
+    if request.top_k == Some(0) { return Err("top_k must be greater than zero".to_string()); }
+    Ok(())
 }
 
 // Custom Stream wrapper to avoid tokio-stream dependency
@@ -125,7 +158,9 @@ async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>) ->
 }
 
 async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>,
-    Json(payload): Json<ChatRequest>) -> impl IntoResponse {
+    Json(payload): Json<ChatRequest>)
+    -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_request(&payload).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let (tx, rx) = mpsc::channel(100);
     let engine_ref = state.clone();
 
@@ -161,7 +196,9 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
             let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(&mut gen_state,
                 cur_logits, sampling, &engine_ref.device);
             cur_logits = next_logits;
-            let text = tokenizer.decode(&[next_tokens[0]]);
+            let token = next_tokens[0];
+            if token == special_tokens.assistant_end || token == special_tokens.bos { break; }
+            let text = tokenizer.decode(&[token]);
 
             let event_data = serde_json::json!({ "token": text });
             let event = Event::default().json_data(event_data).unwrap();
@@ -170,5 +207,5 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         }
     });
 
-    Sse::new(SseStream { rx }).keep_alive(KeepAlive::default())
+    Ok(Sse::new(SseStream { rx }).keep_alive(KeepAlive::default()))
 }

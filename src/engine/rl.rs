@@ -25,6 +25,7 @@ fn flatten_rollouts(rollouts: &[Vec<usize>], masks: &[Vec<u8>], max_len: usize,
     let mut flat_targets = Vec::with_capacity(rollouts.len() * row_len);
 
     for (rollout, mask) in rollouts.iter().zip(masks) {
+        assert_eq!(rollout.len(), mask.len(), "rollout/token-mask size mismatch");
         flat_inputs.extend((0..row_len).map(|idx|
             rollout.get(idx).copied().unwrap_or(pad_token) as i32));
         flat_targets.extend((1..max_len).map(|j| {
@@ -51,12 +52,15 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     }
 
     let dataset = SftDataset::new(rl_dataset_path).expect("Failed to load GSM8K RL dataset");
+    if dataset.conversations.is_empty() {
+        tracing::error!("GSM8K RL dataset is empty");
+        return;
+    }
     tracing::info!("Loaded RL dataset with {} questions", dataset.conversations.len());
 
     // 1. Train/load tokenizer
     let corpus = dataset.get_corpus();
-    let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
-    tokenizer.build_inverse_mappings();
+    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
 
     let assistant_end = tokenizer.special_token_ids().assistant_end;
 
@@ -89,7 +93,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
         for q_idx in 0..batch_size {
-            let conv_idx = (step * batch_size + q_idx) % dataset.conversations.len();
+            let conv_idx = ((step - 1) * batch_size + q_idx) % dataset.conversations.len();
             let conversation = &dataset.conversations[conv_idx];
 
             // Render prompt for completion (keeps assistant start)
@@ -203,7 +207,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[ignore] #[test] fn test_rl_training_loop() {
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::INFO).finish();
@@ -212,4 +216,4 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let device = crate::common::init_device();
         run_rl_training::<crate::common::ModelAutodiffBackend>(&device);
     }
-//}
+}

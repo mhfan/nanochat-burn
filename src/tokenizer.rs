@@ -1,5 +1,5 @@
 
-use std::{borrow::Cow, collections::HashMap, sync::OnceLock};
+use std::{borrow::Cow, cmp::Reverse, collections::HashMap, sync::OnceLock};
 
 use fancy_regex::Regex;
 use rayon::prelude::*;
@@ -129,7 +129,8 @@ impl BpeTokenizer {
 
         for text in text_iterator {
             let text_ref = text.as_ref();
-            for m in regex.find_iter(text_ref).flatten() {
+            for m in regex.find_iter(text_ref) {
+                let m = m.expect("BPE split regex failed while training");
                 let bytes = m.as_str().as_bytes().to_vec();
                 *word_counts.entry(bytes).or_default() += 1;
             }
@@ -162,8 +163,9 @@ impl BpeTokenizer {
                 }
             }
 
-            let best_pair =
-                pair_counts.iter().max_by_key(|&(_, &count)| count).map(|(&pair, _)| pair);
+            let best_pair = pair_counts.iter()
+                .min_by_key(|&(&(left, right), &count)| (Reverse(count), left, right))
+                .map(|(&pair, _)| pair);
 
             if let Some(pair) = best_pair {
                 let new_token_id = current_vocab_size;
@@ -233,7 +235,7 @@ impl BpeTokenizer {
         parts.into_iter().map(|(start, len)| {
                 let seq = &piece[start..start + len];
                 if seq.len() == 1 { seq[0] as usize } else {
-                    *self.mergeable_ranks.get(seq).unwrap_or(&(seq[0] as usize))
+                    *self.mergeable_ranks.get(seq).expect("merged BPE token is missing its rank")
                 }
             }).collect()
     }
@@ -242,7 +244,8 @@ impl BpeTokenizer {
     pub fn encode_ordinary(&self, text: &str) -> Vec<usize> {
         let mut ids = Vec::new();
 
-        for m in Self::get_split_regex().find_iter(text).flatten() {
+        for m in Self::get_split_regex().find_iter(text) {
+            let m = m.expect("BPE split regex failed while encoding");
             let piece = m.as_str().as_bytes();
             ids.extend(self.encode_piece(piece));
         }
@@ -287,7 +290,8 @@ impl BpeTokenizer {
 
     /// Return the vocabulary size
     pub fn get_vocab_size(&self) -> usize {
-        self.mergeable_ranks.len() + self.special_tokens.len()
+        self.mergeable_ranks.values().chain(self.special_tokens.values())
+            .copied().max().map_or(0, |max_id| max_id + 1)
     }
 
     /// Return the special tokens mapping
@@ -442,7 +446,7 @@ impl BpeTokenizer {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_bpe_training_and_encoding_roundtrip() {
         let corpus = vec![
             "Hello world! Hello system programming.",
@@ -514,4 +518,4 @@ impl BpeTokenizer {
         let t_mask = decoded_tokens.iter().find(|(s, _)| s.contains('T')).map(|(_, m)| *m);
         assert_eq!(t_mask, Some(1));
     }
-//}
+}

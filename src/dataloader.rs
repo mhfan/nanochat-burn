@@ -53,7 +53,7 @@ impl DistributedDataLoader {
         config.validate();
         let DistributedDataLoaderConfig { batch_size, sequence_length, rank, world_size,
             start_shard_idx, start_token_offset, start_epoch } = config;
-        let (sender, receiver) = channel(4); // double buffering prefetching
+        let (sender, receiver) = channel(4);
         tokio::spawn(async move {
             let dataset = match PretrainingDataset::new(&dataset_paths) {
                 Ok(ds) => ds,
@@ -71,11 +71,11 @@ impl DistributedDataLoader {
                 return;
             }
 
-            let num_needed = batch_size * (sequence_length + 1);
+            let num_needed = batch_size.checked_mul(sequence_length + 1)
+                .expect("batch token count overflow");
             if shards_assigned.iter().all(|&idx| dataset.shards[idx].num_tokens < num_needed) {
                 eprintln!("DDP Rank {} has no shard large enough for one batch: need {} tokens",
-                    rank, num_needed
-                );
+                    rank, num_needed);
                 return;
             }
 
@@ -132,6 +132,8 @@ pub struct SftDataLoader {
 impl SftDataLoader {
     pub fn new(dataset: SftDataset, tokenizer: BpeTokenizer, batch_size: usize,
         sequence_length: usize) -> Self {
+        assert!(batch_size > 0, "batch size must be greater than zero");
+        assert!(sequence_length > 0, "sequence length must be greater than zero");
         SftDataLoader { dataset, tokenizer, batch_size, sequence_length, cur_idx: 0 }
     }
 
@@ -163,7 +165,7 @@ impl SftDataLoader {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[tokio::test] async fn test_distributed_dataloader_prefetch_and_sharding() {
         use crate::dataset::pretokenize_text_to_bin;
         let temp_dir = std::env::temp_dir();
@@ -203,4 +205,4 @@ impl SftDataLoader {
         let _ = fs::remove_file(t2_txt);
         let _ = fs::remove_file(t2_bin);
     }
-//}
+}

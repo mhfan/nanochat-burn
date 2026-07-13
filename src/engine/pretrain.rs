@@ -22,8 +22,8 @@ const SYNTHETIC_PRETRAIN_CORPUS: &[&str] = &[
      conversations without padding.",
     "Reinforcement learning uses rollback policies and policy gradient updates to align base \
      pretrained models with human feedback.",
-    "Isolated subprocess sandboxes protect systems by executing untrusted assistant-generated \
-     Python code with timeout limits.",
+    "Evaluation harnesses execute generated programs in bounded subprocesses and record their \
+     outputs for scoring.",
     "Pretraining establishes the core foundational language patterns, grammar, and generic \
      semantic knowledge inside LLM weights.",
     "Evaluation harnesses measure performance quantitatively using categorical argmax \
@@ -34,16 +34,13 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer) -> PathBuf {
     let txt_path = Path::new("data/pretrain.txt");
     let bin_path = Path::new("data/pretrain.bin");
 
-    if !bin_path.exists() {
-        tracing::info!("Creating synthetic pretraining text dataset...");
-        let full_text = format!("{} ", SYNTHETIC_PRETRAIN_CORPUS.join(" ")).repeat(10);
+    tracing::info!("Creating synthetic pretraining text dataset...");
+    let full_text = format!("{} ", SYNTHETIC_PRETRAIN_CORPUS.join(" ")).repeat(10);
 
-        std::fs::create_dir_all("data").ok();
-        std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");
-        pretokenize_text_to_bin(txt_path, bin_path, tokenizer)
-            .expect("Failed to pretokenize dataset");
-        tracing::info!("Synthetic pretraining dataset pretokenized to: {:?}", bin_path);
-    }
+    std::fs::create_dir_all("data").expect("Failed to create data directory");
+    std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");
+    pretokenize_text_to_bin(txt_path, bin_path, tokenizer).expect("Failed to pretokenize dataset");
+    tracing::info!("Synthetic pretraining dataset pretokenized to: {:?}", bin_path);
 
     bin_path.to_path_buf()
 }

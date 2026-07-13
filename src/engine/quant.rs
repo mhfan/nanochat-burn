@@ -42,7 +42,7 @@ impl<B: Backend> ForwardLayer<B> for QuantizedLinear<B> {
 impl<B: Backend> QuantizedLinear<B> {
     /// Perform the forward pass with dynamic in-place de-quantization
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        let shape: [usize; D] = input.shape().dims::<D>();
+        let shape = input.shape().dims::<D>();
         let in_features = shape[D - 1];
 
         // 1. Reshape D-dimensional input to 2D
@@ -73,7 +73,7 @@ impl<B: Backend> QuantizedLinear<B> {
         let [i_packed, o] = packed.shape().dims::<2>();
         let (pack_factor, base, offset) = quant_layout(self.bits);
         let mut cur = packed;
-        let mut q_floats: Vec<Tensor<B, 3>> = Vec::with_capacity(pack_factor);
+        let mut q_floats = Vec::<Tensor<B, 3>>::with_capacity(pack_factor);
         for _ in 0..pack_factor {
             let cur_q = cur.clone() / base;
             let next_cur =
@@ -86,7 +86,6 @@ impl<B: Backend> QuantizedLinear<B> {
         let q_unpacked =
             Tensor::cat(q_floats, 2).swap_dims(1, 2).reshape([i_packed * pack_factor, o]);
 
-        // 3. Apply Scales & Shift
         let i = q_unpacked.shape().dims::<2>()[0];
         let scales_val = self.scales.clone();
         let i_blocks = scales_val.shape().dims::<3>()[0];
@@ -107,46 +106,32 @@ impl<B: Backend> QuantizedLinear<B> {
 /// into a QuantizedLinear layer in-place
 pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: usize)
     -> QuantizedLinear<B> {
-    assert!(bits == 4 || bits == 8, "quantization bits must be 4 or 8");
+    assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
 
     // Weight has shape [I, O] in Burn's Linear layer
     let weight = linear.weight.val();
-    let shape = weight.shape().dims::<2>();
-    let (i, o) = (shape[0], shape[1]);
-    let (pack_factor, base, _offset) = quant_layout(bits);
+    let [i, o] = weight.shape().dims::<2>();
+    let (pack_factor, base, offset) = quant_layout(bits);
     assert!(i % pack_factor == 0,
         "input dimension {} must be divisible by pack factor {} for W{} quantization",
         i, pack_factor, bits);
 
-    let block_size_actual = if bits == 4 && block_size == 0 {
-        64 // Default block size of 64 for W4
-    } else { block_size };
-
-    let (max_val, offset, max_q) =
-        if bits == 8 { (127.0, 128.0, 255.0) } else { (7.0, 8.0, 15.0) };
+    let block_size_actual = effective_block_size(bits, block_size);
+    let (max_val, max_q) = (offset - 1.0, (base - 1) as f32);
 
     let (q_weight, scales) = if block_size_actual > 0 {
         assert!(i % block_size_actual == 0,
             "input dimension {} must be divisible by quantization block size {}",
             i, block_size_actual);
         let num_blocks = i / block_size_actual;
-        // Block-wise quantization
         let reshaped = weight.reshape([num_blocks, block_size_actual, o]);
-
-        // Compute block max absolute value along block dimension (dimension 1)
-        // Note: max_dim returns [num_blocks, 1, o]
         let max_abs = reshaped.clone().abs().max_dim(1);
-
-        // Prevent division by zero
         let block_scales = (max_abs / max_val).clamp(1e-6, 1e6);
-
-        // Quantize
         let q_shifted = (reshaped / block_scales.clone()).round() + offset;
         let q_flat = q_shifted.clamp(0.0, max_q).reshape([i, o]);
 
         (q_flat, block_scales)
     } else {
-        // Row-wise quantization (scales has shape [1, 1, O])
         let max_abs = weight.clone().abs().max_dim(0); // [1, o]
         let channel_scales = (max_abs / max_val).clamp(1e-6, 1e6);
 
@@ -178,7 +163,7 @@ pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
     block_size: usize) -> LinearOrQuantized<B> {
     let input_dim = linear.weight.val().shape().dims::<2>()[0];
     let (pack_factor, ..) = quant_layout(bits);
-    let block_size = if bits == 4 && block_size == 0 { 64 } else { block_size };
+    let block_size = effective_block_size(bits, block_size);
     let supported = input_dim % pack_factor == 0 &&
         (block_size == 0 || input_dim % block_size == 0);
 
@@ -197,6 +182,10 @@ fn quant_layout(bits: usize) -> (usize, i32, f32) {
         4 => (8, 16, 8.0),
         _ => panic!("quantization bits must be 4 or 8"),
     }
+}
+
+fn effective_block_size(bits: usize, block_size: usize) -> usize {
+    if bits == 4 && block_size == 0 { 64 } else { block_size }
 }
 
 #[cfg(test)] mod tests { use super::*;
@@ -224,7 +213,6 @@ fn quant_layout(bits: usize) -> (usize, i32, f32) {
 
         let diff =
             crate::common::scalar_to_f32((dequantized - weight).abs().mean().into_scalar());
-        println!("W8 Row-wise Quantization Mean Absolute Error: {}", diff);
         // Standard normal distribution values quantized to 256 levels should have very low
         // error (< 0.02)
         assert!(diff < 0.02, "Error too high: {}", diff);
@@ -251,7 +239,6 @@ fn quant_layout(bits: usize) -> (usize, i32, f32) {
 
         let diff =
             crate::common::scalar_to_f32((dequantized - weight).abs().mean().into_scalar());
-        println!("W4 Block-wise (32) Quantization Mean Absolute Error: {}", diff);
         // Standard normal values quantized to 16 levels block-wise
         // should have acceptable error (< 0.25)
         assert!(diff < 0.25, "Error too high: {}", diff);
@@ -283,7 +270,6 @@ fn quant_layout(bits: usize) -> (usize, i32, f32) {
 
         let diff =
             crate::common::scalar_to_f32((out_std - out_quant).abs().mean().into_scalar());
-        println!("W8 Block-wise Forward Mean Absolute Difference: {}", diff);
         assert!(diff < 0.05, "Forward difference too high: {}", diff);
     }
 }

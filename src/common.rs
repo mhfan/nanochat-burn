@@ -32,14 +32,14 @@ pub fn init_device() -> ModelDevice {
 pub fn extract_answer(text: &str) -> Option<i32> {
     let marker = "#### ";
     text.rfind(marker).and_then(|idx| {
-        let num_part = text[idx + marker.len()..].trim();
-        let clean_num: String =
-            num_part.chars().filter(|c| c.is_ascii_digit() || *c == '-').collect();
+        let candidate = text[idx + marker.len()..].split_whitespace().next()?;
+        let clean_num: String = candidate.chars()
+            .filter(|c| c.is_ascii_digit() || *c == '-').collect();
         clean_num.parse::<i32>().ok()
     })
 }
 
-pub fn tensor_data_to_f32_vec(data: burn::tensor::TensorData) -> Vec<f32> {
+pub fn tensor_data_to_f32_vec(data: TensorData) -> Vec<f32> {
     match data.dtype {
         DType::F32 => data.to_vec::<f32>().unwrap(),
         DType::F16 => data.to_vec::<f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
@@ -66,13 +66,11 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
         }).collect()
 }
 
-//#[cfg(test)] mod tests { use super::*;
-    /// 执行数值校验与反向传播管道验证
-    #[test] pub fn verify_autodiff_pipeline() {
+#[cfg(test)] mod tests { use super::*;
+    #[test] fn verify_autodiff_pipeline() {
         // 初始化测试日志，以便在测试失败时观察底层驱动输出
         //tracing_subscriber::fmt().with_env_filter("info").init();
 
-        use burn::tensor::Tensor;
         let device = init_device();
 
         // 1. 创建前向张量（使用 Autodiff 包装 of Wgpu 后端）
@@ -121,4 +119,4 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
         assert_close_slice(&tensor_data_to_f32_vec(w_grad.into_data()),
             &[4.0, 4.0, 6.0, 6.0], epsilon, "w gradient");
     }
-//}
+}

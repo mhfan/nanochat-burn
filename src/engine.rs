@@ -57,19 +57,23 @@ impl TrainingConfig {
 
     pub fn gradient_accumulation_steps(&self) -> usize {
         assert!(self.device_batch_size > 0, "device_batch_size must be greater than zero");
+        assert!(self.total_batch_size >= self.device_batch_size &&
+            self.total_batch_size % self.device_batch_size == 0,
+            "total_batch_size must be a multiple of device_batch_size");
         self.total_batch_size / self.device_batch_size
     }
 }
 
 /// Compute the learning rate multiplier using a linear warmup followed by a constant phase
-/// and a cosine decay or linear warmdown to a final fraction of the initial learning rate.
+/// and a linear warmdown to a final fraction of the initial learning rate.
 pub fn get_lr_multiplier(step: usize, num_iterations: usize, warmup_steps: usize,
     warmdown_ratio: f32, final_lr_frac: f32) -> f32 {
+    let step = step.min(num_iterations);
     if step < warmup_steps { (step + 1) as f32 / warmup_steps.max(1) as f32 } else {
         let warmdown_iters = (warmdown_ratio * num_iterations as f32).round() as usize;
         if step <= num_iterations.saturating_sub(warmdown_iters) { 1.0 } else {
-            let progress = (num_iterations - step) as f32 / warmdown_iters.max(1) as f32;
-            progress * 1.0 + (1.0 - progress) * final_lr_frac
+            let remaining = (num_iterations - step) as f32 / warmdown_iters.max(1) as f32;
+            final_lr_frac + remaining * (1.0 - final_lr_frac)
         }
     }
 }
@@ -82,7 +86,7 @@ pub fn get_muon_momentum(step: usize, num_iterations: usize, warmdown_ratio: f32
         let frac = step as f32 / 400.0;
         (1.0 - frac) * 0.85 + frac * 0.97
     } else if step >= warmdown_start {
-        let progress = (step - warmdown_start) as f32 / warmdown_iters.max(1) as f32;
+        let progress = ((step - warmdown_start) as f32 / warmdown_iters.max(1) as f32).min(1.0);
         0.97 * (1.0 - progress) + 0.90 * progress
     } else {
         0.97
@@ -91,6 +95,7 @@ pub fn get_muon_momentum(step: usize, num_iterations: usize, warmdown_ratio: f32
 
 /// Compute the weight decay value dynamically over the training horizon.
 pub fn get_weight_decay(step: usize, num_iterations: usize, weight_decay: f32) -> f32 {
+    let step = step.min(num_iterations);
     weight_decay * 0.5 *
         (1.0 + ((std::f32::consts::PI * step as f32) / num_iterations.max(1) as f32).cos())
 }
@@ -120,6 +125,8 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
     for _ in 0..steps {
         let Some(batch) = loader.next_batch().await else { break; };
         let t = model.config.sequence_len;
+        assert_eq!(batch.x.len(), batch.y.len(), "evaluation input/target size mismatch");
+        assert_eq!(batch.x.len() % t, 0, "evaluation batch is not sequence-aligned");
         let b = batch.x.len() / t;
         let x_tensor = int_tensor_2d(batch.x, [b, t], device);
         let y_tensor = int_tensor_2d(batch.y, [b, t], device);
@@ -132,7 +139,7 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
 
         for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec) {
             if target_tok >= 0 {
-                let bytes_len = token_bytes.get(target_tok as usize).cloned().unwrap_or(0);
+                let bytes_len = token_bytes.get(target_tok as usize).copied().unwrap_or(0);
                 if bytes_len > 0 {
                     total_nats += loss_val;
                     total_bytes += bytes_len;
@@ -179,21 +186,19 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             (burn::optim::GradientsAccumulator::new(), 0.0f32);
 
         for _ in 0..grad_accum_steps {
-            if let Some(batch) = loader.next_batch().await {
-                let shape = [self.config.device_batch_size, self.config.sequence_length];
-                let x_tensor = int_tensor_2d(batch.x, shape, device);
-                let y_tensor = int_tensor_2d(batch.y, shape, device);
+            let batch = loader.next_batch().await.expect("training data loader stopped unexpectedly");
+            let shape = [self.config.device_batch_size, self.config.sequence_length];
+            let x_tensor = int_tensor_2d(batch.x, shape, device);
+            let y_tensor = int_tensor_2d(batch.y, shape, device);
 
-                let logits = self.model.forward(x_tensor, None);
-                let loss =
-                    self.model.compute_loss(logits, y_tensor) / (grad_accum_steps as f32);
-                step_loss += scalar_to_f32(loss.clone().into_scalar());
+            let logits = self.model.forward(x_tensor, None);
+            let loss = self.model.compute_loss(logits, y_tensor) / grad_accum_steps as f32;
+            step_loss += scalar_to_f32(loss.clone().into_scalar());
 
-                let step_grads = loss.backward();
-                let step_grads_params =
-                    burn::optim::GradientsParams::from_grads(step_grads, &self.model);
-                accumulator.accumulate(&self.model, step_grads_params);
-            }
+            let step_grads = loss.backward();
+            let step_grads_params =
+                burn::optim::GradientsParams::from_grads(step_grads, &self.model);
+            accumulator.accumulate(&self.model, step_grads_params);
         }
 
         // Apply optimizer update step
@@ -206,19 +211,13 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
 
-        // Zero out gradients for the next optimization step
-        // In Burn, since we use Param and autodiff grads are returned as a container,
-        // we don't need to manually zero grad registers as they are newly allocated each
-        // backward pass.
-
         let elapsed = start_time.elapsed().as_secs_f64();
         if self.step > 10 { self.total_training_time_secs += elapsed; }
 
         // Compute debiased smoothed loss
         let ema_beta = 0.9f32;
-        self.smooth_train_loss = if self.step == 0 { step_loss } else {
-            ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss
-        };
+        self.smooth_train_loss =
+            ema_beta * self.smooth_train_loss + (1.0 - ema_beta) * step_loss;
         let debiased_loss =
             self.smooth_train_loss / (1.0 - ema_beta.powi((self.step + 1) as i32));
 
@@ -227,7 +226,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_schedulers() {
         let lr_mult = get_lr_multiplier(0, 100, 10, 0.5, 0.1);
         assert!(lr_mult > 0.0 && lr_mult <= 0.1);
@@ -237,6 +236,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         let lr_mult_end = get_lr_multiplier(90, 100, 10, 0.5, 0.1);
         assert!((0.1..1.0).contains(&lr_mult_end));
+        assert_eq!(get_lr_multiplier(101, 100, 10, 0.5, 0.1), 0.1);
 
         let momentum = get_muon_momentum(0, 100, 0.5);
         assert!((0.85..=0.97).contains(&momentum));
@@ -267,4 +267,4 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let gpt: Gpt<crate::common::ModelBackend> = Gpt::new(config.clone(), &device);
         assert_eq!(gpt.config.sequence_len, 8);
     }
-//}
+}

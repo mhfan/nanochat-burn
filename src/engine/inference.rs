@@ -18,10 +18,12 @@ impl SamplingConfig {
         Self { temperature: 0.0, top_k: None, repetition_penalty: 1.0 }
     }
 
-    fn validate(self) {
-        assert!(self.temperature >= 0.0, "temperature must be non-negative");
+    pub(crate) fn validate(self) {
+        assert!(self.temperature.is_finite() && self.temperature >= 0.0,
+            "temperature must be finite and non-negative");
         assert!(self.top_k != Some(0), "top_k must be greater than zero");
-        assert!(self.repetition_penalty > 0.0, "repetition penalty must be positive");
+        assert!(self.repetition_penalty.is_finite() && self.repetition_penalty > 0.0,
+            "repetition penalty must be finite and positive");
     }
 }
 
@@ -60,6 +62,31 @@ pub struct InferenceEngine<B: Backend, L: ForwardLayer<B> = burn::nn::Linear<B>>
 impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     pub fn new(model: Gpt<B, L>, tokenizer: BpeTokenizer) -> Self { Self { model, tokenizer } }
 
+    pub(crate) fn record_generated_token(&self, state: &mut GeneratorState<B>, sample: usize,
+        token: usize) {
+        let special = self.tokenizer.special_token_ids();
+        state.current_tokens[sample].push(token);
+        if token == special.assistant_end || token == special.bos {
+            state.completed[sample] = true;
+        }
+
+        if token == special.python_start {
+            state.in_python_block[sample] = true;
+            state.python_expr_tokens[sample].clear();
+        } else if token == special.python_end && state.in_python_block[sample] {
+            state.in_python_block[sample] = false;
+            let expression = self.tokenizer.decode(&state.python_expr_tokens[sample]);
+            if let Some(result) = use_calculator(&expression) {
+                let forced = &mut state.forced_tokens[sample];
+                forced.push_back(special.output_start);
+                forced.extend(self.tokenizer.encode_ordinary(&result));
+                forced.push_back(special.output_end);
+            }
+        } else if state.in_python_block[sample] {
+            state.python_expr_tokens[sample].push(token);
+        }
+    }
+
     /// Run prefill phase over the prompt sequence across all batch items
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
         device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
@@ -68,6 +95,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         assert!(num_samples > 0, "num_samples must be greater than zero");
         assert!(prompt_len <= self.model.config.sequence_len,
             "prompt length exceeds model sequence length");
+        assert!(prompt_tokens.iter().all(|&token| token < self.model.config.vocab_size &&
+            i32::try_from(token).is_ok()), "prompt contains an invalid token ID");
         let batch_idx_data: Vec<i32> = std::iter::repeat_n(prompt_tokens, num_samples)
             .flatten().map(|&t| t as i32).collect();
 
@@ -102,6 +131,12 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     pub fn step_generation(&self, state: &mut GeneratorState<B>, logits: Tensor<B, 2>,
         sampling: SamplingConfig, device: &B::Device) -> (Vec<usize>, Vec<u8>, Tensor<B, 2>) {
         let num_samples = state.current_tokens.len();
+        assert!(num_samples > 0, "generation state must contain at least one sample");
+        assert_eq!(state.forced_tokens.len(), num_samples, "forced-token batch size mismatch");
+        assert_eq!(state.in_python_block.len(), num_samples, "tool-state batch size mismatch");
+        assert_eq!(state.python_expr_tokens.len(), num_samples,
+            "tool-expression batch size mismatch");
+        assert_eq!(state.completed.len(), num_samples, "completion-state batch size mismatch");
         assert!(state.step < self.model.config.sequence_len,
             "generation exceeded model sequence length");
 
@@ -124,29 +159,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             let next_tok = next_tok_opt.unwrap_or(sampled_tokens[i]);
 
             next_token_column.push(next_tok);
-            state.current_tokens[i].push(next_tok);
             is_sampled_mask.push(if next_tok_opt.is_some() { 0 } else { 1 });
-
-            if next_tok == special_tokens.assistant_end || next_tok == special_tokens.bos {
-                state.completed[i] = true;
-            }
-
-            // Built-in Tool-Use State Machine
-            if next_tok == special_tokens.python_start {
-                state.in_python_block[i] = true;
-                state.python_expr_tokens[i].clear();
-            } else if next_tok == special_tokens.python_end && state.in_python_block[i] {
-                state.in_python_block[i] = false;
-                let expr_str = self.tokenizer.decode(&state.python_expr_tokens[i]);
-                if let Some(res) = use_calculator(&expr_str) {
-                    let res_tokens = self.tokenizer.encode_ordinary(&res);
-                    state.forced_tokens[i].push_back(special_tokens.output_start);
-                    for &t in &res_tokens { state.forced_tokens[i].push_back(t); }
-                    state.forced_tokens[i].push_back(special_tokens.output_end);
-                }
-            } else if state.in_python_block[i] {
-                state.python_expr_tokens[i].push(next_tok);
-            }
+            self.record_generated_token(state, i, next_tok);
         }
 
         let next_idx = int_tensor_2d(
@@ -167,6 +181,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     /// Non-streaming batch generation interface returning (results, masks)
     pub fn generate_batch(&self, prompt_tokens: &[usize], num_samples: usize,
         config: GenerationConfig, device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
+        config.sampling.validate();
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
 
         let special_tokens = self.tokenizer.special_token_ids();
@@ -205,8 +220,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
     generated_tokens: &[Vec<usize>]) -> Vec<usize> {
     sampling.validate();
-    let shape: [usize; 2] = logits.shape().dims();
-    let (batch_size, vocab_size) = (shape[0], shape[1]);
+    let [batch_size, vocab_size] = logits.shape().dims();
     assert!(vocab_size > 0, "cannot sample from an empty vocabulary");
     assert_eq!(generated_tokens.len(), batch_size, "token history batch size mismatch");
 
@@ -262,13 +276,15 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
         let mut exp_logits: Vec<f32> =
             sample_logits.iter().map(|&v| (v - max_logit).exp()).collect();
         let sum_exp: f32 = exp_logits.iter().sum();
+        assert!(sum_exp.is_finite() && sum_exp > 0.0, "sampling probabilities are invalid");
         for v in exp_logits.iter_mut() { *v /= sum_exp; }
 
-        let (mut cum_sum, mut chosen_idx) = (0.0f32, indices[0]);
+        let (mut cum_sum, mut chosen_idx) = (0.0f32,
+            indices.iter().copied().find(|&idx| exp_logits[idx] > 0.0).unwrap_or(indices[0]));
         let r: f32 = rand::random();
         for &idx in &indices {
             cum_sum += exp_logits[idx];
-            if r <= cum_sum {
+            if r < cum_sum {
                 chosen_idx = idx;
                 break;
             }
@@ -279,7 +295,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     sampled_ids
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_inference_engine_instantiation() {
         let device = crate::common::init_device();
         let corpus = vec!["Interactive chat agent with Tool-Use integration."];
@@ -328,4 +344,26 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
         assert_eq!(masks.len(), 2);
         assert!(results[0].len() >= 3);
     }
-//}
+
+    #[test] fn test_tool_state_queues_calculator_output() {
+        let device = crate::common::init_device();
+        let tokenizer = BpeTokenizer::train_from_iterator(["2 + 2"], 280);
+        let config = crate::gpt::GptConfig { sequence_len: 16, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
+            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+        };
+        let model = Gpt::<crate::common::ModelBackend>::new(config, &device);
+        let engine = InferenceEngine::new(model, tokenizer);
+        let (mut state, _) = engine.prefill(&[1], 1, &device);
+        let special = engine.tokenizer.special_token_ids();
+
+        engine.record_generated_token(&mut state, 0, special.python_start);
+        for token in engine.tokenizer.encode_ordinary("2 + 2") {
+            engine.record_generated_token(&mut state, 0, token);
+        }
+        engine.record_generated_token(&mut state, 0, special.python_end);
+
+        assert_eq!(state.forced_tokens[0].front(), Some(&special.output_start));
+        assert_eq!(state.forced_tokens[0].back(), Some(&special.output_end));
+    }
+}

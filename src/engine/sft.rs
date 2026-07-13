@@ -21,12 +21,15 @@ impl SftPacker {
 
     pub fn next_batch(&mut self, batch_size: usize, max_seq_len: usize, bos_token: usize)
         -> (Vec<Vec<usize>>, Vec<Vec<i32>>, Vec<usize>) {
-        let row_capacity = max_seq_len + 1;
+        assert!(batch_size > 0, "batch size must be greater than zero");
+        assert!(max_seq_len > 0, "sequence length must be greater than zero");
+        let row_capacity = max_seq_len.checked_add(1).expect("sequence length overflow");
         let mut rows = Vec::with_capacity(batch_size);
         let mut mask_rows = Vec::with_capacity(batch_size);
         let mut row_lengths = Vec::with_capacity(batch_size);
 
         for _ in 0..batch_size {
+            if self.conversations.is_empty() { break; }
             let mut row = Vec::with_capacity(row_capacity);
             let mut mask_row = Vec::with_capacity(row_capacity);
             let (mut content_len, mut padded) = (row_capacity, false);
@@ -38,6 +41,7 @@ impl SftPacker {
 
                 if idx_limit > 0 {
                     let (conv, conv_mask) = self.conversations.remove(idx_limit - 1);
+                    assert_eq!(conv.len(), conv_mask.len(), "SFT conversation/mask size mismatch");
                     mask_row.extend(conv_mask);
                     row.extend(conv);
                 } else if row.is_empty() && !self.conversations.is_empty() {
@@ -72,6 +76,9 @@ fn flatten_sft_batch(rows: &[Vec<usize>], mask_rows: &[Vec<i32>], row_lengths: &
     let mut flat_targets = Vec::with_capacity(rows.len() * max_seq_len);
 
     for ((row, row_mask), &content_len) in rows.iter().zip(mask_rows).zip(row_lengths) {
+        assert!(row.len() > max_seq_len && row_mask.len() > max_seq_len,
+            "SFT row must contain sequence_length + 1 tokens");
+        assert!(content_len <= row.len(), "SFT content length exceeds row length");
         flat_inputs.extend(row[..max_seq_len].iter().map(|&x| x as i32));
         flat_targets.extend((1..=max_seq_len)
             .map(|j| if row_mask[j] == 1 && j < content_len { row[j] as i32 } else { -1 }),
@@ -98,8 +105,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     let corpus = dataset.get_corpus();
     tracing::info!("Training BpeTokenizer on {} SFT text fragments...", corpus.len());
 
-    let mut tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
-    tokenizer.build_inverse_mappings();
+    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
 
     let config = GptConfig { sequence_len: 128, n_layer: 4, n_head: 4, n_kv_head: 2,
         n_embd: 64, window_pattern: "L".to_string(),
@@ -123,19 +129,22 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         }
         let (rows, mask_rows, row_lengths) =
             packer.next_batch(batch_size, max_seq_len, bos_token);
+        let actual_batch_size = rows.len();
+        assert!(actual_batch_size > 0, "SFT dataset produced no trainable rows");
 
         let (flat_inputs, flat_targets) =
             flatten_sft_batch(&rows, &mask_rows, &row_lengths, max_seq_len);
 
-        let inputs_tensor = int_tensor_2d(flat_inputs, [batch_size, max_seq_len], device);
-        let targets_tensor = int_tensor_2d(flat_targets, [batch_size, max_seq_len], device);
+        let inputs_tensor = int_tensor_2d(flat_inputs, [actual_batch_size, max_seq_len], device);
+        let targets_tensor = int_tensor_2d(flat_targets, [actual_batch_size, max_seq_len], device);
 
         let logits = model.forward(inputs_tensor, None);
         let loss = model.compute_loss(logits, targets_tensor);
         let grads = loss.backward();
 
-        let lrm = get_lr_multiplier(step, num_iterations, warmup_steps, 0.5, 0.0);
-        let wd = get_weight_decay(step, num_iterations, weight_decay);
+        let schedule_step = step - 1;
+        let lrm = get_lr_multiplier(schedule_step, num_iterations, warmup_steps, 0.5, 0.0);
+        let wd = get_weight_decay(schedule_step, num_iterations, weight_decay);
         let lr = learning_rate * lrm;
 
         let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
@@ -164,10 +173,15 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_sft_packer() {
-        use crate::tokenizer::BpeTokenizer;
-        let dataset = SftDataset::new("data/sft_train.jsonl").unwrap();
+        use crate::tokenizer::{Conversation, ConversationMessage, MessageContent};
+        let dataset = SftDataset { conversations: vec![Conversation { messages: vec![
+            ConversationMessage { role: "user".to_string(),
+                content: MessageContent::Simple("Who are you?".to_string()) },
+            ConversationMessage { role: "assistant".to_string(),
+                content: MessageContent::Simple("I am nanochat.".to_string()) },
+        ]}] };
         let corpus = vec!["Who are you? I am nanochat.", "Hello!"];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 512);
         let mut packer = SftPacker::new(&dataset, &tokenizer);
@@ -176,9 +190,9 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let bos_token = tokenizer.get_bos_token_id();
 
         let (rows, mask_rows, row_lengths) = packer.next_batch(batch_size, max_seq_len, bos_token);
-        assert_eq!(rows.len(), batch_size);
-        assert_eq!(mask_rows.len(), batch_size);
-        assert_eq!(row_lengths.len(), batch_size);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(mask_rows.len(), rows.len());
+        assert_eq!(row_lengths.len(), rows.len());
 
         assert_eq!(rows[0].len(), max_seq_len + 1);
 
@@ -188,4 +202,4 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         assert_eq!(masks[0].len(), 17);
         assert!(oversized.conversations.is_empty());
     }
-//}
+}

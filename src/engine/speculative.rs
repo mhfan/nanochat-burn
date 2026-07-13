@@ -31,7 +31,7 @@ pub struct SpeculativeState<B: Backend> {
 
 pub struct SpeculativeInferenceEngine<B: Backend,
     LTarget: ForwardLayer<B> = burn::nn::Linear<B>,
-    LDraft:  ForwardLayer<B> = burn::nn::Linear<B>> {
+    LDraft: ForwardLayer<B> = burn::nn::Linear<B>> {
     pub target_engine: InferenceEngine<B, LTarget>,
     pub draft_engine: InferenceEngine<B, LDraft>,
     pub tokenizer: BpeTokenizer,
@@ -71,16 +71,41 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         state.draft_state = draft_state;
     }
 
+    fn target_step(&self, state: &mut SpeculativeState<B>, target_logits: Tensor<B, 2>,
+        sampling: SamplingConfig, device: &B::Device) -> (Vec<usize>, Tensor<B, 2>, bool) {
+        let (tokens, _, next_logits) = self.target_engine.step_generation(
+            &mut state.target_state, target_logits, sampling, device);
+        let token = tokens[0];
+        state.current_tokens.push(token);
+        state.step += 1;
+        self.sync_draft_state(state, device);
+
+        let special = self.tokenizer.special_token_ids();
+        let finished = token == special.assistant_end || token == special.bos;
+        (tokens, next_logits, finished)
+    }
+
     /// Perform speculative decoding steps: draft K tokens,
     /// evaluate in parallel, and verify losslessly
     pub fn step_speculative(&self, state: &mut SpeculativeState<B>, target_logits: Tensor<B, 2>,
         draft_tokens_per_step: usize, sampling: SamplingConfig, device: &B::Device)
         -> (Vec<usize>, Tensor<B, 2>, bool) {
+        sampling.validate();
         let special_tokens = self.tokenizer.special_token_ids();
         let sequence_len = self.target_engine.model.config.sequence_len
             .min(self.draft_engine.model.config.sequence_len);
+        assert!(!state.current_tokens.is_empty(), "speculative state has no token history");
+        assert!(state.step < sequence_len, "speculative decoding exceeded model sequence length");
         let draft_tokens_per_step = draft_tokens_per_step
-            .min(sequence_len.saturating_sub(state.step + 1));
+            .min(sequence_len.saturating_sub(state.step.saturating_add(1)));
+
+        // Independent draft/target samples do not preserve the target distribution. Keep the
+        // speculative path exact by using it only for deterministic decoding.
+        if sampling.temperature > 0.0 || draft_tokens_per_step == 0 ||
+            state.target_state.in_python_block[0] ||
+            !state.target_state.forced_tokens[0].is_empty() {
+            return self.target_step(state, target_logits, sampling, device);
+        }
 
         // 1. Autoregressively draft K tokens using the fast Draft Model
         let last_tok = *state.current_tokens.last().unwrap();
@@ -102,20 +127,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             cur_draft_logits = next_logits;
         }
 
-        if draft_tokens.is_empty() {
-            // Nothing drafted, fall back to single target model step
-            let (sampled_toks, _, next_logits) = self.target_engine.step_generation(
-                &mut state.target_state, target_logits, sampling, device,
-            );
-            let token = sampled_toks[0];
-            state.current_tokens.push(token);
-            state.step += 1;
-            self.sync_draft_state(state, device);
-
-            let is_finished =
-                token == special_tokens.assistant_end || token == special_tokens.bos;
-            return (vec![token], next_logits, is_finished);
-        }
+        if draft_tokens.is_empty() { return self.target_step(state, target_logits, sampling, device); }
 
         // 2. Parallelly evaluate all K draft tokens in the Target Model
         let draft_len = draft_tokens.len();
@@ -146,11 +158,19 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             if draft_tok == target_pred_tok {
                 accepted_tokens.push(draft_tok);
                 state.current_tokens.push(draft_tok);
-                state.target_state.current_tokens[0].push(draft_tok);
+                self.target_engine.record_generated_token(&mut state.target_state, 0, draft_tok);
                 accepted_count += 1;
 
                 if draft_tok == special_tokens.assistant_end || draft_tok == special_tokens.bos {
                     is_finished = true;
+                    break;
+                }
+
+                if draft_tok == special_tokens.python_start ||
+                    draft_tok == special_tokens.python_end {
+                    let vocab_size = self.target_engine.model.config.vocab_size;
+                    final_next_logits = target_logits_3d.clone()
+                        .slice([0..1, i..i + 1]).reshape([1, vocab_size]);
                     break;
                 }
 
@@ -167,7 +187,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
                     accepted_tokens.push(last_pred_tok);
                     state.current_tokens.push(last_pred_tok);
-                    state.target_state.current_tokens[0].push(last_pred_tok);
+                    self.target_engine.record_generated_token(
+                        &mut state.target_state, 0, last_pred_tok);
                     accepted_count += 1;
 
                     let next_logits_3d = self.target_engine.model.forward_with_cache(
@@ -184,7 +205,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 // Reject draft_tok, accept target_pred_tok instead
                 accepted_tokens.push(target_pred_tok);
                 state.current_tokens.push(target_pred_tok);
-                state.target_state.current_tokens[0].push(target_pred_tok);
+                self.target_engine.record_generated_token(
+                    &mut state.target_state, 0, target_pred_tok);
                 accepted_count += 1;
 
                 // Run correction forward pass for target_pred_tok to overwrite cache at
@@ -206,6 +228,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let final_len = state.step + accepted_count;
         state.target_state.step = final_len;
         state.step = final_len;
+        if is_finished { state.target_state.completed[0] = true; }
         self.sync_draft_state(state, device);
 
         (accepted_tokens, final_next_logits, is_finished)
@@ -214,8 +237,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     /// High-level generation loop returning the fully generated token sequence
     pub fn generate(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
         device: &B::Device) -> Vec<usize> {
+        config.generation.sampling.validate();
         let (mut state, mut cur_logits) = self.prefill(prompt_tokens, device);
-        let max_total_len = (prompt_tokens.len() + config.generation.max_tokens)
+        let max_total_len = prompt_tokens.len().saturating_add(config.generation.max_tokens)
             .min(self.target_engine.model.config.sequence_len)
             .min(self.draft_engine.model.config.sequence_len);
 
@@ -233,7 +257,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     }
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_speculative_decoding_lossless() {
         let device = crate::common::init_device();
         let corpus =
@@ -283,5 +307,13 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         // 3. Verify Lossless Parity (outputs must be mathematically identical!)
         assert_eq!(spec_res, target_res,
             "Speculative decoding did not maintain lossless parity with target model!");
+
+        let (mut state, logits) = spec_engine.prefill(&prompt_tokens, &device);
+        let sampling = SamplingConfig {
+            temperature: 1.0, top_k: Some(1), repetition_penalty: 1.0,
+        };
+        let (tokens, _, _) =
+            spec_engine.step_speculative(&mut state, logits, 2, sampling, &device);
+        assert_eq!(tokens.len(), 1, "stochastic decoding must use one exact target step");
     }
-//}
+}

@@ -87,11 +87,11 @@ fn main() {
         io::stdout().flush().unwrap();
 
         let mut user_input = String::new();
-        io::stdin().read_line(&mut user_input).unwrap();
+        if io::stdin().read_line(&mut user_input).unwrap() == 0 { break; }
         let trimmed = user_input.trim();
-        if  trimmed.eq_ignore_ascii_case("quit") ||
+        if trimmed.eq_ignore_ascii_case("quit") ||
             trimmed.eq_ignore_ascii_case("exit") { break; }
-        if  trimmed.is_empty() { continue; }
+        if trimmed.is_empty() { continue; }
 
         // Add user message to conversation
         conversation.messages.push(ConversationMessage {
@@ -134,6 +134,7 @@ fn main() {
             cur_logits = next_logits;
 
             let token = next_tokens[0];
+            if token == special_tokens.assistant_end || token == special_tokens.bos { break; }
             assistant_response_tokens.push(token);
             token_count += 1;
 

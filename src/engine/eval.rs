@@ -32,6 +32,10 @@ fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeT
     tokenizer.decode(&rollouts[0][prompt_tokens.len()..])
 }
 
+fn accuracy(correct: usize, total: usize) -> f32 {
+    if total == 0 { 0.0 } else { correct as f32 / total as f32 }
+}
+
 pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     items: &[EvalItem], device: &B::Device) -> f32 {
     let (mut correct, mut total) = (0, 0);
@@ -54,17 +58,17 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
             vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]
         });
 
-        let best_letter = letters .iter().filter_map(|letter| {
+        let best_letter = letters.iter().filter_map(|letter| {
                 tokenizer.encode_ordinary(letter).first().copied()
                     .and_then(|token_id| logits_vec.get(token_id).map(|&logit| (letter, logit)))
-            }).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            }).max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(letter, _)| letter.clone()).unwrap_or_default();
 
         if best_letter == ground_truth { correct += 1; }
         total += 1;
     }
 
-    if total == 0 { 0.0 } else { correct as f32 / total as f32 }
+    accuracy(correct, total)
 }
 
 pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
@@ -84,7 +88,7 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         total += 1;
     }
 
-    if total == 0 { 0.0 } else { correct as f32 / total as f32 }
+    accuracy(correct, total)
 }
 
 pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
@@ -106,7 +110,7 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
         total += 1;
     }
 
-    if total == 0 { 0.0 } else { correct as f32 / total as f32 }
+    accuracy(correct, total)
 }
 
 pub fn run_all_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
@@ -131,7 +135,13 @@ pub fn run_all_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
             continue;
         }
 
-        let items = load_eval_dataset(path).unwrap_or_default();
+        let items = match load_eval_dataset(path) {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!("Failed to load task {name} from {path}: {error}");
+                continue;
+            }
+        };
         if items.is_empty() {
             tracing::warn!("Task {} loaded 0 items, skipping.", name);
             continue;
@@ -150,7 +160,13 @@ pub fn run_all_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
 
     let humaneval_path = "data/eval/humaneval.jsonl";
     if Path::new(humaneval_path).exists() {
-        let items = load_eval_dataset(humaneval_path).unwrap_or_default();
+        let items = match load_eval_dataset(humaneval_path) {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!("Failed to load HumanEval from {humaneval_path}: {error}");
+                Vec::new()
+            }
+        };
         if !items.is_empty() {
             tracing::info!("Evaluating HumanEval ({} items)...", items.len());
             let score = evaluate_humaneval(model, tokenizer, &items, device);
@@ -177,11 +193,12 @@ pub fn run_all_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     tracing::info!("=============================================");
 }
 
-//#[cfg(test)] mod tests { use super::*;
+#[cfg(test)] mod tests { use super::*;
     #[test] fn test_extract_answer() {
         assert_eq!(extract_answer("The answer is #### 42"), Some(42));
         assert_eq!(extract_answer("#### -7"), Some(-7));
         assert_eq!(extract_answer("No answer here"), None);
         assert_eq!(extract_answer("#### 12,345"), Some(12345));
+        assert_eq!(extract_answer("#### 12 apples and 34 pears"), Some(12));
     }
-//}
+}
