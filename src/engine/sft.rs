@@ -2,9 +2,11 @@
 use std::{iter, path::Path, time::Instant};
 use burn::tensor::backend::AutodiffBackend;
 
-use crate::{common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
-    engine::{get_lr_multiplier, get_weight_decay}, gpt::{Gpt, GptConfig},
-    optim::MuonAdamW, tokenizer::BpeTokenizer,
+use crate::{artifact::{MetricRecord, PRETRAIN_ARTIFACT, SFT_ARTIFACT, TrainingStage,
+        append_metric, load_artifact, path_from_env, reset_metrics, save_artifact},
+    common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
+    engine::{TrainingConfig, get_lr_multiplier, get_weight_decay}, optim::MuonAdamW,
+    tokenizer::BpeTokenizer,
 };
 
 pub struct SftPacker {
@@ -102,26 +104,29 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     let dataset = SftDataset::new(sft_dataset_path).expect("Failed to load SFT dataset");
     tracing::info!("Loaded SFT dataset with {} conversations", dataset.conversations.len());
 
-    let corpus = dataset.get_corpus();
-    tracing::info!("Training BpeTokenizer on {} SFT text fragments...", corpus.len());
-
-    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
-
-    let config = GptConfig { sequence_len: 128, n_layer: 4, n_head: 4, n_kv_head: 2,
-        n_embd: 64, window_pattern: "L".to_string(),
-        vocab_size: tokenizer.get_vocab_size(), quantization: None,
-    };
-
-    let mut model: Gpt<B> = Gpt::new(config.clone(), device);
+    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", PRETRAIN_ARTIFACT);
+    let loaded = load_artifact::<B>(&input, device)
+        .unwrap_or_else(|error| panic!("failed to load pretrain artifact {input:?}: {error}"));
+    tracing::info!("Loaded {:?} artifact from {:?}", loaded.manifest.stage, input);
+    let (mut model, tokenizer) = (loaded.model, loaded.tokenizer);
+    let config = model.config.clone();
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
     let mut packer = SftPacker::new(&dataset, &tokenizer);
 
     let (batch_size, max_seq_len) = (4, config.sequence_len);
     let bos_token = tokenizer.get_bos_token_id();
 
-    let (warmup_steps, num_iterations, learning_rate, weight_decay) = (5, 20, 1e-4, 0.0);
+    let training_config = TrainingConfig {
+        num_iterations: 20, warmup_steps: 5, warmdown_ratio: 0.5, final_lr_frac: 0.0,
+        learning_rate: 1e-4, weight_decay: 0.0, device_batch_size: batch_size,
+        sequence_length: max_seq_len, total_batch_size: batch_size,
+    };
+    let TrainingConfig { warmup_steps, num_iterations, learning_rate, weight_decay, .. } =
+        training_config;
     tracing::info!("Starting SFT training loop for {} iterations...", num_iterations);
     let (start_time, mut smooth_loss) = (Instant::now(), 0.0);
+    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", SFT_ARTIFACT);
+    reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     for step in 1..=num_iterations {
         if packer.conversations.is_empty() {
@@ -157,6 +162,10 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
             tracing::info!("Step {:03}/{:03} | lr: {:.6} | Loss: {:.4} (smooth: {:.4})",
                 step, num_iterations, lr, loss_val, smooth_loss);
         }
+        append_metric(&output, &MetricRecord { stage: TrainingStage::Sft, step, loss: loss_val,
+            smoothed_loss: Some(smooth_loss), learning_rate: Some(lr), reward: None,
+            elapsed_secs: start_time.elapsed().as_secs_f64(),
+        }).unwrap_or_else(|error| panic!("failed to append SFT metric: {error}"));
     }
 
     let elapsed = start_time.elapsed();
@@ -164,13 +173,9 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   SFT Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    let checkpoint_path = Path::new("data/sft_checkpoint.safetensors");
-    tracing::info!("Saving SFT checkpoint to {:?}...", checkpoint_path);
-    if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
-        tracing::error!("Failed to save SFT checkpoint: {}", e);
-    } else {
-        tracing::info!("SFT checkpoint saved successfully!");
-    }
+    save_artifact(&output, TrainingStage::Sft, &model, &tokenizer, Some(&training_config))
+        .unwrap_or_else(|error| panic!("failed to save SFT artifact: {error}"));
+    tracing::info!("SFT artifact saved to {:?}", output);
 }
 
 #[cfg(test)] mod tests { use super::*;

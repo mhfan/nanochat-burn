@@ -1,10 +1,10 @@
 
 use std::{env, io::{self, Write}, time::Instant};
 
-use nanochat_burn::{common::{ModelBackend, init_device},
+use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
+    common::{ModelBackend, init_device},
     engine::inference::{InferenceEngine, SamplingConfig},
-    gpt::{Gpt, GptConfig, QuantizationConfig},
-    tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
+    tokenizer::{Conversation, ConversationMessage, MessageContent},
 };
 
 fn main() {
@@ -21,22 +21,7 @@ fn main() {
     println!("* Press Ctrl+C or type 'quit' / 'exit' to exit.");
     println!("==================================================================\n");
 
-    // 1. Train a miniature tokenizer for mock CLI interaction
-    // In a real SFT deployment, a pre-saved tokenizer JSON is loaded.
-    let corpus = vec![
-        "Hello! How can I help you today?",
-        "The planets of the solar system are: \
-            Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
-        "The capital of France is Paris.",
-        "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / \
-            5<|python_end|><|output_start|>2<|output_end|>.",
-        "System programming in Rust is extremely safe, concurrent, and high-performance.",
-    ];
-    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
-    let vocab_size = tokenizer.get_vocab_size();
-    println!("Vocabulary size: {}", vocab_size);
-
-    // Parse CLI parameters and Environment Variables for quantization
+    // Parse CLI parameters and environment variables for quantization.
     let args: Vec<String> = env::args().collect();
     let mut quantize_bits =
         env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
@@ -52,25 +37,19 @@ fn main() {
         quantize_block = val;
     }
 
-    // 2. Initialize a small Gpt model on WGPU
-    let mut config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
-        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), quantization: None,
-    };
-
-    if let Some(bits) = quantize_bits {
-        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block });
-    }
-
     let device = init_device();
-    println!("Constructing WGPU Transformer Model...");
-    let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
-
-    let gpt = if let Some(q_config) = config.quantization {
+    let artifact_path = inference_artifact_path();
+    let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
+        .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
+    println!("Loaded {:?} artifact from {:?} (vocab {})", artifact.manifest.stage,
+        artifact_path, artifact.tokenizer.get_vocab_size());
+    let tokenizer = artifact.tokenizer;
+    let gpt = if let Some(bits) = quantize_bits {
         println!("Dynamically quantizing model to INT{} (block_size = {})...",
-            q_config.bits, q_config.block_size);
-        gpt_fp.quantize(q_config.bits, q_config.block_size)
+            bits, quantize_block);
+        artifact.model.quantize(bits, quantize_block)
     } else {
-        gpt_fp.into_linear_or_quantized()
+        artifact.model.into_linear_or_quantized()
     };
 
     let engine = InferenceEngine::new(gpt, tokenizer.clone());
@@ -106,7 +85,9 @@ fn main() {
         });
 
         // Render multi-turn conversation into tokens
-        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
+        let generation_budget = 64.min(engine.model.config.sequence_len.saturating_sub(1));
+        let prompt_limit = engine.model.config.sequence_len - generation_budget;
+        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, prompt_limit);
 
         // Remove the trailing assistant end-of-text or bos tokens
         // so we generate from the prompt end
@@ -127,7 +108,7 @@ fn main() {
         let mut tft = start_time.elapsed().as_secs_f64();
         let mut assistant_response_tokens = Vec::new();
 
-        for _ in 0..256 {
+        for _ in 0..generation_budget {
             if state.completed[0] || state.step >= engine.model.config.sequence_len { break; }
             let (next_tokens, _, next_logits) =
                 engine.step_generation(&mut state, cur_logits, sampling, &device);

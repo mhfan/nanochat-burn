@@ -2,9 +2,11 @@
 use std::{path::Path, time::Instant};
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 
-use crate::{common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
+use crate::{artifact::{MetricRecord, RL_ARTIFACT, SFT_ARTIFACT, TrainingStage, append_metric,
+        load_artifact, path_from_env, reset_metrics, save_artifact},
+    common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
     engine::inference::{GenerationConfig, InferenceEngine, SamplingConfig},
-    gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer,
+    optim::MuonAdamW,
 };
 
 fn grpo_advantages(rewards: &[f32]) -> Vec<f32> {
@@ -58,19 +60,12 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     }
     tracing::info!("Loaded RL dataset with {} questions", dataset.conversations.len());
 
-    // 1. Train/load tokenizer
-    let corpus = dataset.get_corpus();
-    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 1024);
-
+    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", SFT_ARTIFACT);
+    let loaded = load_artifact::<B>(&input, device)
+        .unwrap_or_else(|error| panic!("failed to load SFT artifact {input:?}: {error}"));
+    tracing::info!("Loaded {:?} artifact from {:?}", loaded.manifest.stage, input);
+    let (mut model, tokenizer) = (loaded.model, loaded.tokenizer);
     let assistant_end = tokenizer.special_token_ids().assistant_end;
-
-    // 2. Initialize Model and Optimizer
-    let config = GptConfig { sequence_len: 256, n_layer: 4, n_head: 4, n_kv_head: 2, n_embd: 64,
-        window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
-        quantization: None,
-    };
-
-    let mut model: Gpt<B> = Gpt::new(config.clone(), device);
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
 
     let (num_steps, learning_rate) = (10, 1e-3);
@@ -79,6 +74,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
     tracing::info!("Starting RL training loop for {} steps...", num_steps);
     let (start_time, mut step) = (Instant::now(), 0);
+    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", RL_ARTIFACT);
+    reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     while step < num_steps {
         step += 1;
@@ -191,6 +188,11 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
         tracing::info!("Step {:02}/{:02} | Loss: {:.6} | Avg Reward: {:.2}%",
             step, num_steps, loss_val, avg_reward * 100.0);
+        append_metric(&output, &MetricRecord {
+            stage: TrainingStage::ReinforcementLearning, step, loss: loss_val,
+            smoothed_loss: None, learning_rate: Some(lr), reward: Some(avg_reward),
+            elapsed_secs: start_time.elapsed().as_secs_f64(),
+        }).unwrap_or_else(|error| panic!("failed to append RL metric: {error}"));
     }
 
     let elapsed = start_time.elapsed();
@@ -198,13 +200,9 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   RL Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    let checkpoint_path = Path::new("data/rl_checkpoint.safetensors");
-    tracing::info!("Saving RL checkpoint to {:?}...", checkpoint_path);
-    if let Err(e) = crate::checkpoint::save_gpt_to_safetensors(&model, checkpoint_path) {
-        tracing::error!("Failed to save RL checkpoint: {}", e);
-    } else {
-        tracing::info!("RL checkpoint saved successfully!");
-    }
+    save_artifact(&output, TrainingStage::ReinforcementLearning, &model, &tokenizer, None)
+        .unwrap_or_else(|error| panic!("failed to save RL artifact: {error}"));
+    tracing::info!("RL artifact saved to {:?}", output);
 }
 
 #[cfg(test)] mod tests { use super::*;

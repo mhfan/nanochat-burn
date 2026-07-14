@@ -25,6 +25,12 @@ fn prompt_tokens(tokenizer: &BpeTokenizer, item: &EvalItem) -> Vec<usize> {
     tokenizer.render_for_completion(&Conversation { messages: item.messages.clone() })
 }
 
+fn fit_prompt(mut tokens: Vec<usize>, max_len: usize) -> Vec<usize> {
+    assert!(max_len > 0, "model context length must be greater than zero");
+    if tokens.len() > max_len { tokens.drain(..tokens.len() - max_len); }
+    tokens
+}
+
 fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeTokenizer,
     prompt_tokens: &[usize], device: &B::Device) -> String {
     let config = GenerationConfig { max_tokens: 128, sampling: SamplingConfig::greedy() };
@@ -41,7 +47,7 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
     let (mut correct, mut total) = (0, 0);
 
     for item in items {
-        let prompt_tokens = prompt_tokens(tokenizer, item);
+        let prompt_tokens = fit_prompt(prompt_tokens(tokenizer, item), model.config.sequence_len);
         let prompt_len = prompt_tokens.len();
 
         let inputs = int_tensor_2d(
@@ -77,8 +83,9 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
-        let generated_text = generate_completion(&inference_engine,
-            tokenizer, &prompt_tokens(tokenizer, item), device);
+        let prompt = fit_prompt(prompt_tokens(tokenizer, item),
+            model.config.sequence_len.saturating_sub(1).max(1));
+        let generated_text = generate_completion(&inference_engine, tokenizer, &prompt, device);
 
         let ground_truth_text = item.messages.last().unwrap().content.to_string_content();
         let (pred_ans, gt_ans) =
@@ -97,8 +104,10 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
-        let generated_completion = generate_completion(&inference_engine,
-            tokenizer, &prompt_tokens(tokenizer, item), device);
+        let prompt = fit_prompt(prompt_tokens(tokenizer, item),
+            model.config.sequence_len.saturating_sub(1).max(1));
+        let generated_completion = generate_completion(&inference_engine, tokenizer, &prompt,
+            device);
 
         let prompt_pure_code = item.messages[0].content.to_string_content();
         let full_code = format!("{}{}", prompt_pure_code, generated_completion);

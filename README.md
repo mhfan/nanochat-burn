@@ -1,12 +1,29 @@
 # 🚀 nanochat-burn
 
-一个基于 **Rust & Burn 深度学习框架** 高性能、地道实现的极简且完整的 GPT/LLM 训练与自回归推理引擎。它完整复刻了 `nanochat` 的独创模型架构与优化器设计，完美支持 **Foundational Pretraining (预训练)**、**Supervised Fine-Tuning (SFT 监督微调)** 以及 **Reinforcement Learning (RL 强化学习对齐)** 的完整三阶段生命周期。
+一个基于 **Rust 与 Burn 深度学习框架** 高性能、地道实现的极简且完整的 GPT/LLM 训练与自回归推理引擎
+。它完整复刻了 [`nanochat`](https://github.com/karpathy/nanochat) 的独创模型架构与优化器设计，完美支持 **Foundational Pretraining (预训练)*
+*、**Supervised Fine-Tuning (SFT 监督微调)** 以及 **Reinforcement Learning (RL 强化学习对齐)** 的完
+整三阶段生命周期。项目以可读、可运行、可验证为目标，覆盖 BPE、数据管线、GPT、Muon/AdamW、预训练、SFT、组内归一化 REINFORCE、量化和自回归推理，并逐步建立与 Python `nanochat` 的数值 parity 证据。
 
 ---
 
-## 🌟 核心特性与数学 Parity
+## 🌟 能力状态
 
-`nanochat-burn` 致力于实现与 PyTorch 原始版本 **100% 的数值对齐与数学 Parity**，同时发挥 Rust 的系统级安全与并发能效：
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| GPT、RoPE、GQA、SWA、QK Norm、ReLU² | Stable | 有单元测试和 cached/full forward 一致性测试 |
+| Muon + AdamW | Stable | 支持梯度累积和 f16 数值保护 |
+| Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；optimizer 精确恢复仍在路线图中 |
+| W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
+| Blocked KV cache | Reference | 固定页面布局参考实现，不等同于带动态页表的完整 PagedAttention |
+| Speculative decoding | Reference | greedy 模式数学无损；draft cache 仍会重建，需以基准确认加速 |
+| Group-normalized REINFORCE | Reference | 使用组内优势归一化，不是带 ratio clip 和 reference KL 的完整 GRPO |
+| Python code executor | Experimental | 有超时和输出限制，但不是 OS 级安全沙箱 |
+| Python/Rust 数值 parity 报告 | Planned | 目标是以 fixtures 支持明确的 f32/f16 误差预算 |
+
+完整实施计划见 [ROADMAP.md](ROADMAP.md)。
+
+## 核心模型与系统特性
 
 *   **独创 GPT Transformer 架构**：
     *   **RoPE 位置编码**：采用旋转位置编码（Rotary Position Embeddings），且 LM Head 与 Embedding 权重采用 **untied weights** 机制。
@@ -17,21 +34,21 @@
     *   **Smear Bigram 混入**：前向传播中以 bigram mixing 形式动态融合前一个 token 的 embedding。
     *   **Backout 残差扣除**：在最后 Logits 预测前，减去中层特征以有效扣除低级冗余信息。
     *   **Logit Softcap**：对输出 logits 应用 `15.0 * tanh(logits / 15.0)` 限制数值波动。
-*   **新一代正交优化器 (DistMuonAdamW)**：
+*   **Muon + AdamW 混合优化器**：
     *   **Muon 优化器**：对于 2D 线性层矩阵参数，使用高精度 **Polar Express Sign Method** 进行正交化，并融合 **NorMuon** 方差归约算法加速收敛。
-    *   **AdamW 优化器**：一维标量参数、Smear/Backout 门控及 Embedding 仍采用 AdamW 优化，且学习率比率与 PyTorch 保持完美一致。
-    *   **半精度稳定性 (f16)**：对所有 epsilons 与 clamp 范围进行 half-precision 适配，并为 `.sqrt()` 算子施加下界 clamp 保护，彻底消除了 WGPU 硬件加速下的 `NaN` 传播。
-*   **零拷贝与系统级优化**：
-    *   **静态度 attention 掩码**：在模型初始化时直接在 GPU 显存预计算 Attention 掩码并就地 slice 访问，完全消除 Host-to-Device 显存复制。
-    *   **零拷贝 GQA 重构**：将 `repeat_kv` 算子重构为 `.reshape()` 和虚拟广播 `.expand()`，实现 100% 内存连续性并消除了显存碎片。
-    *   **动态设备切换**：在 `common.rs` 中支持 `BURN_DEVICE=cpu` 环境监测，可在 CPU 后端下以 0.1 秒/步的速度执行无 JIT 开销的极速验证。
+    *   **AdamW 优化器**：一维标量参数、Smear/Backout 门控及 Embedding 使用 AdamW 更新。
+    *   **半精度稳定性 (f16)**：对 epsilon、clamp 和 `.sqrt()` 下界进行 half-precision 适配，并通过 WGPU 测试持续验证。
+*   **系统级优化**：
+    *   **静态 attention 掩码**：在模型初始化时预计算 Attention 掩码并在前向中 slice 访问。
+    *   **广播式 GQA**：`repeat_kv` 使用 `.reshape()` 与 `.expand()` 表达分组广播，减少显式复制。
+    *   **设备切换**：默认使用 WGPU，也可通过 `--features ndarray` 进行纯 CPU 快速验证。
 *   **低比特量化与生态对接 (Quantization & Serialization)**：
-    *   **低比特权重量化 (W8/W4 Quantization)**：实现了针对 Linear 投影层的 INT8/INT4 低比特权重只量化（W8A16/W4A16），支持通道行/块对称缩放，通过 Euclidean 移位进行 GPU 端的高性能自适应解包。
-    *   **双向 Safetensors 序列化**：实现了零拷贝的 `.safetensors` 模型参数导出与载入，支持权重转置还原（将 Burn Layout 转换回 PyTorch Layout `[O, I]`），与 HuggingFace 开源生态直接无缝对接。
-*   **高并发推理引擎特性 (Advanced Inference System)**：
-    *   **无损推测解码 (Speculative Decoding)**：基于双模型（Draft + Target）并发并行验证机制，搭配零拷贝 KV-Cache 回滚覆盖（Zero-Overhead KV-Cache Rollback），在 WGPU Metal 硬件加速下实现 100% 数学无损的推理加速。
-    *   **原生 PagedAttention 机制**：实现了基于物理页表（Block Table）的物理内存 KV 页缓存池（`PagedKVCache`），支持在自回归解码步骤中动态写入与按需重构，完全消除端侧部署下的显存碎片。
-    *   **GRPO 强化学习对齐**：整合了 DeepSeek-R1 风格的 GRPO 强化学习框架，无需 Critic 价值网络，使用组内相对奖励归一化计算优势函数，适配 WGPU f16 的半精度稳定性。
+    *   **低比特权重量化**：Linear 投影支持 W8A16/W4A16 和通道/块对称缩放。
+    *   **Safetensors 序列化**：支持模型参数导入导出和 Burn/PyTorch Linear layout 转置。
+    *   **统一 Artifact**：模型配置、tokenizer、权重和阶段 manifest 保存在同一目录中。
+*   **推理与对齐参考实现**：
+    *   **KV Cache 与推测解码**：包含 blocked cache、完整前向 parity 测试和 greedy speculative reference path。
+    *   **组内归一化 REINFORCE**：无需 Critic，按问题内 rollout reward 标准化优势。
 
 ---
 
@@ -43,12 +60,14 @@
     burn/
     ├── Cargo.toml
     ├── README.md               # 项目主说明文档
+    ├── ROADMAP.md              # 分阶段实施计划与验收标准
     ├── src/
     │   ├── lib.rs              # 导出所有子模块
+    │   ├── artifact.rs         # 统一实验产物、manifest 与阶段加载
     │   ├── common.rs           # 阶段 0: 设备检测（BURN_DEVICE=cpu支持）、类型与数值校验器
-    │   ├── tokenizer.rs        # 阶段 1: 工业级 BPE 分词器与并行化 Tokenizer
+    │   ├── tokenizer.rs        # 阶段 1: Byte-level BPE 与并行编码
     │   ├── dataset.rs          # 阶段 2: 数据集载入与 mmap 闪存加载支持
-    │   ├── dataloader.rs       # 阶段 2: DistributedDataLoader 批处理器
+    │   ├── dataloader.rs       # 阶段 2: 分片、预取与断点位置
     │   ├── gpt.rs              # 阶段 3: GPT 架构实现 (Rotary Embeddings, Softcap, GQA 等)
     │   ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 对接
     │   ├── optim.rs            # 阶段 4: Polar Express Muon + AdamW 混合正交优化器
@@ -56,16 +75,18 @@
     │   ├── engine/
     │   │   ├── calculator.rs   # 内置 Tool-Use 计算器状态机算子
     │   │   ├── pretrain.rs     # 阶段 4/5: 异步预训练工作流
-    │   │   ├── inference.rs    # 阶段 5: 支持 KV-Cache 的高并发自回归采样推理引擎
+    │   │   ├── inference.rs    # 阶段 5: 支持 KV-Cache 的批量自回归采样
+    │   │   ├── quant.rs        # W8/W4 权重量化与后端快路径
+    │   │   ├── rl.rs           # 组内归一化 REINFORCE 工作流
     │   │   ├── speculative.rs  # 阶段 5: 无损推测解码双模型推理引擎 (Draft + Target Model)
-    │   │   ├── sandbox.rs      # 阶段 6: 隔离 Python 子进程安全代码沙箱
+    │   │   ├── sandbox.rs      # 阶段 6: 带超时和输出限制的 Python 子进程
     │   │   ├── eval.rs         # 阶段 6: 评测子系统及 benchmark 评估 (gsm8k, spellingbee 等)
     │   │   └── sft.rs          # 阶段 6: 监督微调 (packed SFT) 工作流
     │   └── bin/
     │       ├── train.rs        # 训练入口 (支持 --pretrain, --sft, --rl 参数动态切换)
-    │       ├── eval.rs         # 评测与 DCLM CORE / ChatCORE 整合评估程序
+    │       ├── eval.rs         # 多任务评测入口
     │       ├── chat.rs         # CLI 命令行多轮流式对话客户端
-    │       └── chat_web.rs     # Web AXUM 高端多轮对话服务器
+    │       └── chat_web.rs     # Axum SSE 多轮对话服务器
 ```
 
 ---
@@ -73,76 +94,74 @@
 ## ⚡ 快速开始与命令指南
 
 ### 1. 运行单元测试
-执行完整的 17/17 个数值、架构及功能性单元测试：
+使用 NdArray 进行快速、可移植验证：
 ```bash
-cargo test --lib
+cargo test --features ndarray
 ```
 
-### 2. 基动预训练 (Pretraining)
-启动 Foundational Pretraining 并输出 BPB 评估：
+使用默认 WGPU 后端验证：
+
+```bash
+cargo test
+```
+
+### 2. 基础预训练 (Pretraining)
+启动小型合成数据预训练，输出 `runs/pretrain/` artifact：
 ```bash
 cargo run --bin train --release -- --pretrain
 ```
 
 ### 3. 监督微调 (SFT)
-启动 Packed SFT 微调循环，训练将以半精度 `f16` 在 GPU/Metal 上运行：
+加载 `runs/pretrain/`，执行 Packed SFT，并输出 `runs/sft/`：
 ```bash
 cargo run --bin train --release -- --sft
 ```
 
 ### 4. 在线强化学习对齐 (RL)
-启动基于 GSM8K 数据集的在线强化学习 REINFORCE 对齐：
+加载 `runs/sft/`，执行基于 GSM8K 的组内归一化 REINFORCE，并输出 `runs/rl/`：
 *   **在 GPU (Metal) 上运行**（注：在 macOS GPU 运行时自回归动态切片会导致 Metal 产生 JIT 编译热身耗时）：
     ```bash
     cargo run --bin train --release -- --rl
     ```
-*   **在 CPU 上极速运行**（规避任何 GPU JIT 编译，0.1 秒/步瞬时生成）：
+*   **选择 WGPU CPU device 运行**：
     ```bash
     BURN_DEVICE=cpu cargo run --bin train --release -- --rl
     ```
 
-### 5. 交互式对话体验 (Interactive Chat Experience)
-在模型预训练、监督微调（SFT）或强化学习（RL）对齐完成后，可直接启动交互式服务体验自回归生成与内置计算器 Tool-Use 状态机：
+### 5. 评测与交互式对话
+
+Eval、CLI Chat 和 Web Chat 默认按 `runs/rl`、`runs/sft`、`runs/pretrain` 的顺序加载最新可用 artifact。可通过 `NANOCHAT_ARTIFACT` 显式指定目录。
+
+```bash
+cargo run --bin eval --release
+NANOCHAT_ARTIFACT=runs/sft cargo run --bin chat --release
+```
 
 *   **CLI 命令行对话客户端**：
-    启动基于终端的交互式多轮对话客户端，体验自回归流式生成与内置的 Safe Calculator Tool-Use 状态机：
+    启动基于终端的交互式多轮对话客户端，体验自回归流式生成与内置 Calculator Tool-Use 状态机：
     ```bash
     cargo run --bin chat --release
     ```
     *（在 CPU 下极速体验自回归生成：`BURN_DEVICE=cpu cargo run --bin chat --release`）*
 
-*   **Web 高端对话服务端**：
-    启动基于 Axum 的流式 (SSE) 高并发 Web 交互服务器：
+*   **Web 对话服务端**：
+    启动基于 Axum 的流式 SSE Web 服务：
     ```bash
-    cargo run --bin chat_web --release
+    cargo run --features web --bin chat_web --release
     ```
-    启动后可直接在浏览器中访问 [http://127.0.0.1:8080](http://127.0.0.1:8080) 体验顺滑、高端的可视化流式聊天交互页面。
+    启动后可在浏览器中访问 [http://127.0.0.1:8080](http://127.0.0.1:8080)。
 
 ---
 
 ## 🛠️ 技术规范与开发准则
 
-1.  **泛型后端抽象**：
-    所有神经网络层、自注意力及优化器均基于泛型 `<B: Backend>` 或 `<B: AutodiffBackend>` 构建，确保在 WGPU (GPU)、Candle 甚至纯 CPU 等后端之间可零成本自由平移。
-2.  **极致的零 Placeholder**：
-    不存在任何 `todo!()` 或静态 Mock，所有代码均采用生产级错误处理（`Result<T, E>`）并进行完整的资源管控。
-3.  **零 Host-GPU 同步**：
-    除非进行必要的 Tensor 采样读取（如 BPE Decode），前向与反向梯度反传中绝不执行任何阻塞式的 `into_scalar()` 显存CPU回读，最大化 GPU Model FLOPS Utilization (MFU)。
+1.  **泛型后端抽象**：模型、注意力和优化器基于 `<B: Backend>` 或 `<B: AutodiffBackend>`；当前持续验证 WGPU 与 NdArray。
+2.  **参考实现优先**：先保留容易阅读和验证的实现，再为热点增加后端特化快路径。
+3.  **显式同步边界**：训练日志、评测和当前 CPU sampler 会发生设备回读；设备端 sampler 列入性能路线图。
+4.  **可验证主张**：Stable 能力需要测试，性能结论需要基准，parity 结论需要跨语言 fixtures。
 
 ---
 
 ## 🗺️ 未来展望与路线图 (Future Roadmap / TODO)
 
-面向未来，`nanochat-burn` 致力于从小巧、极简的学术复刻演进为**工业级端侧高性能 LLM 系统**。以下为项目的未来路线图规划与最新进展：
-
-### 1. 🏎️ 系统级与 GPU 算子性能极限优化 (Systems & Kernel Optimization)
-*   **CubeCL 手写融合算子**：利用 Burn 底层的 CubeCL 编写特化 GPU 算子（如 Fused RMSNorm, Fused RoPE 以及 Fused Softmax），最大化 GPU 硬件吞吐量 (MFU)。
-*   **FlashAttention 集成**：在 LibTorch/CUDA 后端下直接接入硬件级 FlashAttention-2/3 算子，实现企业级大吞吐训练。
-
-### 2. 🧠 前沿大模型算法升级 (Algorithmic & Modeling Features)
-*   **多头投机解码 (Medusa-style Speculative Decoding)**：在主模型上引入预测未来多 Token 的 Draft Heads 结构替代独立小模型，配合验证树算法，在无需额外模型的情况下成倍提升生成吞吐。
-*   **动态 RoPE 旋转位置编码插值 (Dynamic RoPE Scaling)**：引入 NTK-aware RoPE 或 YaRN 频率插值机制，支持模型在推理时动态扩展上下文长度限制。
-
-### 3. 🌐 高并发服务化与工程生态 (Serving & Ecosystem Integration)
-*   **连续批处理与迭代级调度 (Continuous Batching & Iteration-level Scheduling)**：在推理服务端打通 PagedAttention，支持在自回归迭代级别动态并入新请求和移除已完成请求，彻底消除了静态批处理的气泡。
-*   **流式注意力与 KV 页驱逐 (StreamingLLM & KV Page Eviction)**：实现 Attention Sinks + 滑动窗口的页缓存淘汰机制，以恒定的物理页池显存支持无限轮对话流。
+项目按“可信文档 → 可复现实验 → 数值 parity → 教学消融 → 推理性能 → 并发调度 → 对齐算法 → GPU 特化”的顺序推进。任务状态和发布标准统一维护在 [ROADMAP.md](ROADMAP.md)，不在 README 重复维护容易失真的功能清单。

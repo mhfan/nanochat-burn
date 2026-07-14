@@ -1,5 +1,5 @@
 
-use std::{borrow::Cow, cmp::Reverse, collections::HashMap, sync::OnceLock};
+use std::{borrow::Cow, cmp::Reverse, collections::{HashMap, HashSet}, sync::OnceLock};
 
 use fancy_regex::Regex;
 use rayon::prelude::*;
@@ -91,6 +91,13 @@ pub struct BpeTokenizer {
     /// Inverse mappings for decoding special tokens
     #[serde(skip)]
     pub inverse_special_tokens: HashMap<usize, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TokenizerFile {
+    version: u32,
+    mergeable_ranks: Vec<(Vec<u8>, usize)>,
+    special_tokens: HashMap<String, usize>,
 }
 
 impl BpeTokenizer {
@@ -433,14 +440,41 @@ impl BpeTokenizer {
     /// Save the tokenizer state to a JSON file
     pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
         let file = std::fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, self)?;
+        let mut mergeable_ranks: Vec<_> = self.mergeable_ranks.iter()
+            .map(|(bytes, &token)| (bytes.clone(), token)).collect();
+        mergeable_ranks.sort_unstable_by_key(|(_, token)| *token);
+        serde_json::to_writer_pretty(file, &TokenizerFile {
+            version: 1, mergeable_ranks, special_tokens: self.special_tokens.clone(),
+        })?;
         Ok(())
     }
 
     /// Load the tokenizer state from a JSON file
     pub fn load<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
         let file = std::fs::File::open(path)?;
-        let mut tokenizer: Self = serde_json::from_reader(file)?;
+        let saved: TokenizerFile = serde_json::from_reader(file)?;
+        if saved.version != 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                format!("unsupported tokenizer format version {}", saved.version)));
+        }
+        let rank_count = saved.mergeable_ranks.len();
+        let mergeable_ranks: HashMap<_, _> = saved.mergeable_ranks.into_iter().collect();
+        if mergeable_ranks.len() != rank_count ||
+            !SPECIAL_TOKENS.iter().all(|token| saved.special_tokens.contains_key(*token)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                "tokenizer contains duplicate ranks or missing special tokens"));
+        }
+        let mut token_ids = HashSet::with_capacity(mergeable_ranks.len() + saved.special_tokens.len());
+        if !mergeable_ranks.values().chain(saved.special_tokens.values())
+            .all(|token| token_ids.insert(*token)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                "tokenizer contains duplicate token IDs"));
+        }
+        let mut tokenizer = Self {
+            mergeable_ranks,
+            special_tokens: saved.special_tokens,
+            inverse_vocab: HashMap::new(), inverse_special_tokens: HashMap::new(),
+        };
         tokenizer.build_inverse_mappings();
         Ok(tokenizer)
     }

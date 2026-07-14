@@ -2,6 +2,8 @@
 *.jsonl
 eval/
 downloads/
+pretrain.bin
+pretrain.txt
 
 # Ignore checkpoints
 *.safetensors

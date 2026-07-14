@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod checkpoint;
 pub mod common;
 pub mod dataloader;

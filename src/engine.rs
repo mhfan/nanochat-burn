@@ -1,6 +1,7 @@
 
 use std::time::Instant;
 use burn::tensor::backend::{AutodiffBackend, Backend};
+use serde::{Deserialize, Serialize};
 
 use crate::{common::{int_tensor_2d, scalar_to_f32}, dataloader::DistributedDataLoader,
     gpt::Gpt, optim::MuonAdamW, tokenizer::BpeTokenizer,
@@ -17,7 +18,7 @@ pub mod sft;
 pub mod speculative;
 
 /// Training configuration hyperparameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
     pub num_iterations: usize,
     pub warmup_steps: usize,

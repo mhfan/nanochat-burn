@@ -2,7 +2,9 @@
 use std::{path::{Path, PathBuf}, time::Instant};
 use burn::tensor::backend::AutodiffBackend;
 
-use crate::{dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
+use crate::{artifact::{MetricRecord, PRETRAIN_ARTIFACT, TrainingStage, append_metric,
+        path_from_env, reset_metrics, save_artifact},
+    dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
     dataset::pretokenize_text_to_bin,
     engine::{TrainingConfig, TrainingEngine}, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
 };
@@ -51,17 +53,14 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("=============================================");
 
     // 1. Train tokenizer
-    let corpus = vec![
-        "BOS user assistant python output system pretraining deep learning transformer model \
-         optimizer",
-    ];
-    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 512);
+    let tokenizer = BpeTokenizer::train_from_iterator(
+        SYNTHETIC_PRETRAIN_CORPUS.iter().copied(), 512);
 
     // 2. Generate and pretokenize data
     let bin_path = generate_pretrain_dataset(&tokenizer);
 
     // 3. Configure training
-    let config = GptConfig { sequence_len: 16, vocab_size: tokenizer.get_vocab_size(),
+    let config = GptConfig { sequence_len: 256, vocab_size: tokenizer.get_vocab_size(),
         n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
         window_pattern: "L".to_string(), quantization: None,
     };
@@ -82,15 +81,25 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
 
     tracing::info!("Starting pretraining optimization iterations...");
     let start_time = Instant::now();
+    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", PRETRAIN_ARTIFACT);
+    reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     for i in 1..=training_config.num_iterations {
         let loss = engine.train_step(&mut loader, device).await;
         tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}", i,
             training_config.num_iterations, loss);
+        append_metric(&output, &MetricRecord { stage: TrainingStage::Pretrain, step: i, loss,
+            smoothed_loss: Some(loss), learning_rate: None, reward: None,
+            elapsed_secs: start_time.elapsed().as_secs_f64(),
+        }).unwrap_or_else(|error| panic!("failed to append pretrain metric: {error}"));
     }
 
     let elapsed = start_time.elapsed();
     tracing::info!("=============================================");
     tracing::info!("   Pretraining Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
+
+    save_artifact(&output, TrainingStage::Pretrain, &engine.model, &tokenizer,
+        Some(&training_config)).unwrap_or_else(|error| panic!("failed to save pretrain artifact: {error}"));
+    tracing::info!("Pretraining artifact saved to {:?}", output);
 }

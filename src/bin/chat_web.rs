@@ -5,10 +5,10 @@ use axum::{Json, Router, http::StatusCode, routing::{get, post},
     response::{Html, IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
 use nanochat_burn::{
+    artifact::{inference_artifact_path, load_artifact},
     common::{ModelBackend, ModelDevice, init_device},
     engine::{inference::{InferenceEngine, SamplingConfig}, quant::LinearOrQuantized},
-    gpt::{Gpt, GptConfig, QuantizationConfig},
-    tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
+    tokenizer::{Conversation, ConversationMessage, MessageContent},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -85,17 +85,6 @@ struct AppState {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         ).try_init();
 
-    // 1. Train BpeTokenizer
-    let corpus = vec![
-        "Hello! How can I help you today?",
-        "The planets of the solar system are: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune.",
-        "The capital of France is Paris.",
-        "If 5*x + 3 = 13, then x is <|python_start|>(13 - 3) / 5<|python_end|><|output_start|>2<|output_end|>.",
-        "System programming in Rust is extremely safe, concurrent, and high-performance.",
-    ];
-    let tokenizer = BpeTokenizer::train_from_iterator(corpus, 320);
-    let vocab_size = tokenizer.get_vocab_size();
-
     // Parse CLI parameters and Environment Variables for quantization
     let mut quantize_bits =
         env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
@@ -114,24 +103,18 @@ struct AppState {
         }
     }
 
-    // 2. Initialize GPT on WGPU
-    let mut config = GptConfig { sequence_len: 512, vocab_size, n_layer: 4, n_head: 4,
-        n_kv_head: 2, n_embd: 128, window_pattern: "SSL".to_string(), quantization: None,
-    };
-
-    if let Some(bits) = quantize_bits {
-        config.quantization = Some(QuantizationConfig { bits, block_size: quantize_block });
-    }
-
     let device = init_device();
-    let gpt_fp: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
-
-    let gpt = if let Some(q_config) = config.quantization {
+    let artifact_path = inference_artifact_path();
+    let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
+        .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
+    println!("Loaded {:?} artifact from {:?}", artifact.manifest.stage, artifact_path);
+    let tokenizer = artifact.tokenizer;
+    let gpt = if let Some(bits) = quantize_bits {
         println!("Dynamically quantizing web server model to INT{} (block = {})...",
-            q_config.bits, q_config.block_size);
-        gpt_fp.quantize(q_config.bits, q_config.block_size)
+            bits, quantize_block);
+        artifact.model.quantize(bits, quantize_block)
     } else {
-        gpt_fp.into_linear_or_quantized()
+        artifact.model.into_linear_or_quantized()
     };
 
     let engine = InferenceEngine::new(gpt, tokenizer);
@@ -174,7 +157,10 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
         });
 
         let tokenizer = &engine_ref.engine.tokenizer;
-        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, 500);
+        let max_tok = payload.max_tokens.unwrap_or(256)
+            .min(engine_ref.engine.model.config.sequence_len.saturating_sub(1));
+        let prompt_limit = engine_ref.engine.model.config.sequence_len - max_tok;
+        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, prompt_limit);
 
         let special_tokens = tokenizer.special_token_ids();
         let mut clean_prompt = prompt_tokens;
@@ -184,7 +170,6 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
 
         let top_k = payload.top_k.or(Some(50));
         let temp = payload.temperature.unwrap_or(0.7);
-        let max_tok = payload.max_tokens.unwrap_or(256);
         let sampling = SamplingConfig { temperature: temp, top_k, repetition_penalty: 1.2, };
 
         let (mut gen_state, mut cur_logits) =
