@@ -1,12 +1,12 @@
 
-use std::{path::Path, time::Instant};
+use std::time::Instant;
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 
-use crate::{artifact::{MetricRecord, RL_ARTIFACT, SFT_ARTIFACT, TrainingStage, append_metric,
-        load_artifact, path_from_env, reset_metrics, save_artifact},
+use crate::{artifact::{MetricRecord, TrainingStage, append_metric, load_artifact, path_from_env,
+        reset_metrics, save_artifact, save_experiment_config},
     common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
     engine::inference::{GenerationConfig, InferenceEngine, SamplingConfig},
-    optim::MuonAdamW,
+    experiment::ExperimentConfig, optim::MuonAdamW,
 };
 
 fn grpo_advantages(rewards: &[f32]) -> Vec<f32> {
@@ -40,27 +40,29 @@ fn flatten_rollouts(rollouts: &[Vec<usize>], masks: &[Vec<u8>], max_len: usize,
     (flat_inputs, flat_targets)
 }
 
-pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
+pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
+    experiment: &ExperimentConfig) {
     tracing::info!("=============================================");
     tracing::info!("   Starting Reinforcement Learning (RL)      ");
     tracing::info!("=============================================");
 
-    let rl_dataset_path = "data/eval/gsm8k.jsonl";
-    if !Path::new(rl_dataset_path).exists() {
+    experiment.validate().unwrap_or_else(|error| panic!("invalid experiment config: {error}"));
+    let config = &experiment.rl;
+    if !config.dataset_path.exists() {
         tracing::error!(
             "GSM8K RL dataset not found! Please run synthetic dataset generator first."
         );
         return;
     }
 
-    let dataset = SftDataset::new(rl_dataset_path).expect("Failed to load GSM8K RL dataset");
+    let dataset = SftDataset::new(&config.dataset_path).expect("Failed to load GSM8K RL dataset");
     if dataset.conversations.is_empty() {
         tracing::error!("GSM8K RL dataset is empty");
         return;
     }
     tracing::info!("Loaded RL dataset with {} questions", dataset.conversations.len());
 
-    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", SFT_ARTIFACT);
+    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", experiment.artifacts.sft.clone());
     let loaded = load_artifact::<B>(&input, device)
         .unwrap_or_else(|error| panic!("failed to load SFT artifact {input:?}: {error}"));
     tracing::info!("Loaded {:?} artifact from {:?}", loaded.manifest.stage, input);
@@ -68,13 +70,12 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
     let assistant_end = tokenizer.special_token_ids().assistant_end;
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
 
-    let (num_steps, learning_rate) = (10, 1e-3);
-    let batch_size = 2; // number of questions per step
-    let num_samples = 4; // number of rollouts per question
+    let (num_steps, learning_rate) = (config.num_steps, config.learning_rate);
+    let (batch_size, num_samples) = (config.batch_size, config.num_samples);
 
     tracing::info!("Starting RL training loop for {} steps...", num_steps);
     let (start_time, mut step) = (Instant::now(), 0);
-    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", RL_ARTIFACT);
+    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", experiment.artifacts.rl.clone());
     reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     while step < num_steps {
@@ -100,9 +101,10 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
             // Sample rollouts (returns both results and precise masks)
             tracing::info!("  Rollout for question {}/{} (conv {}), prompt len = {}...",
                 q_idx + 1, batch_size, conv_idx, prompt_len);
-            let generation = GenerationConfig { max_tokens: 128,
+            let generation = GenerationConfig { max_tokens: config.max_generation_tokens,
                 sampling: SamplingConfig {
-                    temperature: 1.0, top_k: Some(50), repetition_penalty: 1.0,
+                    temperature: config.temperature, top_k: config.top_k,
+                    repetition_penalty: config.repetition_penalty,
                 },
             };
             let (rollouts, masks) =
@@ -202,6 +204,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
 
     save_artifact(&output, TrainingStage::ReinforcementLearning, &model, &tokenizer, None)
         .unwrap_or_else(|error| panic!("failed to save RL artifact: {error}"));
+    save_experiment_config(&output, experiment)
+        .unwrap_or_else(|error| panic!("failed to save experiment config: {error}"));
     tracing::info!("RL artifact saved to {:?}", output);
 }
 
@@ -212,6 +216,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device) {
         let _ = tracing::subscriber::set_global_default(subscriber);
 
         let device = crate::common::init_device();
-        run_rl_training::<crate::common::ModelAutodiffBackend>(&device);
+        let config = ExperimentConfig::load(crate::experiment::DEFAULT_EXPERIMENT_CONFIG).unwrap();
+        run_rl_training::<crate::common::ModelAutodiffBackend>(&device, &config);
     }
 }

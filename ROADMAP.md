@@ -25,7 +25,7 @@
 
 ## M1：可复现实验与三阶段训练闭环
 
-- [ ] 引入统一实验配置，替代训练入口中的硬编码超参数。
+- [x] 引入统一实验配置，替代训练入口中的硬编码超参数。
 - [x] 定义标准 artifact 目录和 manifest。
 - [x] 保存模型配置、tokenizer、模型权重和训练阶段。
 - [x] 保存并追加结构化训练指标。
@@ -41,6 +41,7 @@
 ```text
 runs/<run-name>/
 ├── manifest.json
+├── experiment.toml
 ├── config.json
 ├── tokenizer.json
 ├── model.safetensors

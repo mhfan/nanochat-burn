@@ -14,6 +14,7 @@
 | GPT、RoPE、GQA、SWA、QK Norm、ReLU² | Stable | 有单元测试和 cached/full forward 一致性测试 |
 | Muon + AdamW | Stable | 支持梯度累积和 f16 数值保护 |
 | Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 支持 optimizer 与数据位置精确恢复 |
+| TOML 实验配置 | Experimental | 一个强类型配置统一模型、数据、三阶段超参数和 artifact 链路，并随产物保存 |
 | W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
 | Blocked KV cache | Reference | 固定页面布局参考实现，不等同于带动态页表的完整 PagedAttention |
 | Speculative decoding | Reference | greedy 模式数学无损；draft cache 仍会重建，需以基准确认加速 |
@@ -61,6 +62,7 @@
     ├── Cargo.toml
     ├── README.md               # 项目主说明文档
     ├── ROADMAP.md              # 分阶段实施计划与验收标准
+    ├── configs/mini.toml       # 默认 mini-LLM 三阶段实验配置
     ├── src/
     │   ├── lib.rs              # 导出所有子模块
     │   ├── artifact.rs         # 统一实验产物、manifest 与阶段加载
@@ -72,6 +74,7 @@
     │   ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 对接
     │   ├── optim.rs            # 阶段 4: Polar Express Muon + AdamW 混合正交优化器
     │   ├── engine.rs           # 阶段 4/5: 训练与推理引擎底座、BPB 评估器
+    │   ├── experiment.rs       # 强类型 TOML 实验配置、校验与持久化
     │   ├── engine/
     │   │   ├── calculator.rs   # 内置 Tool-Use 计算器状态机算子
     │   │   ├── pretrain.rs     # 阶段 4/5: 异步预训练工作流
@@ -106,10 +109,24 @@ cargo test
 ```
 
 ### 2. 基础预训练 (Pretraining)
-启动小型合成数据预训练，输出 `runs/pretrain/` artifact：
+训练命令默认读取 `configs/mini.toml`。该文件统一描述模型、随机种子、数据路径、三阶段训练参数和
+artifact 链路；未知字段或非法组合会在设备初始化前报错。启动小型合成数据预训练：
 ```bash
 cargo run --bin train --release -- --pretrain
 ```
+
+使用自定义配置：
+
+```bash
+cargo run --bin train --release -- --pretrain --config configs/mini.toml
+NANOCHAT_CONFIG=configs/mini.toml cargo run --bin train --release -- --pretrain
+```
+
+每个训练产物都会保存一份实际配置为 `experiment.toml`。
+
+`pretrain.model.sequence_len` 是模型的最大上下文容量，随模型 artifact 固定。Pretrain 和 SFT
+默认继承该值；若某阶段需要更短的训练序列，可在对应的 `training` 表中增加
+`sequence_length = 128`，但不能超过模型容量。RL 的 `max_generation_tokens` 是生成预算，不会改变模型容量。
 
 预训练默认每 5 步更新一次可恢复 checkpoint；中断后从同一 artifact 继续：
 

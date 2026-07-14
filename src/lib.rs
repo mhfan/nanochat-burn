@@ -4,6 +4,7 @@ pub mod common;
 pub mod dataloader;
 pub mod dataset;
 pub mod engine;
+pub mod experiment;
 pub mod gpt;
 pub mod optim;
 pub mod tokenizer;

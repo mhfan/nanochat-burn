@@ -4,8 +4,8 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{checkpoint::{load_safetensors_to_gpt, save_gpt_to_safetensors},
-    engine::{TrainerState, TrainingConfig}, gpt::{Gpt, GptConfig}, optim::MuonAdamW,
-    tokenizer::BpeTokenizer,
+    engine::{TrainerState, TrainingConfig}, experiment::ExperimentConfig,
+    gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 pub const PRETRAIN_ARTIFACT: &str = "runs/pretrain";
@@ -18,6 +18,7 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 const MODEL_FILE: &str = "model.safetensors";
 const OPTIMIZER_FILE: &str = "optimizer.safetensors";
 const TRAINER_STATE_FILE: &str = "trainer-state.json";
+const EXPERIMENT_FILE: &str = "experiment.toml";
 const METRICS_FILE: &str = "metrics.jsonl";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub struct ArtifactManifest {
     pub optimizer_file: Option<String>,
     #[serde(default)]
     pub trainer_state_file: Option<String>,
+    #[serde(default)]
+    pub experiment_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,8 +69,8 @@ pub struct MetricRecord {
 
 fn default_metrics_file() -> String { METRICS_FILE.to_string() }
 
-pub fn path_from_env(variable: &str, default: &str) -> PathBuf {
-    std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(default))
+pub fn path_from_env(variable: &str, default: impl Into<PathBuf>) -> PathBuf {
+    std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| default.into())
 }
 
 pub fn inference_artifact_path() -> PathBuf {
@@ -146,7 +149,7 @@ pub fn save_artifact<B: Backend>(root: impl AsRef<Path>, stage: TrainingStage,
         schema_version: SCHEMA_VERSION, stage, created_unix_secs,
         config_file: CONFIG_FILE.to_string(), tokenizer_file: TOKENIZER_FILE.to_string(),
         model_file: MODEL_FILE.to_string(), metrics_file: METRICS_FILE.to_string(),
-        optimizer_file: None, trainer_state_file: None,
+        optimizer_file: None, trainer_state_file: None, experiment_file: None,
     };
     write_json(root.join(MANIFEST_FILE), &manifest)
 }
@@ -178,6 +181,25 @@ pub fn load_resume_state<B: AutodiffBackend>(root: impl AsRef<Path>, n_layer: us
     let optimizer = MuonAdamW::load_state(root.join(optimizer_file), n_layer, device)?;
     let trainer = read_json(root.join(trainer_state_file))?;
     Ok((optimizer, trainer))
+}
+
+pub fn save_experiment_config(root: impl AsRef<Path>, config: &ExperimentConfig)
+    -> Result<(), String> {
+    let root = root.as_ref();
+    let mut manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+    config.save(root.join(EXPERIMENT_FILE))?;
+    manifest.experiment_file = Some(EXPERIMENT_FILE.to_string());
+    write_json(root.join(MANIFEST_FILE), &manifest)
+}
+
+pub fn load_experiment_config(root: impl AsRef<Path>) -> Result<ExperimentConfig, String> {
+    let root = root.as_ref();
+    let manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+    let file = manifest.experiment_file
+        .ok_or_else(|| "artifact does not contain an experiment config".to_string())?;
+    ExperimentConfig::load(root.join(file))
 }
 
 pub fn load_artifact<B: Backend>(root: impl AsRef<Path>, device: &B::Device)
@@ -226,7 +248,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         use burn::tensor::Tensor;
         use crate::{common::{ModelAutodiffBackend, ModelBackend, init_device,
                 tensor_data_to_f32_vec}, dataloader::DataLoaderPosition,
-            optim::AdamWState,
+            experiment::DEFAULT_EXPERIMENT_CONFIG, optim::AdamWState,
         };
 
         let device = init_device();
@@ -257,6 +279,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             }),
         };
         save_resume_state(&root, &optimizer, &trainer).unwrap();
+        let experiment = ExperimentConfig::load(DEFAULT_EXPERIMENT_CONFIG).unwrap();
+        save_experiment_config(&root, &experiment).unwrap();
         append_metric(&root, &MetricRecord { stage: TrainingStage::Pretrain, step: 4,
             loss: 0.5, smoothed_loss: Some(0.5), learning_rate: Some(1e-3), reward: None,
             elapsed_secs: 2.0,
@@ -265,9 +289,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         let loaded = load_artifact::<ModelBackend>(&root, &device).unwrap();
         let (optimizer, restored_trainer) =
             load_resume_state::<ModelAutodiffBackend>(&root, config.n_layer, &device).unwrap();
+        let restored_experiment = load_experiment_config(&root).unwrap();
 
         assert_eq!(loaded.manifest.stage, TrainingStage::Pretrain);
         assert_eq!(loaded.manifest.optimizer_file.as_deref(), Some(OPTIMIZER_FILE));
+        assert_eq!(loaded.manifest.experiment_file.as_deref(), Some(EXPERIMENT_FILE));
         assert_eq!(loaded.config.model.sequence_len, config.sequence_len);
         assert_eq!(loaded.tokenizer.encode_ordinary("artifact"),
             tokenizer.encode_ordinary("artifact"));
@@ -277,6 +303,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         assert_eq!(metric.step, 1);
         assert_eq!(metric.loss, 1.25);
         assert_eq!(restored_trainer, trainer);
+        assert_eq!(restored_experiment, experiment);
         assert_eq!(tensor_data_to_f32_vec(optimizer.wte.unwrap().exp_avg.into_data()),
             vec![1.0, 2.0]);
         fs::remove_dir_all(root).ok();

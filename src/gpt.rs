@@ -24,7 +24,7 @@ pub struct QuantizationConfig {
     pub block_size: usize, // e.g. 32, 64, or 0 (row-wise)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GptConfig {
     pub sequence_len: usize,
     pub vocab_size: usize,

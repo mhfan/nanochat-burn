@@ -1,12 +1,12 @@
 
-use std::{iter, path::Path, time::Instant};
+use std::{iter, time::Instant};
 use burn::tensor::backend::AutodiffBackend;
 
-use crate::{artifact::{MetricRecord, PRETRAIN_ARTIFACT, SFT_ARTIFACT, TrainingStage,
-        append_metric, load_artifact, path_from_env, reset_metrics, save_artifact},
+use crate::{artifact::{MetricRecord, TrainingStage, append_metric, load_artifact, path_from_env,
+        reset_metrics, save_artifact, save_experiment_config},
     common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
-    engine::{TrainingConfig, get_lr_multiplier, get_weight_decay}, optim::MuonAdamW,
-    tokenizer::BpeTokenizer,
+    engine::{get_lr_multiplier, get_weight_decay}, experiment::ExperimentConfig,
+    optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
 pub struct SftPacker {
@@ -90,42 +90,41 @@ fn flatten_sft_batch(rows: &[Vec<usize>], mask_rows: &[Vec<i32>], row_lengths: &
     (flat_inputs, flat_targets)
 }
 
-pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
+pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
+    experiment: &ExperimentConfig) {
     tracing::info!("=============================================");
     tracing::info!("   Starting Supervised Fine-Tuning (SFT)     ");
     tracing::info!("=============================================");
 
-    let sft_dataset_path = "data/sft_train.jsonl";
-    if !Path::new(sft_dataset_path).exists() {
+    experiment.validate().unwrap_or_else(|error| panic!("invalid experiment config: {error}"));
+    let config = &experiment.sft;
+    if !config.dataset_path.exists() {
         tracing::error!("SFT dataset not found! Please run synthetic dataset generator first.");
         return;
     }
 
-    let dataset = SftDataset::new(sft_dataset_path).expect("Failed to load SFT dataset");
+    let dataset = SftDataset::new(&config.dataset_path).expect("Failed to load SFT dataset");
     tracing::info!("Loaded SFT dataset with {} conversations", dataset.conversations.len());
 
-    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", PRETRAIN_ARTIFACT);
+    let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", experiment.artifacts.pretrain.clone());
     let loaded = load_artifact::<B>(&input, device)
         .unwrap_or_else(|error| panic!("failed to load pretrain artifact {input:?}: {error}"));
     tracing::info!("Loaded {:?} artifact from {:?}", loaded.manifest.stage, input);
     let (mut model, tokenizer) = (loaded.model, loaded.tokenizer);
-    let config = model.config.clone();
     let mut optimizer = MuonAdamW::new(model.config.n_layer);
     let mut packer = SftPacker::new(&dataset, &tokenizer);
 
-    let (batch_size, max_seq_len) = (4, config.sequence_len);
+    let training_config = config.training.resolve(model.config.sequence_len)
+        .unwrap_or_else(|error| panic!("invalid SFT training config: {error}"));
+    let (batch_size, max_seq_len) =
+        (training_config.device_batch_size, training_config.sequence_length);
     let bos_token = tokenizer.get_bos_token_id();
-
-    let training_config = TrainingConfig {
-        num_iterations: 20, warmup_steps: 5, warmdown_ratio: 0.5, final_lr_frac: 0.0,
-        learning_rate: 1e-4, weight_decay: 0.0, device_batch_size: batch_size,
-        sequence_length: max_seq_len, total_batch_size: batch_size,
-    };
-    let TrainingConfig { warmup_steps, num_iterations, learning_rate, weight_decay, .. } =
-        training_config;
+    let (warmup_steps, num_iterations, learning_rate, weight_decay) =
+        (training_config.warmup_steps, training_config.num_iterations,
+            training_config.learning_rate, training_config.weight_decay);
     tracing::info!("Starting SFT training loop for {} iterations...", num_iterations);
     let (start_time, mut smooth_loss) = (Instant::now(), 0.0);
-    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", SFT_ARTIFACT);
+    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", experiment.artifacts.sft.clone());
     reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     for step in 1..=num_iterations {
@@ -148,7 +147,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let grads = loss.backward();
 
         let schedule_step = step - 1;
-        let lrm = get_lr_multiplier(schedule_step, num_iterations, warmup_steps, 0.5, 0.0);
+        let lrm = get_lr_multiplier(schedule_step, num_iterations, warmup_steps,
+            training_config.warmdown_ratio, training_config.final_lr_frac);
         let wd = get_weight_decay(schedule_step, num_iterations, weight_decay);
         let lr = learning_rate * lrm;
 
@@ -158,7 +158,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
         let loss_val = scalar_to_f32(loss.into_scalar());
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
 
-        if step % 5 == 0 || step == num_iterations {
+        if step % config.log_interval == 0 || step == num_iterations {
             tracing::info!("Step {:03}/{:03} | lr: {:.6} | Loss: {:.4} (smooth: {:.4})",
                 step, num_iterations, lr, loss_val, smooth_loss);
         }
@@ -175,6 +175,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device) {
 
     save_artifact(&output, TrainingStage::Sft, &model, &tokenizer, Some(&training_config))
         .unwrap_or_else(|error| panic!("failed to save SFT artifact: {error}"));
+    save_experiment_config(&output, experiment)
+        .unwrap_or_else(|error| panic!("failed to save experiment config: {error}"));
     tracing::info!("SFT artifact saved to {:?}", output);
 }
 

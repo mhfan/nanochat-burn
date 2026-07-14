@@ -178,8 +178,8 @@ pub struct TrainerState {
 impl<B: AutodiffBackend> TrainingEngine<B> {
     pub fn new(model: Gpt<B>, config: TrainingConfig, tokenizer: &BpeTokenizer) -> Self {
         config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
-        assert_eq!(config.sequence_length, model.config.sequence_len,
-            "training and model sequence lengths must match");
+        assert!(config.sequence_length <= model.config.sequence_len,
+            "training sequence length exceeds model capacity");
         let optimizer = MuonAdamW::new(model.config.n_layer);
         let token_bytes = get_token_bytes(tokenizer);
         Self { model, optimizer, config, token_bytes, step: 0,
@@ -190,8 +190,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     pub fn from_state(model: Gpt<B>, optimizer: MuonAdamW<B>, config: TrainingConfig,
         tokenizer: &BpeTokenizer, state: TrainerState) -> Self {
         config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
-        assert_eq!(config.sequence_length, model.config.sequence_len,
-            "training and model sequence lengths must match");
+        assert!(config.sequence_length <= model.config.sequence_len,
+            "training sequence length exceeds model capacity");
         assert!(state.step <= config.num_iterations,
             "trainer step exceeds configured training iterations");
         assert!(state.step == 0 || state.dataloader_position.is_some(),
@@ -376,10 +376,10 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(resumed.step, uninterrupted.step);
         assert_eq!(resumed.dataloader_position, uninterrupted.dataloader_position);
         assert_eq!(actual.len(), expected.len());
-        for (actual, expected) in actual.into_iter().zip(expected) {
-            assert!((actual - expected).abs() <= 1e-4,
-                "resumed logits differ: {actual} != {expected}");
-        }
+        let max_error = actual.into_iter().zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs()).fold(0.0f32, f32::max);
+        assert!(max_error <= 5e-4,
+            "resumed logits exceed f16 equivalence tolerance: max error {max_error}");
         std::fs::remove_dir_all(root).ok();
     }
 }

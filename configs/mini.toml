@@ -1,0 +1,57 @@
+schema_version = 1
+seed = 42
+
+[artifacts]
+pretrain = "runs/pretrain"
+sft = "runs/sft"
+rl = "runs/rl"
+
+[pretrain]
+corpus_repeats = 10
+text_path = "data/pretrain.txt"
+token_path = "data/pretrain.bin"
+checkpoint_interval = 5
+
+[pretrain.model]
+sequence_len = 256
+vocab_size = 512
+n_layer = 2
+n_head = 2
+n_kv_head = 1
+n_embd = 16
+window_pattern = "L"
+
+[pretrain.training]
+num_iterations = 15
+warmup_steps = 3
+warmdown_ratio = 0.3
+final_lr_frac = 0.1
+learning_rate = 0.001
+weight_decay = 0.1
+device_batch_size = 2
+total_batch_size = 4
+
+[sft]
+dataset_path = "data/sft_train.jsonl"
+log_interval = 5
+
+[sft.training]
+num_iterations = 20
+warmup_steps = 5
+warmdown_ratio = 0.5
+final_lr_frac = 0.0
+learning_rate = 0.0001
+weight_decay = 0.0
+device_batch_size = 4
+total_batch_size = 4
+
+[rl]
+dataset_path = "data/eval/gsm8k.jsonl"
+num_steps = 10
+learning_rate = 0.001
+batch_size = 2
+num_samples = 4
+max_generation_tokens = 128
+temperature = 1.0
+top_k = 50
+repetition_penalty = 1.0
