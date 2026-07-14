@@ -4,7 +4,7 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{checkpoint::{load_safetensors_to_gpt, save_gpt_to_safetensors},
-    engine::{TrainerState, TrainingConfig}, experiment::ExperimentConfig,
+    engine::{TrainerState, TrainingConfig}, experiment::{ArtifactPaths, ExperimentConfig},
     gpt::{Gpt, GptConfig}, optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
@@ -74,10 +74,18 @@ pub fn path_from_env(variable: &str, default: impl Into<PathBuf>) -> PathBuf {
 }
 
 pub fn inference_artifact_path() -> PathBuf {
+    select_inference_artifact([
+        PathBuf::from(RL_ARTIFACT), PathBuf::from(SFT_ARTIFACT), PathBuf::from(PRETRAIN_ARTIFACT)])
+}
+
+pub fn configured_inference_artifact_path(paths: &ArtifactPaths) -> PathBuf {
+    select_inference_artifact([paths.rl.clone(), paths.sft.clone(), paths.pretrain.clone()])
+}
+
+fn select_inference_artifact(paths: [PathBuf; 3]) -> PathBuf {
     if let Some(path) = std::env::var_os("NANOCHAT_ARTIFACT") { return PathBuf::from(path); }
-    [RL_ARTIFACT, SFT_ARTIFACT, PRETRAIN_ARTIFACT].into_iter()
-        .map(PathBuf::from).find(|path| path.join(MANIFEST_FILE).is_file())
-        .unwrap_or_else(|| PathBuf::from(RL_ARTIFACT))
+    let fallback = paths[0].clone();
+    paths.into_iter().find(|path| path.join(MANIFEST_FILE).is_file()).unwrap_or(fallback)
 }
 
 pub fn reset_metrics(root: impl AsRef<Path>) -> Result<(), String> {

@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::{common::{extract_answer, int_tensor_2d, read_jsonl}, gpt::Gpt,
     engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
         sandbox::execute_code},
+    experiment::{EvalConfig, EvalTaskKind},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage},
 };
 
@@ -16,6 +17,12 @@ pub struct EvalItem {
     pub entry_point: Option<String>,  // For HumanEval
     pub test: Option<String>,         // For HumanEval
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvalScore { pub name: String, pub score: f32 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvalReport { pub scores: Vec<EvalScore>, pub aggregate: Option<f32> }
 
 pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalItem>> {
     read_jsonl(path)
@@ -32,8 +39,8 @@ fn fit_prompt(mut tokens: Vec<usize>, max_len: usize) -> Vec<usize> {
 }
 
 fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeTokenizer,
-    prompt_tokens: &[usize], device: &B::Device) -> String {
-    let config = GenerationConfig { max_tokens: 128, sampling: SamplingConfig::greedy() };
+    prompt_tokens: &[usize], max_tokens: usize, device: &B::Device) -> String {
+    let config = GenerationConfig { max_tokens, sampling: SamplingConfig::greedy() };
     let (rollouts, _) = engine.generate_batch(prompt_tokens, 1, config, device);
     tokenizer.decode(&rollouts[0][prompt_tokens.len()..])
 }
@@ -78,14 +85,15 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
 }
 
 pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
-    items: &[EvalItem], device: &B::Device) -> f32 {
+    items: &[EvalItem], max_tokens: usize, device: &B::Device) -> f32 {
     let (mut correct, mut total) = (0, 0);
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
         let prompt = fit_prompt(prompt_tokens(tokenizer, item),
             model.config.sequence_len.saturating_sub(1).max(1));
-        let generated_text = generate_completion(&inference_engine, tokenizer, &prompt, device);
+        let generated_text =
+            generate_completion(&inference_engine, tokenizer, &prompt, max_tokens, device);
 
         let ground_truth_text = item.messages.last().unwrap().content.to_string_content();
         let (pred_ans, gt_ans) =
@@ -99,15 +107,15 @@ pub fn evaluate_generative<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
 }
 
 pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
-    items: &[EvalItem], device: &B::Device) -> f32 {
+    items: &[EvalItem], max_tokens: usize, device: &B::Device) -> f32 {
     let (mut correct, mut total) = (0, 0);
     let inference_engine = InferenceEngine::new(model.clone(), tokenizer.clone());
 
     for item in items {
         let prompt = fit_prompt(prompt_tokens(tokenizer, item),
             model.config.sequence_len.saturating_sub(1).max(1));
-        let generated_completion = generate_completion(&inference_engine, tokenizer, &prompt,
-            device);
+        let generated_completion =
+            generate_completion(&inference_engine, tokenizer, &prompt, max_tokens, device);
 
         let prompt_pure_code = item.messages[0].content.to_string_content();
         let full_code = format!("{}{}", prompt_pure_code, generated_completion);
@@ -122,84 +130,62 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     accuracy(correct, total)
 }
 
-pub fn run_all_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
-    device: &B::Device) {
+pub fn run_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
+    config: &EvalConfig, device: &B::Device) -> EvalReport {
     tracing::info!("=============================================");
     tracing::info!("   Starting ChatCORE Evaluation Harness      ");
     tracing::info!("=============================================");
 
-    let tasks = [
-        ("ARC-Easy", "data/eval/arc_easy.jsonl", true),
-        ("ARC-Challenge", "data/eval/arc_challenge.jsonl", true),
-        ("MMLU", "data/eval/mmlu.jsonl", true),
-        ("GSM8K", "data/eval/gsm8k.jsonl", false),
-        ("SpellingBee", "data/eval/spellingbee.jsonl", false),
-    ];
-
     let mut scores = Vec::new();
 
-    for (name, path, is_cat) in tasks {
-        if !Path::new(path).exists() {
-            tracing::warn!("Task {} dataset not found at {}, skipping.", name, path);
+    for task in &config.tasks {
+        if !task.path.exists() {
+            tracing::warn!("Task {} dataset not found at {:?}, skipping.", task.name, task.path);
             continue;
         }
 
-        let items = match load_eval_dataset(path) {
+        let items = match load_eval_dataset(&task.path) {
             Ok(items) => items,
             Err(error) => {
-                tracing::warn!("Failed to load task {name} from {path}: {error}");
+                tracing::warn!("Failed to load task {} from {:?}: {error}", task.name, task.path);
                 continue;
             }
         };
         if items.is_empty() {
-            tracing::warn!("Task {} loaded 0 items, skipping.", name);
+            tracing::warn!("Task {} loaded 0 items, skipping.", task.name);
             continue;
         }
 
-        tracing::info!("Evaluating {} ({} items)...", name, items.len());
-        let score = if is_cat {
-            evaluate_categorical(model, tokenizer, &items, device)
-        } else {
-            evaluate_generative(model, tokenizer, &items, device)
+        tracing::info!("Evaluating {} ({} items)...", task.name, items.len());
+        let score = match task.kind {
+            EvalTaskKind::Categorical => evaluate_categorical(model, tokenizer, &items, device),
+            EvalTaskKind::Generative => evaluate_generative(model, tokenizer, &items,
+                config.max_generation_tokens, device),
+            EvalTaskKind::HumanEval => evaluate_humaneval(model, tokenizer, &items,
+                config.max_generation_tokens, device),
         };
 
-        tracing::info!("> {} Score: {:.2}%", name, score * 100.0);
-        scores.push((name.to_string(), score));
-    }
-
-    let humaneval_path = "data/eval/humaneval.jsonl";
-    if Path::new(humaneval_path).exists() {
-        let items = match load_eval_dataset(humaneval_path) {
-            Ok(items) => items,
-            Err(error) => {
-                tracing::warn!("Failed to load HumanEval from {humaneval_path}: {error}");
-                Vec::new()
-            }
-        };
-        if !items.is_empty() {
-            tracing::info!("Evaluating HumanEval ({} items)...", items.len());
-            let score = evaluate_humaneval(model, tokenizer, &items, device);
-            tracing::info!("> HumanEval Score: {:.2}%", score * 100.0);
-            scores.push(("HumanEval".to_string(), score));
-        }
+        tracing::info!("> {} Score: {:.2}%", task.name, score * 100.0);
+        scores.push(EvalScore { name: task.name.clone(), score });
     }
 
     if scores.is_empty() {
         tracing::error!("No tasks were evaluated!");
-        return;
+        return EvalReport { scores, aggregate: None };
     }
 
-    let chatcore: f32 = scores.iter().map(|(_, s)| s).sum::<f32>() / (scores.len() as f32);
+    let chatcore = scores.iter().map(|score| score.score).sum::<f32>() / scores.len() as f32;
 
     tracing::info!("=============================================");
     tracing::info!("   EVALUATION REPORT SUMMARY                 ");
     tracing::info!("=============================================");
-    for (name, score) in &scores {
-        tracing::info!(" - {:<15}: {:.2}%", name, score * 100.0);
+    for score in &scores {
+        tracing::info!(" - {:<15}: {:.2}%", score.name, score.score * 100.0);
     }
     tracing::info!("---------------------------------------------");
     tracing::info!("   ChatCORE Metric score: {:.2}%             ", chatcore * 100.0);
     tracing::info!("=============================================");
+    EvalReport { scores, aggregate: Some(chatcore) }
 }
 
 #[cfg(test)] mod tests { use super::*;

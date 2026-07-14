@@ -1,0 +1,11 @@
+Mira built a tiny language machine in a quiet workshop. She gave it short sentences about Rust, numbers, and careful problem solving. Each morning she checked one small part, wrote down the result, and improved the machine without hiding how it worked.
+
+Rust is a systems programming language. Ownership helps Rust manage memory without a garbage collector. A value has one owner, and borrowing lets code use a value without taking ownership. Immutable references allow reading. Mutable references allow controlled changes.
+
+A tokenizer turns text into token identifiers. A language model reads earlier tokens and predicts the next token. Pretraining learns patterns from plain text. Supervised fine-tuning learns from conversations containing user questions and assistant answers. Evaluation measures behavior on examples not used as training targets.
+
+A transformer combines attention and a feed-forward network. Attention lets each position use relevant earlier positions. Causal masking prevents a token from reading future tokens. Parameters are adjusted by gradients, an optimizer, and a learning-rate schedule.
+
+Small experiments are useful when they are reproducible. A seed, configuration, tokenizer, model weights, optimizer state, and metrics explain how a run was produced. A checkpoint lets interrupted training continue from a known step.
+
+Question: Which language emphasizes ownership for memory safety? Answer: Rust. Question: What predicts the next token? Answer: A language model. Question: What converts text to token identifiers? Answer: A tokenizer. Question: What records model parameters? Answer: Model weights.

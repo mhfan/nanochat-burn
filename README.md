@@ -108,9 +108,22 @@ cargo test --features ndarray
 cargo test
 ```
 
+### 端到端 Tiny Recipe
+
+仓库内置一套离线小文本 recipe，一条命令完成 tokenizer 训练、pretrain、SFT 和 eval：
+
+```bash
+cargo run --features ndarray --bin train -- --recipe --config configs/tiny.toml
+```
+
+完整配置位于 `configs/tiny.toml`，可复现输入位于 `data/fixtures/tiny/`，产物写入
+`runs/tiny/`。它用于快速验证完整实验链路；模型只有一层且仅训练少量步骤，因此评测分数不代表
+实际模型能力。移除 `--features ndarray` 即可使用默认 WGPU 后端运行同一 recipe。
+
 ### 2. 基础预训练 (Pretraining)
-训练命令默认读取 `configs/mini.toml`。该文件统一描述模型、随机种子、数据路径、三阶段训练参数和
-artifact 链路；未知字段或非法组合会在设备初始化前报错。启动小型合成数据预训练：
+训练命令默认读取 `configs/mini.toml`。该文件统一描述模型、随机种子、预训练语料、数据路径、
+三阶段训练参数、评测任务和 artifact 链路；未知字段或非法组合会在设备初始化前报错。启动小型
+合成数据预训练：
 ```bash
 cargo run --bin train --release -- --pretrain
 ```
@@ -160,6 +173,7 @@ Eval、CLI Chat 和 Web Chat 默认按 `runs/rl`、`runs/sft`、`runs/pretrain` 
 
 ```bash
 cargo run --bin eval --release
+NANOCHAT_CONFIG=configs/tiny.toml cargo run --features ndarray --bin eval
 NANOCHAT_ARTIFACT=runs/sft cargo run --bin chat --release
 ```
 

@@ -34,7 +34,7 @@
 - [x] Pretrain 输出可被 SFT 加载。
 - [x] SFT 输出可被 RL 加载。
 - [x] Eval、CLI Chat 和 Web Chat 加载同一 artifact。
-- [ ] 提供一个 TinyStories 或小型文本的端到端 recipe。
+- [x] 提供一个 TinyStories 或小型文本的端到端 recipe。
 
 标准产物布局：
 

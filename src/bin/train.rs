@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use nanochat_burn::{common::{ModelAutodiffBackend, init_device},
-    engine::{pretrain::run_pretraining, rl::run_rl_training, sft::run_sft_training},
+    engine::{pretrain::run_pretraining, recipe::run_recipe, rl::run_rl_training,
+        sft::run_sft_training},
     experiment::{DEFAULT_EXPERIMENT_CONFIG, ExperimentConfig},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrainingMode { Pretrain, Sft, Rl }
+enum TrainingMode { Pretrain, Sft, Rl, Recipe }
 
 impl TrainingMode {
     fn parse(value: &str) -> Option<Self> {
@@ -14,12 +15,14 @@ impl TrainingMode {
             "pretrain" => Some(Self::Pretrain),
             "sft" => Some(Self::Sft),
             "rl" => Some(Self::Rl),
+            "recipe" => Some(Self::Recipe),
             _ => None,
         }
     }
 
     fn name(self) -> &'static str {
-        match self { Self::Pretrain => "pretrain", Self::Sft => "sft", Self::Rl => "rl" }
+        match self { Self::Pretrain => "pretrain", Self::Sft => "sft", Self::Rl => "rl",
+            Self::Recipe => "recipe" }
     }
 }
 
@@ -78,6 +81,10 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
             tracing::info!("Starting Reinforcement Learning (RL)...");
             run_rl_training::<ModelAutodiffBackend>(&device, &config);
         }
+        TrainingMode::Recipe => {
+            tracing::info!("Starting end-to-end training recipe...");
+            run_recipe::<ModelAutodiffBackend>(&device, &config).await;
+        }
     }
 }
 
@@ -92,5 +99,6 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
             config: PathBuf::from("env.toml") });
         assert!(parse_args(["--rl".into(), "--pretrain".into()], None).is_err());
         assert!(parse_args(["--config".into()], None).is_err());
+        assert_eq!(parse_args(["--recipe".into()], None).unwrap().mode, TrainingMode::Recipe);
     }
 }

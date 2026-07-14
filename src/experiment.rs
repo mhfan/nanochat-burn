@@ -16,6 +16,7 @@ pub struct ExperimentConfig {
     pub pretrain: PretrainConfig,
     pub sft: SftConfig,
     pub rl: RlConfig,
+    pub eval: EvalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,12 +30,19 @@ pub struct ArtifactPaths {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PretrainConfig {
-    pub corpus_repeats: usize,
+    pub corpus: PretrainCorpus,
     pub text_path: PathBuf,
     pub token_path: PathBuf,
     pub checkpoint_interval: usize,
     pub model: GptConfig,
     pub training: StageTrainingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PretrainCorpus {
+    Synthetic { repeats: usize },
+    Text { path: PathBuf, repeats: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,6 +82,25 @@ pub struct RlConfig {
     pub repetition_penalty: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EvalConfig {
+    pub max_generation_tokens: usize,
+    pub tasks: Vec<EvalTaskConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EvalTaskConfig {
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: EvalTaskKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalTaskKind { Categorical, Generative, HumanEval }
+
 impl ExperimentConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
@@ -106,7 +133,8 @@ impl ExperimentConfig {
         self.artifacts.validate()?;
         self.pretrain.validate()?;
         self.sft.validate()?;
-        self.rl.validate()
+        self.rl.validate()?;
+        self.eval.validate()
     }
 }
 
@@ -123,12 +151,26 @@ impl PretrainConfig {
         if self.model.vocab_size <= 256 {
             return Err("pretrain model vocab_size must include byte and special tokens".into());
         }
-        if self.corpus_repeats == 0 { return Err("pretrain corpus_repeats must be positive".into()); }
+        self.corpus.validate()?;
         validate_path(&self.text_path, "pretrain text_path")?;
         validate_path(&self.token_path, "pretrain token_path")?;
         self.model.validate().map_err(|error| format!("invalid pretrain model: {error}"))?;
         self.training.resolve(self.model.sequence_len)
             .map_err(|error| format!("invalid pretrain training: {error}"))?;
+        Ok(())
+    }
+}
+
+impl PretrainCorpus {
+    pub fn repeats(&self) -> usize {
+        match self { Self::Synthetic { repeats } | Self::Text { repeats, .. } => *repeats }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.repeats() == 0 { return Err("pretrain corpus repeats must be positive".into()); }
+        if let Self::Text { path, .. } = self {
+            validate_path(path, "pretrain corpus path")?;
+        }
         Ok(())
     }
 }
@@ -193,6 +235,22 @@ impl RlConfig {
     }
 }
 
+impl EvalConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.max_generation_tokens == 0 {
+            return Err("eval max_generation_tokens must be positive".into());
+        }
+        if self.tasks.is_empty() { return Err("eval tasks must not be empty".into()); }
+        for (index, task) in self.tasks.iter().enumerate() {
+            if task.name.trim().is_empty() {
+                return Err(format!("eval task {index} name must not be empty"));
+            }
+            validate_path(&task.path, &format!("eval task {index} path"))?;
+        }
+        Ok(())
+    }
+}
+
 fn validate_path(path: &Path, name: &str) -> Result<(), String> {
     if path.as_os_str().is_empty() { Err(format!("{name} must not be empty")) } else { Ok(()) }
 }
@@ -211,6 +269,16 @@ fn validate_path(path: &Path, name: &str) -> Result<(), String> {
         config.save(&path).unwrap();
         assert_eq!(ExperimentConfig::load(&path).unwrap(), config);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test] fn test_tiny_recipe_config() {
+        let config: ExperimentConfig =
+            toml::from_str(include_str!("../configs/tiny.toml")).unwrap();
+        config.validate().unwrap();
+        assert!(matches!(config.pretrain.corpus,
+            PretrainCorpus::Text { repeats: 12, .. }));
+        assert_eq!(config.eval.tasks.len(), 1);
+        assert_eq!(config.eval.tasks[0].kind, EvalTaskKind::Categorical);
     }
 
     #[test] fn test_experiment_config_rejects_unknown_fields() {

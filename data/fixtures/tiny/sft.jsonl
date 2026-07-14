@@ -1,0 +1,8 @@
+{"messages":[{"role":"user","content":"What is Rust?"},{"role":"assistant","content":"Rust is a systems programming language focused on performance and memory safety."}]}
+{"messages":[{"role":"user","content":"What does a tokenizer do?"},{"role":"assistant","content":"A tokenizer converts text into token identifiers that a model can process."}]}
+{"messages":[{"role":"user","content":"What does a language model predict?"},{"role":"assistant","content":"A causal language model predicts the next token from earlier tokens."}]}
+{"messages":[{"role":"user","content":"Why use a training checkpoint?"},{"role":"assistant","content":"A checkpoint records training state so an interrupted run can continue."}]}
+{"messages":[{"role":"user","content":"What is pretraining?"},{"role":"assistant","content":"Pretraining teaches a model language patterns from a text corpus."}]}
+{"messages":[{"role":"user","content":"What is supervised fine-tuning?"},{"role":"assistant","content":"Supervised fine-tuning trains a model on example conversations and answers."}]}
+{"messages":[{"role":"user","content":"What does causal masking prevent?"},{"role":"assistant","content":"Causal masking prevents a token from reading future tokens."}]}
+{"messages":[{"role":"user","content":"What makes an experiment reproducible?"},{"role":"assistant","content":"A recorded seed, configuration, data, artifacts, and metrics support reproducibility."}]}

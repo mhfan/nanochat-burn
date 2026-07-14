@@ -7,7 +7,8 @@ use crate::{artifact::{MetricRecord, TrainingStage, append_metric,
         save_experiment_config, save_resume_state},
     dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
     dataset::pretokenize_text_to_bin,
-    engine::TrainingEngine, experiment::{ExperimentConfig, PretrainConfig}, gpt::Gpt,
+    engine::TrainingEngine,
+    experiment::{ExperimentConfig, PretrainConfig, PretrainCorpus}, gpt::Gpt,
     tokenizer::BpeTokenizer,
 };
 
@@ -34,41 +35,60 @@ const SYNTHETIC_PRETRAIN_CORPUS: &[&str] = &[
      selections and generative pass metrics.",
 ];
 
-pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConfig) -> PathBuf {
+fn load_pretrain_corpus(config: &PretrainConfig) -> Result<Vec<String>, String> {
+    let corpus = match &config.corpus {
+        PretrainCorpus::Synthetic { .. } =>
+            SYNTHETIC_PRETRAIN_CORPUS.iter().map(|text| (*text).to_string()).collect(),
+        PretrainCorpus::Text { path, .. } => vec![std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read pretrain corpus {path:?}: {error}"))?],
+    };
+    if corpus.iter().all(|document| document.trim().is_empty()) {
+        Err("pretrain corpus must contain text".into())
+    } else { Ok(corpus) }
+}
+
+pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConfig,
+    corpus: &[String]) -> PathBuf {
     let (txt_path, bin_path) = (&config.text_path, &config.token_path);
 
-    tracing::info!("Creating synthetic pretraining text dataset...");
-    let full_text =
-        format!("{} ", SYNTHETIC_PRETRAIN_CORPUS.join(" ")).repeat(config.corpus_repeats);
+    tracing::info!("Creating pretraining text dataset...");
+    let full_text = format!("{}\n", corpus.join("\n")).repeat(config.corpus.repeats());
 
-    if let Some(parent) = txt_path.parent() {
+    if let Some(parent) = txt_path.parent() && !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent).expect("Failed to create pretraining data directory");
     }
-    if let Some(parent) = bin_path.parent() {
+    if let Some(parent) = bin_path.parent() && !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent).expect("Failed to create pretraining token directory");
     }
-    std::fs::write(txt_path, &full_text).expect("Failed to write synthetic pretrain text");
+    std::fs::write(txt_path, &full_text).expect("Failed to write pretrain text");
     pretokenize_text_to_bin(txt_path, bin_path, tokenizer).expect("Failed to pretokenize dataset");
-    tracing::info!("Synthetic pretraining dataset pretokenized to: {:?}", bin_path);
+    tracing::info!("Pretraining dataset pretokenized to: {:?}", bin_path);
 
     bin_path.to_path_buf()
 }
 
 pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device,
     experiment: &ExperimentConfig) {
+    let resume = std::env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
+    let output = std::env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
+        .or_else(|| resume.clone()).unwrap_or_else(|| experiment.artifacts.pretrain.clone());
+    run_pretraining_at::<B>(device, experiment, resume.as_deref(), &output).await;
+}
+
+pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
+    experiment: &ExperimentConfig, resume: Option<&Path>, output: &Path) {
     tracing::info!("=============================================");
     tracing::info!("   Starting Foundational Pretraining        ");
     tracing::info!("=============================================");
 
     experiment.validate().unwrap_or_else(|error| panic!("invalid experiment config: {error}"));
     let config = &experiment.pretrain;
+    let corpus = load_pretrain_corpus(config)
+        .unwrap_or_else(|error| panic!("failed to load pretrain corpus: {error}"));
     let configured_training = config.training.resolve(config.model.sequence_len)
         .unwrap_or_else(|error| panic!("invalid pretrain training config: {error}"));
-    let resume = std::env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
-    let output = std::env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
-        .or_else(|| resume.clone()).unwrap_or_else(|| experiment.artifacts.pretrain.clone());
 
-    let (tokenizer, mut engine) = if let Some(path) = &resume {
+    let (tokenizer, mut engine) = if let Some(path) = resume {
         let artifact = load_artifact::<B>(path, device)
             .unwrap_or_else(|error| panic!("failed to load pretrain artifact: {error}"));
         assert_eq!(artifact.manifest.stage, TrainingStage::Pretrain,
@@ -84,23 +104,22 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device,
                 .unwrap_or_else(|error| panic!("failed to load pretrain state: {error}"));
         let engine = TrainingEngine::from_state(artifact.model, optimizer, training_config,
             &artifact.tokenizer, trainer);
-        copy_metrics_through(path, &output, engine.step)
+        copy_metrics_through(path, output, engine.step)
             .unwrap_or_else(|error| panic!("failed to restore pretrain metrics: {error}"));
         tracing::info!("Resuming pretraining from {:?} at iteration {}", path, engine.step);
         (artifact.tokenizer, engine)
     } else {
         B::seed(device, experiment.seed);
-        let tokenizer = BpeTokenizer::train_from_iterator(
-            SYNTHETIC_PRETRAIN_CORPUS.iter().copied(), config.model.vocab_size);
+        let tokenizer = BpeTokenizer::train_from_iterator(&corpus, config.model.vocab_size);
         assert_eq!(tokenizer.get_vocab_size(), config.model.vocab_size,
             "trained tokenizer vocabulary differs from model config");
         let model = Gpt::<B>::new(config.model.clone(), device);
-        reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
+        reset_metrics(output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
         let engine = TrainingEngine::new(model, configured_training, &tokenizer);
         (tokenizer, engine)
     };
 
-    let bin_path = generate_pretrain_dataset(&tokenizer, config);
+    let bin_path = generate_pretrain_dataset(&tokenizer, config, &corpus);
     let training_config = engine.config.clone();
     let mut loader_config = DistributedDataLoaderConfig::single_process(
         training_config.device_batch_size, training_config.sequence_length);
@@ -119,13 +138,13 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device,
         let loss = engine.train_step(&mut loader, device).await;
         tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}", i,
             training_config.num_iterations, loss);
-        append_metric(&output, &MetricRecord { stage: TrainingStage::Pretrain, step: i, loss,
+        append_metric(output, &MetricRecord { stage: TrainingStage::Pretrain, step: i, loss,
             smoothed_loss: Some(loss), learning_rate: None, reward: None,
             elapsed_secs: elapsed_before_resume + start_time.elapsed().as_secs_f64(),
         }).unwrap_or_else(|error| panic!("failed to append pretrain metric: {error}"));
         if checkpoint_interval > 0 && i % checkpoint_interval == 0 &&
             i < training_config.num_iterations {
-            save_pretrain_checkpoint(&output, &engine, &tokenizer, experiment);
+            save_pretrain_checkpoint(output, &engine, &tokenizer, experiment);
             tracing::info!("Saved pretraining checkpoint at iteration {}", i);
         }
     }
@@ -135,7 +154,7 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device,
     tracing::info!("   Pretraining Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    save_pretrain_checkpoint(&output, &engine, &tokenizer, experiment);
+    save_pretrain_checkpoint(output, &engine, &tokenizer, experiment);
     tracing::info!("Pretraining artifact saved to {:?}", output);
 }
 

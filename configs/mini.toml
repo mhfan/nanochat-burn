@@ -7,10 +7,13 @@ sft = "runs/sft"
 rl = "runs/rl"
 
 [pretrain]
-corpus_repeats = 10
 text_path = "data/pretrain.txt"
 token_path = "data/pretrain.bin"
 checkpoint_interval = 5
+
+[pretrain.corpus]
+kind = "synthetic"
+repeats = 10
 
 [pretrain.model]
 sequence_len = 256
@@ -55,3 +58,36 @@ max_generation_tokens = 128
 temperature = 1.0
 top_k = 50
 repetition_penalty = 1.0
+
+[eval]
+max_generation_tokens = 128
+
+[[eval.tasks]]
+name = "ARC-Easy"
+path = "data/eval/arc_easy.jsonl"
+kind = "categorical"
+
+[[eval.tasks]]
+name = "ARC-Challenge"
+path = "data/eval/arc_challenge.jsonl"
+kind = "categorical"
+
+[[eval.tasks]]
+name = "MMLU"
+path = "data/eval/mmlu.jsonl"
+kind = "categorical"
+
+[[eval.tasks]]
+name = "GSM8K"
+path = "data/eval/gsm8k.jsonl"
+kind = "generative"
+
+[[eval.tasks]]
+name = "SpellingBee"
+path = "data/eval/spellingbee.jsonl"
+kind = "generative"
+
+[[eval.tasks]]
+name = "HumanEval"
+path = "data/eval/humaneval.jsonl"
+kind = "human_eval"

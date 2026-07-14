@@ -1,0 +1,4 @@
+{"messages":[{"role":"user","content":"Which language emphasizes ownership for memory safety?\nA: Rust\nB: HTML\nC: SQL\nD: CSS\nRespond with one letter."},{"role":"assistant","content":"A"}],"letters":["A","B","C","D"]}
+{"messages":[{"role":"user","content":"What converts text into token identifiers?\nA: Optimizer\nB: Tokenizer\nC: Checkpoint\nD: Gradient\nRespond with one letter."},{"role":"assistant","content":"B"}],"letters":["A","B","C","D"]}
+{"messages":[{"role":"user","content":"What does a causal language model predict?\nA: File names\nB: Screen pixels\nC: The next token\nD: Network routes\nRespond with one letter."},{"role":"assistant","content":"C"}],"letters":["A","B","C","D"]}
+{"messages":[{"role":"user","content":"What helps an interrupted training run continue?\nA: Browser tab\nB: Style sheet\nC: Source comment\nD: Checkpoint\nRespond with one letter."},{"role":"assistant","content":"D"}],"letters":["A","B","C","D"]}

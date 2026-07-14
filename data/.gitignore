@@ -1,5 +1,7 @@
 # Ignore generated datasets and caches
 *.jsonl
+# Keep deterministic, repository-owned smoke-test fixtures under version control.
+!fixtures/tiny/*.jsonl
 eval/
 downloads/
 pretrain.bin
