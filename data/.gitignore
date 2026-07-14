@@ -4,8 +4,6 @@
 !fixtures/tiny/*.jsonl
 eval/
 downloads/
+# Materialized by pretraining from the configured corpus and tokenizer.
 pretrain.bin
 pretrain.txt
-
-# Ignore checkpoints
-*.safetensors

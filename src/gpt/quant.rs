@@ -5,7 +5,7 @@ use burn::{module::{Module, Param}, nn::Linear,
     },
 };
 
-use crate::gpt::ForwardLayer;
+use super::ForwardLayer;
 
 #[derive(Module, Debug)]
 pub enum LinearOrQuantized<B: Backend> {

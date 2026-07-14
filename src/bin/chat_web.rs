@@ -7,7 +7,8 @@ use axum::{Json, Router, http::StatusCode, routing::{get, post},
 use nanochat_burn::{
     artifact::{inference_artifact_path, load_artifact},
     common::{ModelBackend, ModelDevice, init_device},
-    engine::{inference::{InferenceEngine, SamplingConfig}, quant::LinearOrQuantized},
+    engine::inference::{InferenceEngine, SamplingConfig},
+    gpt::quant::LinearOrQuantized,
     tokenizer::{Conversation, ConversationMessage, MessageContent},
 };
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,7 @@ struct AppState {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../../nanochat/ui.html")) }
+async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../data/assets/ui.html")) }
 
 async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>) -> impl IntoResponse {
     Json(HealthResponse { device: format!("{:?}", state.device), status: "ok" })

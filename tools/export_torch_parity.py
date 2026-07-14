@@ -7,6 +7,8 @@
 # ///
 """Export deterministic PyTorch parity fixtures for nanochat modules, models, and optimizers."""
 
+from __future__ import annotations
+
 import argparse
 import importlib.metadata
 import json
@@ -16,12 +18,21 @@ from pathlib import Path
 
 os.environ["NANOCHAT_DTYPE"] = "float32"
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import torch
-from nanochat.gpt import (CausalSelfAttention, GPT, GPTConfig, MLP,
-    apply_rotary_emb, norm)
-from nanochat.optim import MuonAdamW
+
+def load_reference(root: Path) -> None:
+    global torch, CausalSelfAttention, GPT, GPTConfig, MLP, apply_rotary_emb, norm, MuonAdamW
+    if not (root / "nanochat/gpt.py").is_file() or not (root / "nanochat/optim.py").is_file():
+        raise ValueError(f"{root} does not contain nanochat/gpt.py and nanochat/optim.py")
+    sys.path.insert(0, str(root))
+    import torch as torch_module
+    from nanochat.gpt import (CausalSelfAttention as Attention, GPT as Model,
+        GPTConfig as ModelConfig, MLP as FeedForward, apply_rotary_emb as rotary_emb,
+        norm as rms_norm)
+    from nanochat.optim import MuonAdamW as Optimizer
+    torch, CausalSelfAttention, GPT, GPTConfig, MLP = (
+        torch_module, Attention, Model, ModelConfig, FeedForward)
+    apply_rotary_emb, norm, MuonAdamW = rotary_emb, rms_norm, Optimizer
 
 
 def fixed(shape: tuple[int, ...], low: float, high: float) -> torch.Tensor:
@@ -199,7 +210,15 @@ def main() -> None:
         choices=("all", "modules", "model", "optimizer"))
     parser.add_argument("--output-dir", type=Path,
         default=burn_root / "data/fixtures/parity")
+    parser.add_argument("--nanochat-root", type=Path, default=os.environ.get("NANOCHAT_ROOT"),
+        help="Python nanochat repository root (or set NANOCHAT_ROOT)")
     args = parser.parse_args()
+    if args.nanochat_root is None:
+        parser.error("--nanochat-root or NANOCHAT_ROOT is required")
+    try:
+        load_reference(args.nanochat_root.expanduser().resolve())
+    except ValueError as error:
+        parser.error(str(error))
     exporters = {"modules": export_modules, "model": export_model,
         "optimizer": export_optimizer}
     targets = exporters if args.target == "all" else (args.target,)

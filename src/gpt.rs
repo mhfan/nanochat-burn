@@ -7,7 +7,9 @@ use burn::{module::{Module, Param}, nn::{Embedding, Linear},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::engine::quant::LinearOrQuantized;
+pub mod quant;
+
+use self::quant::LinearOrQuantized;
 
 pub trait ForwardLayer<B: Backend>: Module<B> {
     fn forward_layer<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D>;
@@ -641,7 +643,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     }
 
     pub fn quantize(self, bits: usize, block_size: usize) -> Gpt<B, LinearOrQuantized<B>> {
-        use crate::engine::quant::quantize_linear_or_standard;
+        use self::quant::quantize_linear_or_standard;
         assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
         self.convert_blocks(|linear| quantize_linear_or_standard(linear, bits, block_size))
     }

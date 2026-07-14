@@ -13,11 +13,9 @@ import argparse
 import copy
 import importlib.metadata
 import json
+import os
 import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from nanochat.tokenizer import RustBPETokenizer
 
 
 VOCAB_SIZE = 320
@@ -69,8 +67,8 @@ CONVERSATION_CASES = [
 ]
 
 
-def export_fixture(output: Path) -> None:
-    tokenizer = RustBPETokenizer.train_from_iterator(CORPUS, VOCAB_SIZE)
+def export_fixture(output: Path, tokenizer_type: type) -> None:
+    tokenizer = tokenizer_type.train_from_iterator(CORPUS, VOCAB_SIZE)
     encoding_cases = [
         {"text": text, "ids": tokenizer.encode(text)} for text in ENCODING_CASES
     ]
@@ -108,10 +106,20 @@ def export_fixture(output: Path) -> None:
 def main() -> None:
     burn_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
+    parser.add_argument("--nanochat-root", type=Path, default=os.environ.get("NANOCHAT_ROOT"),
+        help="Python nanochat repository root (or set NANOCHAT_ROOT)")
     parser.add_argument("--output", type=Path,
         default=burn_root / "data/fixtures/parity/tokenizer.json")
     args = parser.parse_args()
-    export_fixture(args.output)
+    if args.nanochat_root is None:
+        parser.error("--nanochat-root or NANOCHAT_ROOT is required")
+    root = args.nanochat_root.expanduser().resolve()
+    if not (root / "nanochat/tokenizer.py").is_file():
+        parser.error(f"{root} does not contain nanochat/tokenizer.py")
+    sys.path.insert(0, str(root))
+    from nanochat.tokenizer import RustBPETokenizer
+
+    export_fixture(args.output, RustBPETokenizer)
 
 
 if __name__ == "__main__":

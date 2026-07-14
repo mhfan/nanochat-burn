@@ -1,35 +1,45 @@
+import argparse
 import os
 import sys
+from pathlib import Path
 
-# Add workspace root directory to sys.path to enable importing tasks
 script_dir = os.path.dirname(os.path.abspath(__file__))
-workspace_root = os.path.dirname(os.path.dirname(script_dir))
-sys.path.append(workspace_root)
+project_root = os.path.dirname(script_dir)
 
-os.environ["NANOCHAT_BASE_DIR"] = os.path.join(workspace_root, ".cache/nanochat")
-os.environ["HF_HOME"] = os.path.join(workspace_root, ".cache/huggingface")
-os.environ["HF_DATASETS_CACHE"] = os.path.join(workspace_root, ".cache/huggingface/datasets")
-os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(workspace_root, ".cache/tokenizer")
+os.environ["NANOCHAT_BASE_DIR"] = os.path.join(project_root, ".cache/nanochat")
+os.environ["HF_HOME"] = os.path.join(project_root, ".cache/huggingface")
+os.environ["HF_DATASETS_CACHE"] = os.path.join(project_root, ".cache/huggingface/datasets")
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(project_root, ".cache/tokenizer")
 
 import json
-from tqdm import tqdm
 
-from tasks.common import TaskMixture
-from tasks.gsm8k import GSM8K
-from tasks.mmlu import MMLU
-from tasks.smoltalk import SmolTalk
-from tasks.customjson import CustomJSON
-from tasks.spellingbee import SimpleSpelling, SpellingBee
-from tasks.arc import ARC
-from tasks.humaneval import HumanEval
+def load_reference(root: Path) -> None:
+    global tqdm, TaskMixture, GSM8K, MMLU, SmolTalk, CustomJSON
+    global SimpleSpelling, SpellingBee, ARC, HumanEval
+    if not (root / "tasks/common.py").is_file():
+        raise ValueError(f"{root} does not contain tasks/common.py")
+    sys.path.insert(0, str(root))
+    from tqdm import tqdm as progress
+    from tasks.common import TaskMixture as Mixture
+    from tasks.gsm8k import GSM8K as Gsm
+    from tasks.mmlu import MMLU as Mmlu
+    from tasks.smoltalk import SmolTalk as Talk
+    from tasks.customjson import CustomJSON as Custom
+    from tasks.spellingbee import SimpleSpelling as Simple, SpellingBee as Bee
+    from tasks.arc import ARC as Arc
+    from tasks.humaneval import HumanEval as Human
+    tqdm, TaskMixture, GSM8K, MMLU, SmolTalk, CustomJSON = (
+        progress, Mixture, Gsm, Mmlu, Talk, Custom)
+    SimpleSpelling, SpellingBee, ARC, HumanEval = Simple, Bee, Arc, Human
 
 def ensure_dirs():
     os.makedirs(os.path.join(script_dir, "eval"), exist_ok=True)
 
 def export_sft_train():
     print("Preparing SFT training mixture...")
-    base_dir = os.path.dirname(script_dir)
-    identity_path = os.path.join(base_dir, "identity_conversations.jsonl")
+    downloads = os.path.join(script_dir, "downloads")
+    os.makedirs(downloads, exist_ok=True)
+    identity_path = os.path.join(downloads, "identity_conversations.jsonl")
     
     # Download custom identity dataset if not present
     if not os.path.exists(identity_path):
@@ -89,7 +99,21 @@ def export_eval_datasets():
                 f.write(json.dumps(conv, ensure_ascii=False) + "\n")
         print(f"Successfully exported {name} to {output_path}")
 
-if __name__ == "__main__":
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--nanochat-root", type=Path, default=os.environ.get("NANOCHAT_ROOT"),
+        help="Python nanochat repository root (or set NANOCHAT_ROOT)")
+    args = parser.parse_args()
+    if args.nanochat_root is None:
+        parser.error("--nanochat-root or NANOCHAT_ROOT is required")
+    try:
+        load_reference(args.nanochat_root.expanduser().resolve())
+    except ValueError as error:
+        parser.error(str(error))
     ensure_dirs()
     export_sft_train()
     export_eval_datasets()
+
+
+if __name__ == "__main__":
+    main()

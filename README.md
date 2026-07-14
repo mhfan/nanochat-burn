@@ -83,6 +83,9 @@ cargo run --features ndarray --example tokenizer
     │   ├── dataset.rs          # 阶段 2: 数据集载入与 mmap 闪存加载支持
     │   ├── dataloader.rs       # 阶段 2: 分片、预取与断点位置
     │   ├── gpt.rs              # 阶段 3: GPT 架构实现 (Rotary Embeddings, Softcap, GQA 等)
+    │   ├── gpt/
+    │   │   ├── parity.rs       # Python/Rust 模型 parity 与误差预算
+    │   │   └── quant.rs        # W8/W4 权重量化与后端快路径
     │   ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 对接
     │   ├── optim.rs            # 阶段 4: Polar Express Muon + AdamW 混合正交优化器
     │   ├── engine.rs           # 阶段 4/5: 训练与推理引擎底座、BPB 评估器
@@ -91,7 +94,6 @@ cargo run --features ndarray --example tokenizer
     │   │   ├── calculator.rs   # 内置 Tool-Use 计算器状态机算子
     │   │   ├── pretrain.rs     # 阶段 4/5: 异步预训练工作流
     │   │   ├── inference.rs    # 阶段 5: 支持 KV-Cache 的批量自回归采样
-    │   │   ├── quant.rs        # W8/W4 权重量化与后端快路径
     │   │   ├── rl.rs           # 组内归一化 REINFORCE 工作流
     │   │   ├── speculative.rs  # 阶段 5: 无损推测解码双模型推理引擎 (Draft + Target Model)
     │   │   ├── sandbox.rs      # 阶段 6: 带超时和输出限制的 Python 子进程
@@ -161,11 +163,13 @@ python3 tools/parity_report.py
 使用脚本声明的固定 Python 依赖重新导出 fixtures：
 
 ```bash
-uv run tools/export_tokenizer_parity.py
-uv run tools/export_torch_parity.py all
+uv run tools/export_tokenizer_parity.py --nanochat-root /path/to/python-nanochat
+uv run tools/export_torch_parity.py all --nanochat-root /path/to/python-nanochat
 ```
 
-`all` 可替换为 `modules`、`model` 或 `optimizer`，只重新生成对应 fixture。
+也可以设置 `NANOCHAT_ROOT=/path/to/python-nanochat`。该路径仅在重新生成跨语言 fixtures
+时需要，日常构建、测试、训练和 Web UI 不依赖父目录；`all` 可替换为 `modules`、`model` 或
+`optimizer`，只重新生成对应 fixture。
 
 ### 端到端 Tiny Recipe
 

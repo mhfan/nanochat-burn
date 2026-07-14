@@ -12,7 +12,6 @@ pub mod calculator;
 pub mod eval;
 pub mod inference;
 pub mod pretrain;
-pub mod quant;
 pub mod recipe;
 pub mod rl;
 pub mod sandbox;
