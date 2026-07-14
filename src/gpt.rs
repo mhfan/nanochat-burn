@@ -647,8 +647,9 @@ impl<B: Backend> Gpt<B, Linear<B>> {
     }
 }
 
+#[cfg(test)] mod parity;
+
 #[cfg(test)] mod tests { use super::*;
-    #[cfg(feature = "ndarray")] mod parity;
 
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();

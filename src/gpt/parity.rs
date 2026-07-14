@@ -1,11 +1,21 @@
 use super::*;
+#[cfg(feature = "ndarray")]
 use burn::tensor::backend::AutodiffBackend;
 use std::collections::HashMap;
 
-use crate::common::{ModelAutodiffBackend, ModelBackend, ModelDevice};
+#[cfg(feature = "ndarray")]
+use crate::common::{ModelAutodiffBackend, ModelDevice};
+use crate::common::ModelBackend;
 
+#[cfg(feature = "ndarray")]
 type ParityGradients = <ModelAutodiffBackend as AutodiffBackend>::Gradients;
 
+#[cfg(feature = "ndarray")] const F32_LOGIT_MAX_ABS_ERROR: f32 = 5e-5;
+#[cfg(not(feature = "ndarray"))] const F16_LOGIT_MAX_ABS_ERROR: f32 = 5e-3;
+const W8_LOGIT_MAX_ABS_ERROR: f32 = 5e-3;
+const W4_LOGIT_MAX_ABS_ERROR: f32 = 2e-2;
+
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct ModuleParityFixture {
     schema_version: u32,
@@ -17,6 +27,7 @@ struct ModuleParityFixture {
     attention: AttentionFixture,
 }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct ModuleFixtureSource {
     implementation: String,
@@ -25,6 +36,7 @@ struct ModuleFixtureSource {
     linear_weight_layout: String,
 }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct ModuleFixtureConfig {
     sequence_len: usize,
@@ -36,9 +48,11 @@ struct ModuleFixtureConfig {
 #[derive(Deserialize)]
 struct TensorFixture { shape: Vec<usize>, values: Vec<f32> }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct UnaryFixture { input: TensorFixture, output: TensorFixture }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct RopeFixture {
     input: TensorFixture,
@@ -47,6 +61,7 @@ struct RopeFixture {
     output: TensorFixture,
 }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct MlpFixture {
     input: TensorFixture,
@@ -55,6 +70,7 @@ struct MlpFixture {
     output: TensorFixture,
 }
 
+#[cfg(feature = "ndarray")]
 #[derive(Deserialize)]
 struct AttentionFixture {
     input: TensorFixture,
@@ -69,6 +85,7 @@ struct AttentionFixture {
     output: TensorFixture,
 }
 
+#[cfg(feature = "ndarray")]
 fn python_module_fixture() -> ModuleParityFixture {
     let fixture: ModuleParityFixture = serde_json::from_str(
         include_str!("../../data/fixtures/parity/modules.json")).unwrap();
@@ -91,6 +108,7 @@ fn fixture_linear<B: Backend>(fixture: &TensorFixture, device: &B::Device) -> Li
     linear(fixture_tensor::<B, 2>(fixture, device).swap_dims(0, 1))
 }
 
+#[cfg(feature = "ndarray")]
 fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
     expected: &TensorFixture, tolerance: f32, label: &str) {
     assert_eq!(actual.shape().dims::<D>().as_slice(), expected.shape, "{label} shape mismatch");
@@ -104,6 +122,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         actual[index], expected.values[index]);
 }
 
+#[cfg(feature = "ndarray")]
 #[test] fn test_python_rms_norm_and_rope_parity() {
     let (fixture, device) = (python_module_fixture(), crate::common::init_device());
     let actual = norm(fixture_tensor::<ModelBackend, 3>(&fixture.rms_norm.input, &device));
@@ -116,6 +135,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
     assert_fixture_close(actual, &rope.output, 2e-6, "RoPE");
 }
 
+#[cfg(feature = "ndarray")]
 #[test] fn test_python_mlp_parity() {
     let (fixture, device) = (python_module_fixture(), crate::common::init_device());
     let mlp = &fixture.mlp;
@@ -128,6 +148,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         &mlp.output, 2e-5, "MLP");
 }
 
+#[cfg(feature = "ndarray")]
 #[test] fn test_python_attention_parity() {
     let (fixture, device) = (python_module_fixture(), crate::common::init_device());
     let (config, attention) = (&fixture.config, &fixture.attention);
@@ -156,10 +177,13 @@ struct ModelParityFixture {
     source: ModelFixtureSource,
     config: GptConfig,
     input_ids: Vec<Vec<i32>>,
+    #[cfg(feature = "ndarray")]
     targets: Vec<Vec<i32>>,
     parameters: HashMap<String, TensorFixture>,
     logits: TensorFixture,
+    #[cfg(feature = "ndarray")]
     loss: f32,
+    #[cfg(feature = "ndarray")]
     gradients: HashMap<String, TensorFixture>,
 }
 
@@ -187,8 +211,7 @@ fn named<'a>(tensors: &'a HashMap<String, TensorFixture>, name: &str) -> &'a Ten
     tensors.get(name).unwrap_or_else(|| panic!("missing fixture tensor {name}"))
 }
 
-fn fixture_ids(values: &[Vec<i32>], device: &ModelDevice)
-    -> Tensor<ModelAutodiffBackend, 2, Int> {
+fn fixture_ids<B: Backend>(values: &[Vec<i32>], device: &B::Device) -> Tensor<B, 2, Int> {
     let rows = values.len();
     let columns = values.first().map_or(0, Vec::len);
     assert!(rows > 0 && columns > 0 && values.iter().all(|row| row.len() == columns));
@@ -196,21 +219,20 @@ fn fixture_ids(values: &[Vec<i32>], device: &ModelDevice)
     Tensor::from_data(TensorData::new(values, Shape::new([rows, columns])), device)
 }
 
-fn model_from_fixture(fixture: &ModelParityFixture, device: &ModelDevice)
-    -> Gpt<ModelAutodiffBackend> {
+fn model_from_fixture<B: Backend>(fixture: &ModelParityFixture, device: &B::Device) -> Gpt<B> {
     let parameters = &fixture.parameters;
     let mut model = Gpt::new(fixture.config.clone(), device);
-    model.wte = embedding(fixture_tensor::<ModelAutodiffBackend, 2>(
+    model.wte = embedding(fixture_tensor::<B, 2>(
         named(parameters, "transformer.wte.weight"), device));
     model.lm_head = fixture_linear(named(parameters, "lm_head.weight"), device);
-    model.resid_lambdas = param(fixture_tensor::<ModelAutodiffBackend, 1>(
+    model.resid_lambdas = param(fixture_tensor::<B, 1>(
         named(parameters, "resid_lambdas"), device));
-    model.x0_lambdas = param(fixture_tensor::<ModelAutodiffBackend, 1>(
+    model.x0_lambdas = param(fixture_tensor::<B, 1>(
         named(parameters, "x0_lambdas"), device));
     model.smear_gate = fixture_linear(named(parameters, "smear_gate.weight"), device);
-    model.smear_lambda = param(fixture_tensor::<ModelAutodiffBackend, 1>(
+    model.smear_lambda = param(fixture_tensor::<B, 1>(
         named(parameters, "smear_lambda"), device));
-    model.backout_lambda = param(fixture_tensor::<ModelAutodiffBackend, 1>(
+    model.backout_lambda = param(fixture_tensor::<B, 1>(
         named(parameters, "backout_lambda"), device));
 
     for (layer, block) in model.h.iter_mut().enumerate() {
@@ -236,7 +258,7 @@ fn model_from_fixture(fixture: &ModelParityFixture, device: &ModelDevice)
     let mut value_index = 0;
     for layer in 0..fixture.config.n_layer {
         if has_ve(layer, fixture.config.n_layer) {
-            model.value_embeds[value_index] = embedding(fixture_tensor::<ModelAutodiffBackend, 2>(
+            model.value_embeds[value_index] = embedding(fixture_tensor::<B, 2>(
                 named(parameters, &format!("value_embeds.{layer}.weight")), device));
             value_index += 1;
         }
@@ -245,12 +267,14 @@ fn model_from_fixture(fixture: &ModelParityFixture, device: &ModelDevice)
     model
 }
 
+#[cfg(feature = "ndarray")]
 fn assert_gradient<const D: usize>(tensor: Tensor<ModelAutodiffBackend, D>,
     gradients: &ParityGradients, expected: &TensorFixture, label: &str) {
     let actual = tensor.grad(gradients).unwrap_or_else(|| panic!("missing gradient for {label}"));
     assert_fixture_close(actual, expected, 5e-5, label);
 }
 
+#[cfg(feature = "ndarray")]
 fn assert_linear_gradient(linear: &Linear<ModelAutodiffBackend>, gradients: &ParityGradients,
     expected: &TensorFixture, label: &str) {
     let actual = linear.weight.val().grad(gradients)
@@ -258,11 +282,12 @@ fn assert_linear_gradient(linear: &Linear<ModelAutodiffBackend>, gradients: &Par
     assert_fixture_close(actual, expected, 5e-5, label);
 }
 
+#[cfg(feature = "ndarray")]
 #[test] fn test_python_full_model_logits_loss_and_gradients_parity() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
-    let model = model_from_fixture(&fixture, &device);
-    let input = fixture_ids(&fixture.input_ids, &device);
-    let targets = fixture_ids(&fixture.targets, &device);
+    let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
+    let input = fixture_ids::<ModelAutodiffBackend>(&fixture.input_ids, &device);
+    let targets = fixture_ids::<ModelAutodiffBackend>(&fixture.targets, &device);
     let logits = model.forward(input, None);
     assert_fixture_close(logits.clone(), &fixture.logits, 5e-5, "full-model logits");
 
@@ -299,6 +324,7 @@ fn assert_linear_gradient(linear: &Linear<ModelAutodiffBackend>, gradients: &Par
         named(expected, "value_embeds.1.weight"), "value embedding gradient");
 }
 
+#[cfg(feature = "ndarray")]
 fn cached_forward(model: &Gpt<ModelAutodiffBackend>, input: Tensor<ModelAutodiffBackend, 2, Int>,
     chunks: &[usize], page_size: usize, device: &ModelDevice) -> Tensor<ModelAutodiffBackend, 3> {
     let [batch_size, sequence_len] = input.shape().dims();
@@ -317,6 +343,7 @@ fn cached_forward(model: &Gpt<ModelAutodiffBackend>, input: Tensor<ModelAutodiff
     Tensor::cat(outputs, 1)
 }
 
+#[cfg(feature = "ndarray")]
 fn assert_logits_close(actual: Tensor<ModelAutodiffBackend, 3>,
     expected: Tensor<ModelAutodiffBackend, 3>, label: &str) {
     assert_eq!(actual.shape(), expected.shape(), "{label} shape mismatch");
@@ -324,10 +351,11 @@ fn assert_logits_close(actual: Tensor<ModelAutodiffBackend, 3>,
     assert!(max_error <= 5e-5, "{label} max error {max_error} exceeds 0.00005");
 }
 
+#[cfg(feature = "ndarray")]
 #[test] fn test_full_chunked_and_token_cache_parity() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
-    let model = model_from_fixture(&fixture, &device);
-    let input = fixture_ids(&fixture.input_ids, &device);
+    let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
+    let input = fixture_ids::<ModelAutodiffBackend>(&fixture.input_ids, &device);
     let full = model.forward(input.clone(), None);
     let chunked = cached_forward(&model, input.clone(), &[2, 2], 2, &device);
     let uneven = cached_forward(&model, input.clone(), &[3, 1], 3, &device);
@@ -337,4 +365,62 @@ fn assert_logits_close(actual: Tensor<ModelAutodiffBackend, 3>,
     assert_logits_close(uneven, full.clone(), "uneven/full logits");
     assert_logits_close(tokenwise.clone(), full, "token/full logits");
     assert_logits_close(chunked, tokenwise, "chunked/token logits");
+}
+
+fn fixture_max_abs_error<B: Backend, const D: usize>(actual: Tensor<B, D>,
+    expected: &TensorFixture) -> f32 {
+    assert_eq!(actual.shape().dims::<D>().as_slice(), expected.shape);
+    crate::common::tensor_data_to_f32_vec(actual.into_data()).iter().zip(&expected.values)
+        .map(|(actual, expected)| (actual - expected).abs()).fold(0.0, f32::max)
+}
+
+fn quantized_logit_errors<B: Backend>(fixture: &ModelParityFixture, device: &B::Device,
+    input: Tensor<B, 2, Int>, reference: Tensor<B, 3>) -> (f32, f32) {
+    let w8 = model_from_fixture::<B>(fixture, device).quantize(8, 0);
+    let w8_error = crate::common::scalar_to_f32(
+        (w8.forward(input.clone(), None) - reference.clone()).abs().max().into_scalar());
+    let w4 = model_from_fixture::<B>(fixture, device).quantize(4, 8);
+    let w4_error = crate::common::scalar_to_f32(
+        (w4.forward(input, None) - reference).abs().max().into_scalar());
+    (w8_error, w4_error)
+}
+
+fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
+    println!("PARITY_METRIC\t{path}\t{reference}\t{error:.8}\t{budget:.8}");
+    assert!(error <= budget,
+        "{path} logit max absolute error {error} exceeds budget {budget}");
+}
+
+#[cfg(feature = "ndarray")]
+#[test] fn test_f32_w8_w4_logit_error_budgets() {
+    let (fixture, device) = (model_fixture(), crate::common::init_device());
+    let input = fixture_ids::<ModelBackend>(&fixture.input_ids, &device);
+    let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
+    let f32_logits = model.forward(input.clone(), None);
+    let f32_error = fixture_max_abs_error(f32_logits.clone(), &fixture.logits);
+    let (w8_error, w4_error) =
+        quantized_logit_errors(&fixture, &device, input, f32_logits);
+
+    assert_error_budget("NdArray f32", "Python f32", f32_error,
+        F32_LOGIT_MAX_ABS_ERROR);
+    assert_error_budget("NdArray portable W8", "NdArray f32", w8_error,
+        W8_LOGIT_MAX_ABS_ERROR);
+    assert_error_budget("NdArray portable W4 (block 8)", "NdArray f32", w4_error,
+        W4_LOGIT_MAX_ABS_ERROR);
+}
+
+#[cfg(not(feature = "ndarray"))]
+#[test] fn test_f16_w8_w4_logit_error_budgets() {
+    let (fixture, device) = (model_fixture(), crate::common::init_device());
+    let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
+    let input = fixture_ids::<ModelBackend>(&fixture.input_ids, &device);
+    let f16_logits = model.forward(input.clone(), None);
+    let error = fixture_max_abs_error(f16_logits.clone(), &fixture.logits);
+    let (w8_error, w4_error) =
+        quantized_logit_errors(&fixture, &device, input, f16_logits);
+    assert_error_budget("WGPU f16", "Python f32", error, F16_LOGIT_MAX_ABS_ERROR);
+    assert_error_budget("WGPU native W8", "WGPU f16", w8_error,
+        W8_LOGIT_MAX_ABS_ERROR);
+    assert_error_budget("WGPU native W4 (block 8)", "WGPU f16", w4_error,
+        W4_LOGIT_MAX_ABS_ERROR);
 }

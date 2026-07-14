@@ -60,8 +60,8 @@ runs/<run-name>/
 - [x] 验证完整 logits、loss 和参数梯度。
 - [x] 验证 optimizer Muon/AdamW 单步参数更新。
 - [x] 验证 full forward、chunked cache 和逐 token cache 一致性。
-- [ ] 建立 f32、f16、W8、W4 的明确误差预算。
-- [ ] 自动生成 parity 报告。
+- [x] 建立 f32、f16、W8、W4 的明确误差预算。
+- [x] 自动生成 parity 报告。
 
 验收条件：README 中的 parity 声明均由可重复运行的测试和误差表支持。
 

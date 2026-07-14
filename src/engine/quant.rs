@@ -179,12 +179,16 @@ fn quantize_packed<B: Backend>(weight: Tensor<B, 2>, bits: usize,
     let q_reshaped = q_weight.reshape([num_packed, pack_factor, o]).int();
     let mut values =
         q_reshaped.clone().slice([0..num_packed, 0..1, 0..o]).reshape([num_packed, o]);
-    let mut coefficient = mask + 1;
     for k in 1..pack_factor {
-        let slice =
+        let mut slice =
             q_reshaped.clone().slice([0..num_packed, k..k + 1, 0..o]).reshape([num_packed, o]);
-        values = values + slice.mul_scalar(coefficient);
-        if k + 1 < pack_factor { coefficient *= mask + 1; }
+        if k + 1 == pack_factor {
+            // Encode the highest lane as two's complement before shifting into the sign bits.
+            let sign = slice.clone().greater_equal_elem(1_i32 << (bits - 1)).int();
+            slice = slice - sign.mul_scalar(mask + 1);
+        }
+        values = values.bitwise_or(
+            slice.bitwise_left_shift_scalar(((k * bits) as i32).elem()));
     }
 
     PackedWeights { values, scales }

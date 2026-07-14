@@ -20,7 +20,7 @@
 | Speculative decoding | Reference | greedy 模式数学无损；draft cache 仍会重建，需以基准确认加速 |
 | Group-normalized REINFORCE | Reference | 使用组内优势归一化，不是带 ratio clip 和 reference KL 的完整 GRPO |
 | Python code executor | Experimental | 有超时和输出限制，但不是 OS 级安全沙箱 |
-| Python/Rust 数值 parity 报告 | Planned | 目标是以 fixtures 支持明确的 f32/f16 误差预算 |
+| Python/Rust 数值 parity | Reference | Fixtures 覆盖 tokenizer、模型、optimizer、cache 与 f32/f16/W8/W4 误差预算，并可自动生成报告 |
 
 完整实施计划见 [ROADMAP.md](ROADMAP.md)。
 
@@ -119,7 +119,32 @@ fixture 验证 AdamW 与宽/长矩阵 Muon 的单步参数和状态更新：
 cargo test --features ndarray tokenizer::tests::test_python_tokenizer
 cargo test --features ndarray gpt::parity
 cargo test --features ndarray optim::parity
+cargo test gpt::parity::test_f16_w8_w4_logit_error_budgets -- --nocapture
 ```
+
+固定 `model.json` fixture 的 logits 最大绝对误差预算如下。f32/f16 以 Python f32
+fixture 为参照；W8/W4 以同后端未量化 logits 为参照，从而单独衡量 weight-only
+量化误差。表中实测值来自当前 NdArray 与 Metal/WGPU 测试环境，预算由测试常量持续执行：
+
+| 路径 | 参照 | 实测误差 | 预算 |
+|---|---|---:|---:|
+| NdArray f32 | Python f32 | 6.6e-7 | 5e-5 |
+| WGPU/Metal f16 | Python f32 | 2.63619e-3 | 5e-3 |
+| NdArray portable W8 | NdArray f32 | 9.6667e-4 | 5e-3 |
+| WGPU native W8 | WGPU f16 | 2.31934e-3 | 5e-3 |
+| NdArray portable W4, block 8 | NdArray f32 | 2.99752e-3 | 2e-2 |
+| WGPU native W4, block 8 | WGPU f16 | 4.15039e-3 | 2e-2 |
+
+一条命令运行 NdArray 与 WGPU parity suites，并将测试清单、实测误差、预算、revision
+和运行环境写入 `target/parity-report.md`：
+
+```bash
+python3 tools/parity_report.py
+```
+
+无 GPU 环境可使用 `--backend ndarray`；`--backend wgpu` 可单独验证加速后端，
+`--output -` 将 Markdown 输出到标准输出。任一测试失败、指标缺失或误差超出预算时，
+命令仍会生成带诊断信息的报告并返回非零状态。
 
 使用脚本声明的固定 Python 依赖重新导出 fixtures：
 

@@ -431,8 +431,9 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     p - update
 }
 
+#[cfg(all(test, feature = "ndarray"))] mod parity;
+
 #[cfg(test)] mod tests { use super::*;
-    #[cfg(feature = "ndarray")] mod parity;
 
     #[test] fn test_muon_orthogonalization() {
         use crate::common::ModelBackend;
