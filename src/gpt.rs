@@ -2,7 +2,8 @@
 use std::marker::PhantomData;
 
 use burn::{module::{Module, Param}, nn::{Embedding, Linear},
-    tensor::{Distribution, Int, Shape, Tensor, TensorData, activation, backend::Backend},
+    tensor::{Distribution, Element, Int, Shape, Tensor, TensorData, activation,
+        backend::Backend},
 };
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +92,11 @@ fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize,
 pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, D> {
     let variance = (x.clone() * x.clone()).mean_dim(D - 1);
     x * (variance + eps).sqrt().recip()
+}
+
+fn norm<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
+    let eps = B::FloatElem::dtype().finfo().expect("float backend dtype").epsilon as f32;
+    rms_norm(x, eps)
 }
 
 pub fn apply_rotary_emb<B: Backend>(x: Tensor<B, 4>,
@@ -271,8 +277,8 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
 
         let q = apply_rotary_emb(q, cos.clone(), sin.clone());
         let k = apply_rotary_emb(k, cos, sin);
-        let q = rms_norm(q, 1e-5) * 1.2;
-        let k = rms_norm(k, 1e-5) * 1.2;
+        let q = norm(q) * 1.2;
+        let k = norm(k) * 1.2;
 
         (q, k, v)
     }
@@ -341,15 +347,15 @@ impl<B: Backend, L: ForwardLayer<B>> Block<B, L> {
         cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>,
         step: usize) -> Tensor<B, 3> {
         let x = x.clone() +
-            self.attn.forward_with_cache(rms_norm(x.clone(), 1e-5),
+            self.attn.forward_with_cache(norm(x.clone()),
                 ve, cos, sin, cache, step);
-        x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
+        x.clone() + self.mlp.forward(norm(x))
     }
 
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
         cos: Tensor<B, 4>, sin: Tensor<B, 4>) -> Tensor<B, 3> {
-        let x = x.clone() + self.attn.forward(rms_norm(x.clone(), 1e-5), ve, cos, sin);
-        x.clone() + self.mlp.forward(rms_norm(x, 1e-5))
+        let x = x.clone() + self.attn.forward(norm(x.clone()), ve, cos, sin);
+        x.clone() + self.mlp.forward(norm(x))
     }
 }
 
@@ -493,7 +499,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             "cache token history shape mismatch");
         let previous = (step > 0).then(|| {
             let previous_idx = history.clone().slice([0..batch_size, step - 1..step]);
-            rms_norm(self.wte.forward(previous_idx), 1e-5)
+            norm(self.wte.forward(previous_idx))
         });
         let output = self.smear_embeddings(x, previous);
         cache.token_history = Some(history.slice_assign([0..batch_size, step..end], idx));
@@ -513,7 +519,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         let (cos, sin) =
             self.precompute_rotary_embeddings(start_pos, seq_len, head_dim, &idx.device());
 
-        let x_normed = rms_norm(self.wte.forward(idx.clone()), 1e-5);
+        let x_normed = norm(self.wte.forward(idx.clone()));
 
         let mut x = if let Some(cache) = cache_opt.as_mut() {
                  self.smear_embeddings_with_cache(idx.clone(), x_normed, cache, step)
@@ -547,7 +553,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         if let Some(xb) = x_backout {
             x = x - xb * self.backout_lambda.clone().val().reshape([1, 1, 1]);
         }
-        let x = rms_norm(x, 1e-5);
+        let x = norm(x);
 
         let mut logits = self.lm_head.forward_layer(x);
         logits = logits.slice([0..batch_size, 0..seq_len, 0..self.config.vocab_size]);
@@ -642,6 +648,8 @@ impl<B: Backend> Gpt<B, Linear<B>> {
 }
 
 #[cfg(test)] mod tests { use super::*;
+    #[cfg(feature = "ndarray")] mod parity;
+
     #[test] fn test_gpt_forward_and_loss() {
         let device = crate::common::init_device();
         let config = GptConfig { sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 2,

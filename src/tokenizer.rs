@@ -481,6 +481,86 @@ impl BpeTokenizer {
 }
 
 #[cfg(test)] mod tests { use super::*;
+    #[derive(Deserialize)]
+    struct TokenizerParityFixture {
+        schema_version: u32,
+        source: FixtureSource,
+        vocab_size: usize,
+        corpus: Vec<String>,
+        mergeable_ranks: Vec<FixtureRank>,
+        special_tokens: HashMap<String, usize>,
+        encoding_cases: Vec<EncodingCase>,
+        conversation_cases: Vec<ConversationCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureSource { implementation: String, rustbpe: String, tiktoken: String }
+
+    #[derive(Deserialize)]
+    struct FixtureRank { bytes: Vec<u8>, id: usize }
+
+    #[derive(Deserialize)]
+    struct EncodingCase { text: String, ids: Vec<usize> }
+
+    #[derive(Deserialize)]
+    struct ConversationCase {
+        name: String,
+        max_tokens: usize,
+        conversation: Conversation,
+        ids: Vec<usize>,
+        mask: Vec<i32>,
+        completion_ids: Vec<usize>,
+    }
+
+    fn python_parity_fixture() -> TokenizerParityFixture {
+        let fixture: TokenizerParityFixture = serde_json::from_str(
+            include_str!("../data/fixtures/parity/tokenizer.json")).unwrap();
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.source.implementation, "nanochat.tokenizer.RustBPETokenizer");
+        assert_eq!(fixture.source.rustbpe, "0.1.0");
+        assert_eq!(fixture.source.tiktoken, "0.11.0");
+        fixture
+    }
+
+    fn tokenizer_from_fixture(fixture: &TokenizerParityFixture) -> BpeTokenizer {
+        let mut tokenizer = BpeTokenizer {
+            mergeable_ranks: fixture.mergeable_ranks.iter()
+                .map(|rank| (rank.bytes.clone(), rank.id)).collect(),
+            special_tokens: fixture.special_tokens.clone(),
+            inverse_vocab: HashMap::new(), inverse_special_tokens: HashMap::new(),
+        };
+        tokenizer.build_inverse_mappings();
+        tokenizer
+    }
+
+    #[test] fn test_python_tokenizer_training_parity() {
+        let fixture = python_parity_fixture();
+        let tokenizer = BpeTokenizer::train_from_iterator(&fixture.corpus, fixture.vocab_size);
+        let expected = tokenizer_from_fixture(&fixture);
+        assert_eq!(tokenizer.mergeable_ranks, expected.mergeable_ranks);
+        assert_eq!(tokenizer.special_tokens, expected.special_tokens);
+    }
+
+    #[test] fn test_python_tokenizer_encoding_and_conversation_parity() {
+        let fixture = python_parity_fixture();
+        let tokenizer = tokenizer_from_fixture(&fixture);
+        assert_eq!(tokenizer.get_vocab_size(), fixture.vocab_size);
+
+        for case in fixture.encoding_cases {
+            assert_eq!(tokenizer.encode_ordinary(&case.text), case.ids,
+                "encoding parity failed for {:?}", case.text);
+            assert_eq!(tokenizer.decode(&case.ids), case.text,
+                "decoding parity failed for encoded fixture");
+        }
+        for case in fixture.conversation_cases {
+            let (ids, mask) = tokenizer.render_conversation(&case.conversation, case.max_tokens);
+            assert_eq!(ids, case.ids, "conversation ID parity failed for {}", case.name);
+            assert_eq!(mask, case.mask, "conversation mask parity failed for {}", case.name);
+            assert_eq!(tokenizer.render_for_completion(&case.conversation), case.completion_ids,
+                "completion prompt parity failed for {}", case.name);
+        }
+    }
+
     #[test] fn test_bpe_training_and_encoding_roundtrip() {
         let corpus = vec![
             "Hello world! Hello system programming.",

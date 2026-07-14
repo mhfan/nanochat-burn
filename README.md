@@ -108,6 +108,28 @@ cargo test --features ndarray
 cargo test
 ```
 
+Python nanochat parity fixtures 位于 `data/fixtures/parity/`。Tokenizer fixture 覆盖 BPE
+训练结果、普通 token IDs、conversation masks、tool parts、截断和 completion rendering；module
+fixture 使用固定输入和参数验证 RMSNorm、RoPE、MLP 与含 value embedding gate 的 GQA attention。
+Full-model fixture 进一步验证两层 GPT 的 logits、mean loss 和代表性参数梯度。Rust 测试不依赖
+Python，并以同一模型验证 full、chunked、非均匀 chunk 和逐 token cache logits。Optimizer
+fixture 验证 AdamW 与宽/长矩阵 Muon 的单步参数和状态更新：
+
+```bash
+cargo test --features ndarray tokenizer::tests::test_python_tokenizer
+cargo test --features ndarray gpt::parity
+cargo test --features ndarray optim::parity
+```
+
+使用脚本声明的固定 Python 依赖重新导出 fixtures：
+
+```bash
+uv run tools/export_tokenizer_parity.py
+uv run tools/export_torch_parity.py all
+```
+
+`all` 可替换为 `modules`、`model` 或 `optimizer`，只重新生成对应 fixture。
+
 ### 端到端 Tiny Recipe
 
 仓库内置一套离线小文本 recipe，一条命令完成 tokenizer 训练、pretrain、SFT 和 eval：

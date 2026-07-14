@@ -2,7 +2,8 @@
 use std::{collections::BTreeMap, path::Path};
 
 use burn::{module::Param, optim::GradientsParams,
-    tensor::{Shape, Tensor, TensorData, backend::{AutodiffBackend, Backend}},
+    tensor::{DType, Element, Shape, Tensor, TensorData,
+        backend::{AutodiffBackend, Backend}},
 };
 use safetensors::SafeTensors;
 
@@ -13,6 +14,14 @@ const EMBEDDING_LR_SCALE: f32 = 10.0;
 const VALUE_EMBED_LR_SCALE: f32 = 0.5;
 const SCALAR_LR_SCALE: f32 = 25.0;
 const SMEAR_LR_SCALE: f32 = 10.0;
+const OPTIMIZER_EPSILON: f32 = 1e-10;
+const F16_OPTIMIZER_EPSILON: f32 = 1e-4;
+
+fn optimizer_epsilon<B: Backend>() -> f32 {
+    if matches!(B::FloatElem::dtype(), DType::F16 | DType::Flex32) {
+        F16_OPTIMIZER_EPSILON
+    } else { OPTIMIZER_EPSILON }
+}
 
 pub struct AdamWState<B: Backend, const D: usize> {
     pub exp_avg: Tensor<B, D>,
@@ -297,7 +306,7 @@ struct AdamWHyper {
 
 impl AdamWHyper {
     fn new(lr: f32, wd: f32, beta1: f32, beta2: f32, step: usize) -> Self {
-        Self { lr, wd, beta1, beta2, eps: 1e-4, step }
+        Self { lr, wd, beta1, beta2, eps: OPTIMIZER_EPSILON, step }
     }
 }
 
@@ -345,7 +354,8 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
 
     let bias1 = 1.0 - hyper.beta1.powi(hyper.step as i32);
     let bias2 = 1.0 - hyper.beta2.powi(hyper.step as i32);
-    let denom = (s.exp_avg_sq.clone() / bias2).clamp(0.0, 1e10).sqrt().add_scalar(hyper.eps);
+    let eps = hyper.eps.max(optimizer_epsilon::<B>());
+    let denom = (s.exp_avg_sq.clone() / bias2).clamp(0.0, 1e10).sqrt().add_scalar(eps);
 
     p.mul_scalar(1.0 - hyper.lr * hyper.wd) -
         (s.exp_avg.clone() / denom).mul_scalar(hyper.lr / bias1)
@@ -366,9 +376,10 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     });
 
     s.momentum_buffer = s.momentum_buffer.clone().mul_scalar(hyper.momentum) +
-        grad.mul_scalar(1.0 - hyper.momentum);
+        grad.clone().mul_scalar(1.0 - hyper.momentum);
 
-    let g = s.momentum_buffer.clone();
+    let g = grad.mul_scalar(1.0 - hyper.momentum) +
+        s.momentum_buffer.clone().mul_scalar(hyper.momentum);
     let g_scaled = g.clone().mul_scalar(10000.0);
     let norm = g_scaled.powf_scalar(2.0).sum().clamp(0.0, 1e10).sqrt().mul_scalar(0.0001);
     let mut x = g / norm.mul_scalar(1.01).add_scalar(1e-6).reshape([1, 1]);
@@ -402,12 +413,13 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 
     s.second_momentum_buffer = s.second_momentum_buffer.clone().mul_scalar(hyper.beta2) +
         v_mean.clone().mul_scalar(1.0 - hyper.beta2);
-    let step_size = (s.second_momentum_buffer.clone().clamp(1e-4, 1e4)).recip().sqrt();
+    let eps = optimizer_epsilon::<B>();
+    let step_size = (s.second_momentum_buffer.clone().clamp(eps, 1e4)).recip().sqrt();
 
     let scaled_sq_sum = (v_mean * red_dim_size) * step_size.clone().powf_scalar(2.0);
     let v_norm_new = scaled_sq_sum.sum().clamp(0.0, 1e10).sqrt();
 
-    let ratio = (v_norm / v_norm_new.clamp(1e-4, 1e4)).reshape([1, 1]);
+    let ratio = (v_norm / v_norm_new.clamp(eps, 1e4)).reshape([1, 1]);
     g_ortho = g_ortho * step_size * ratio;
 
     let lr_scaled = hyper.lr * ((rows as f32 / cols as f32).max(1.0)).sqrt();
@@ -420,6 +432,8 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 }
 
 #[cfg(test)] mod tests { use super::*;
+    #[cfg(feature = "ndarray")] mod parity;
+
     #[test] fn test_muon_orthogonalization() {
         use crate::common::ModelBackend;
         let device = crate::common::init_device();

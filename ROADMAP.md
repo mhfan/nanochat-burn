@@ -54,12 +54,12 @@ runs/<run-name>/
 
 ## M2：数值 Parity 与正确性证据
 
-- [ ] 从 Python nanochat 导出固定输入和参数 fixtures。
-- [ ] 验证 tokenizer token IDs 与 conversation rendering。
-- [ ] 验证 attention、MLP、RoPE、RMSNorm 单元输出。
-- [ ] 验证完整 logits、loss 和参数梯度。
-- [ ] 验证 Muon/AdamW 单步参数更新。
-- [ ] 验证 full forward、chunked cache 和逐 token cache 一致性。
+- [x] 从 Python nanochat 导出固定输入和参数 fixtures。
+- [x] 验证 tokenizer token IDs 与 conversation rendering。
+- [x] 验证 attention、MLP、RoPE、RMSNorm 单元输出。
+- [x] 验证完整 logits、loss 和参数梯度。
+- [x] 验证 optimizer Muon/AdamW 单步参数更新。
+- [x] 验证 full forward、chunked cache 和逐 token cache 一致性。
 - [ ] 建立 f32、f16、W8、W4 的明确误差预算。
 - [ ] 自动生成 parity 报告。
 
