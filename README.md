@@ -24,6 +24,16 @@
 
 完整实施计划见 [ROADMAP.md](ROADMAP.md)。
 
+## 学习路径
+
+面向源码的 mini-LLM 教程从 [docs/README.md](docs/README.md) 开始，按 tokenizer、数据、模型、
+优化器、训练、推理和对齐组织。每章包含数学或数据契约、源码入口、可运行的 tiny 实验、正确性
+证据和常见错误。第一章 [Tokenizer：从字节到训练目标](docs/tokenizer.md) 已完成，可直接运行：
+
+```bash
+cargo run --features ndarray --example tokenizer
+```
+
 ## 核心模型与系统特性
 
 *   **独创 GPT Transformer 架构**：
@@ -62,6 +72,8 @@
     ├── Cargo.toml
     ├── README.md               # 项目主说明文档
     ├── ROADMAP.md              # 分阶段实施计划与验收标准
+    ├── docs/                   # mini-LLM 分章节学习路径
+    ├── examples/               # 与章节配套的可运行 tiny 实验
     ├── configs/mini.toml       # 默认 mini-LLM 三阶段实验配置
     ├── src/
     │   ├── lib.rs              # 导出所有子模块
