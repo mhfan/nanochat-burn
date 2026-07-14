@@ -3,8 +3,9 @@ use std::time::Instant;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
-use crate::{common::{int_tensor_2d, scalar_to_f32}, dataloader::DistributedDataLoader,
-    gpt::Gpt, optim::MuonAdamW, tokenizer::BpeTokenizer,
+use crate::{common::{int_tensor_2d, scalar_to_f32},
+    dataloader::{DataLoaderPosition, DistributedDataLoader}, gpt::Gpt, optim::MuonAdamW,
+    tokenizer::BpeTokenizer,
 };
 
 pub mod calculator;
@@ -18,7 +19,7 @@ pub mod sft;
 pub mod speculative;
 
 /// Training configuration hyperparameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrainingConfig {
     pub num_iterations: usize,
     pub warmup_steps: usize,
@@ -163,6 +164,15 @@ pub struct TrainingEngine<B: AutodiffBackend> {
     pub step: usize,
     pub smooth_train_loss: f32,
     pub total_training_time_secs: f64,
+    pub dataloader_position: Option<DataLoaderPosition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrainerState {
+    pub step: usize,
+    pub smooth_train_loss: f32,
+    pub total_training_time_secs: f64,
+    pub dataloader_position: Option<DataLoaderPosition>,
 }
 
 impl<B: AutodiffBackend> TrainingEngine<B> {
@@ -173,7 +183,35 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let optimizer = MuonAdamW::new(model.config.n_layer);
         let token_bytes = get_token_bytes(tokenizer);
         Self { model, optimizer, config, token_bytes, step: 0,
-            smooth_train_loss: 0.0, total_training_time_secs: 0.0,
+            smooth_train_loss: 0.0, total_training_time_secs: 0.0, dataloader_position: None,
+        }
+    }
+
+    pub fn from_state(model: Gpt<B>, optimizer: MuonAdamW<B>, config: TrainingConfig,
+        tokenizer: &BpeTokenizer, state: TrainerState) -> Self {
+        config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
+        assert_eq!(config.sequence_length, model.config.sequence_len,
+            "training and model sequence lengths must match");
+        assert!(state.step <= config.num_iterations,
+            "trainer step exceeds configured training iterations");
+        assert!(state.step == 0 || state.dataloader_position.is_some(),
+            "resumed trainer state is missing its dataloader position");
+        assert!(state.smooth_train_loss.is_finite() && state.smooth_train_loss >= 0.0,
+            "smoothed training loss must be finite and non-negative");
+        assert!(state.total_training_time_secs.is_finite() &&
+            state.total_training_time_secs >= 0.0,
+            "total training time must be finite and non-negative");
+        Self { model, optimizer, config, token_bytes: get_token_bytes(tokenizer), step: state.step,
+            smooth_train_loss: state.smooth_train_loss,
+            total_training_time_secs: state.total_training_time_secs,
+            dataloader_position: state.dataloader_position,
+        }
+    }
+
+    pub fn state(&self) -> TrainerState {
+        TrainerState { step: self.step, smooth_train_loss: self.smooth_train_loss,
+            total_training_time_secs: self.total_training_time_secs,
+            dataloader_position: self.dataloader_position,
         }
     }
 
@@ -188,6 +226,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         for _ in 0..grad_accum_steps {
             let batch = loader.next_batch().await.expect("training data loader stopped unexpectedly");
+            self.dataloader_position = Some(batch.next_position);
             let shape = [self.config.device_batch_size, self.config.sequence_length];
             let x_tensor = int_tensor_2d(batch.x, shape, device);
             let y_tensor = int_tensor_2d(batch.y, shape, device);
@@ -267,5 +306,80 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let device = crate::common::init_device();
         let gpt: Gpt<crate::common::ModelBackend> = Gpt::new(config.clone(), &device);
         assert_eq!(gpt.config.sequence_len, 8);
+    }
+
+    #[tokio::test] async fn test_training_resume_equivalence() {
+        use crate::{artifact::{TrainingStage, load_artifact, load_resume_state, save_artifact,
+                save_resume_state}, common::{ModelAutodiffBackend, init_device,
+                tensor_data_to_f32_vec}, dataloader::DistributedDataLoaderConfig,
+            dataset::pretokenize_text_to_bin, gpt::GptConfig,
+        };
+        let device = init_device();
+        let tokenizer = BpeTokenizer::train_from_iterator(
+            ["resume equivalence needs enough deterministic training tokens"], 280);
+        let model_config = GptConfig { sequence_len: 4, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
+            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+        };
+        let training_config = TrainingConfig { num_iterations: 2, warmup_steps: 0,
+            warmdown_ratio: 0.0, final_lr_frac: 1.0, learning_rate: 1e-3,
+            weight_decay: 0.1, device_batch_size: 1, sequence_length: 4,
+            total_batch_size: 1,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "nanochat-resume-test-{}", std::process::id()));
+        let data_txt = root.join("train.txt");
+        let data_bin = root.join("train.bin");
+        let initial = root.join("initial");
+        let checkpoint = root.join("checkpoint");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&data_txt,
+            "resume equivalence needs enough deterministic training tokens ".repeat(8)).unwrap();
+        pretokenize_text_to_bin(&data_txt, &data_bin, &tokenizer).unwrap();
+        let model = Gpt::<ModelAutodiffBackend>::new(model_config.clone(), &device);
+        save_artifact(&initial, TrainingStage::Pretrain, &model, &tokenizer,
+            Some(&training_config)).unwrap();
+
+        let uninterrupted = load_artifact::<ModelAutodiffBackend>(&initial, &device).unwrap();
+        let mut uninterrupted =
+            TrainingEngine::new(uninterrupted.model, training_config.clone(), &tokenizer);
+        let loader_config = DistributedDataLoaderConfig::single_process(1, 4);
+        let mut loader = DistributedDataLoader::new(vec![data_bin.clone()], loader_config);
+        uninterrupted.train_step(&mut loader, &device).await;
+        uninterrupted.train_step(&mut loader, &device).await;
+
+        let interrupted = load_artifact::<ModelAutodiffBackend>(&initial, &device).unwrap();
+        let mut interrupted =
+            TrainingEngine::new(interrupted.model, training_config.clone(), &tokenizer);
+        let mut loader =
+            DistributedDataLoader::new(vec![data_bin.clone()], loader_config);
+        interrupted.train_step(&mut loader, &device).await;
+        save_artifact(&checkpoint, TrainingStage::Pretrain, &interrupted.model, &tokenizer,
+            Some(&training_config)).unwrap();
+        save_resume_state(&checkpoint, &interrupted.optimizer, &interrupted.state()).unwrap();
+
+        let artifact = load_artifact::<ModelAutodiffBackend>(&checkpoint, &device).unwrap();
+        let (optimizer, state) =
+            load_resume_state::<ModelAutodiffBackend>(&checkpoint, 1, &device).unwrap();
+        let position = state.dataloader_position.unwrap();
+        let mut resumed = TrainingEngine::from_state(artifact.model, optimizer,
+            training_config, &tokenizer, state);
+        let mut loader = DistributedDataLoader::new(vec![data_bin],
+            loader_config.with_position(position));
+        resumed.train_step(&mut loader, &device).await;
+
+        let input = int_tensor_2d(vec![0; 4], [1, 4], &device);
+        let expected = tensor_data_to_f32_vec(
+            uninterrupted.model.forward(input.clone(), None).into_data());
+        let actual =
+            tensor_data_to_f32_vec(resumed.model.forward(input, None).into_data());
+        assert_eq!(resumed.step, uninterrupted.step);
+        assert_eq!(resumed.dataloader_position, uninterrupted.dataloader_position);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-4,
+                "resumed logits differ: {actual} != {expected}");
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 }

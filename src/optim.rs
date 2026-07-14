@@ -1,7 +1,10 @@
 
+use std::{collections::BTreeMap, path::Path};
+
 use burn::{module::Param, optim::GradientsParams,
-    tensor::{Tensor, backend::{AutodiffBackend, Backend}},
+    tensor::{Shape, Tensor, TensorData, backend::{AutodiffBackend, Backend}},
 };
+use safetensors::SafeTensors;
 
 use crate::gpt::{Gpt, has_ve};
 
@@ -134,6 +137,151 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             update_muon_param(&mut block.mlp.c_proj.weight, grads, &mut state.c_proj_mlp,
                 muon_hyper);
         }
+    }
+
+    pub fn save_state(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let mut saver = OptimizerStateSaver::default();
+        saver.adam("wte", &self.wte);
+        saver.adam("lm_head", &self.lm_head);
+        for (index, state) in self.value_embeds.iter().enumerate() {
+            saver.adam(&format!("value_embeds.{index}"), state);
+        }
+        saver.adam("resid_lambdas", &self.resid_lambdas);
+        saver.adam("x0_lambdas", &self.x0_lambdas);
+        saver.adam("smear_gate", &self.smear_gate);
+        saver.adam("smear_lambda", &self.smear_lambda);
+        saver.adam("backout_lambda", &self.backout_lambda);
+
+        for (index, state) in self.h.iter().enumerate() {
+            let prefix = format!("h.{index}");
+            saver.muon(&format!("{prefix}.c_q"), &state.c_q);
+            saver.muon(&format!("{prefix}.c_k"), &state.c_k);
+            saver.muon(&format!("{prefix}.c_v"), &state.c_v);
+            saver.muon(&format!("{prefix}.c_proj"), &state.c_proj);
+            saver.muon(&format!("{prefix}.ve_gate"), &state.ve_gate);
+            saver.muon(&format!("{prefix}.c_fc"), &state.c_fc);
+            saver.muon(&format!("{prefix}.c_proj_mlp"), &state.c_proj_mlp);
+        }
+        saver.write(path.as_ref())
+    }
+
+    pub fn load_state(path: impl AsRef<Path>, n_layer: usize, device: &B::Device)
+        -> Result<Self, String> {
+        let bytes = std::fs::read(path.as_ref())
+            .map_err(|error| format!("failed to read optimizer state: {error}"))?;
+        let tensors = SafeTensors::deserialize(&bytes)
+            .map_err(|error| format!("failed to parse optimizer state: {error}"))?;
+        let mut optimizer = Self::new(n_layer);
+
+        optimizer.wte = load_adam(&tensors, "wte", device)?;
+        optimizer.lm_head = load_adam(&tensors, "lm_head", device)?;
+        for (index, state) in optimizer.value_embeds.iter_mut().enumerate() {
+            *state = load_adam(&tensors, &format!("value_embeds.{index}"), device)?;
+        }
+        optimizer.resid_lambdas = load_adam(&tensors, "resid_lambdas", device)?;
+        optimizer.x0_lambdas = load_adam(&tensors, "x0_lambdas", device)?;
+        optimizer.smear_gate = load_adam(&tensors, "smear_gate", device)?;
+        optimizer.smear_lambda = load_adam(&tensors, "smear_lambda", device)?;
+        optimizer.backout_lambda = load_adam(&tensors, "backout_lambda", device)?;
+
+        for (index, state) in optimizer.h.iter_mut().enumerate() {
+            let prefix = format!("h.{index}");
+            state.c_q = load_muon(&tensors, &format!("{prefix}.c_q"), device)?;
+            state.c_k = load_muon(&tensors, &format!("{prefix}.c_k"), device)?;
+            state.c_v = load_muon(&tensors, &format!("{prefix}.c_v"), device)?;
+            state.c_proj = load_muon(&tensors, &format!("{prefix}.c_proj"), device)?;
+            state.ve_gate = load_muon(&tensors, &format!("{prefix}.ve_gate"), device)?;
+            state.c_fc = load_muon(&tensors, &format!("{prefix}.c_fc"), device)?;
+            state.c_proj_mlp = load_muon(&tensors, &format!("{prefix}.c_proj_mlp"), device)?;
+        }
+        Ok(optimizer)
+    }
+}
+
+struct SavedStateTensor { bytes: Vec<u8>, shape: Vec<usize> }
+
+#[derive(Default)]
+struct OptimizerStateSaver { tensors: BTreeMap<String, SavedStateTensor> }
+
+impl OptimizerStateSaver {
+    fn tensor<B: Backend, const D: usize>(&mut self, name: String, tensor: Tensor<B, D>) {
+        let shape = tensor.shape().dims::<D>().to_vec();
+        let bytes = crate::common::tensor_data_to_f32_vec(tensor.into_data())
+            .into_iter().flat_map(f32::to_le_bytes).collect();
+        self.tensors.insert(name, SavedStateTensor { bytes, shape });
+    }
+
+    fn adam<B: Backend, const D: usize>(&mut self, prefix: &str,
+        state: &Option<AdamWState<B, D>>) {
+        if let Some(state) = state {
+            self.tensor(format!("{prefix}.exp_avg"), state.exp_avg.clone());
+            self.tensor(format!("{prefix}.exp_avg_sq"), state.exp_avg_sq.clone());
+        }
+    }
+
+    fn muon<B: Backend>(&mut self, prefix: &str, state: &Option<MuonState<B, 2>>) {
+        if let Some(state) = state {
+            self.tensor(format!("{prefix}.momentum"), state.momentum_buffer.clone());
+            self.tensor(format!("{prefix}.second_momentum"),
+                state.second_momentum_buffer.clone());
+        }
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        let mut views = BTreeMap::new();
+        for (name, tensor) in &self.tensors {
+            let view = safetensors::tensor::TensorView::new(
+                safetensors::tensor::Dtype::F32, tensor.shape.clone(), &tensor.bytes,
+            ).map_err(|error| format!("failed to create optimizer tensor {name}: {error}"))?;
+            views.insert(name.clone(), view);
+        }
+        safetensors::tensor::serialize_to_file(&views, None, path)
+            .map_err(|error| format!("failed to save optimizer state: {error}"))
+    }
+}
+
+fn load_tensor<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, name: &str,
+    device: &B::Device) -> Result<Option<Tensor<B, D>>, String> {
+    if !tensors.names().iter().any(|candidate| *candidate == name) { return Ok(None); }
+    let view = tensors.tensor(name)
+        .map_err(|error| format!("failed to read optimizer tensor {name}: {error}"))?;
+    if view.dtype() != safetensors::tensor::Dtype::F32 {
+        return Err(format!("optimizer tensor {name} must use F32 storage"));
+    }
+    let shape: [usize; D] = view.shape().try_into()
+        .map_err(|_| format!("optimizer tensor {name} must have rank {D}"))?;
+    let expected_bytes = shape.iter().try_fold(1usize, |size, &dim| size.checked_mul(dim))
+        .and_then(|size| size.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| format!("optimizer tensor {name} shape is too large"))?;
+    if view.data().len() != expected_bytes {
+        return Err(format!("optimizer tensor {name} has an invalid byte length"));
+    }
+    let data = view.data().chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect::<Vec<_>>();
+    Ok(Some(Tensor::from_data(TensorData::new(data, Shape::new(shape)), device)))
+}
+
+fn load_adam<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, prefix: &str,
+    device: &B::Device) -> Result<Option<AdamWState<B, D>>, String> {
+    let exp_avg = load_tensor(tensors, &format!("{prefix}.exp_avg"), device)?;
+    let exp_avg_sq = load_tensor(tensors, &format!("{prefix}.exp_avg_sq"), device)?;
+    match (exp_avg, exp_avg_sq) {
+        (None, None) => Ok(None),
+        (Some(exp_avg), Some(exp_avg_sq)) => Ok(Some(AdamWState { exp_avg, exp_avg_sq })),
+        _ => Err(format!("optimizer AdamW state {prefix} is incomplete")),
+    }
+}
+
+fn load_muon<B: Backend>(tensors: &SafeTensors<'_>, prefix: &str, device: &B::Device)
+    -> Result<Option<MuonState<B, 2>>, String> {
+    let momentum_buffer = load_tensor(tensors, &format!("{prefix}.momentum"), device)?;
+    let second_momentum_buffer =
+        load_tensor(tensors, &format!("{prefix}.second_momentum"), device)?;
+    match (momentum_buffer, second_momentum_buffer) {
+        (None, None) => Ok(None),
+        (Some(momentum_buffer), Some(second_momentum_buffer)) =>
+            Ok(Some(MuonState { momentum_buffer, second_momentum_buffer })),
+        _ => Err(format!("optimizer Muon state {prefix} is incomplete")),
     }
 }
 
@@ -284,5 +432,33 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         let new_p = muon_step(p, grad, &mut state, hyper);
         let shape: [usize; 2] = new_p.shape().dims();
         assert_eq!(shape, [2, 2]);
+    }
+
+    #[test] fn test_optimizer_state_roundtrip() {
+        use crate::common::{ModelAutodiffBackend, ModelBackend, init_device,
+            tensor_data_to_f32_vec};
+        let device = init_device();
+        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(1);
+        optimizer.wte = Some(AdamWState {
+            exp_avg: Tensor::<ModelBackend, 2>::from_data([[1.0, 2.0]], &device),
+            exp_avg_sq: Tensor::<ModelBackend, 2>::from_data([[3.0, 4.0]], &device),
+        });
+        optimizer.h[0].c_q = Some(MuonState {
+            momentum_buffer: Tensor::<ModelBackend, 2>::from_data(
+                [[5.0, 6.0], [7.0, 8.0]], &device),
+            second_momentum_buffer: Tensor::<ModelBackend, 2>::from_data([[9.0], [10.0]], &device),
+        });
+        let path = std::env::temp_dir().join(format!(
+            "nanochat-optimizer-test-{}.safetensors", std::process::id()));
+
+        optimizer.save_state(&path).unwrap();
+        let loaded = MuonAdamW::<ModelAutodiffBackend>::load_state(&path, 1, &device).unwrap();
+
+        assert_eq!(tensor_data_to_f32_vec(loaded.wte.unwrap().exp_avg.into_data()),
+            vec![1.0, 2.0]);
+        assert_eq!(tensor_data_to_f32_vec(
+            loaded.h[0].c_q.as_ref().unwrap().second_momentum_buffer.clone().into_data()),
+            vec![9.0, 10.0]);
+        std::fs::remove_file(path).ok();
     }
 }

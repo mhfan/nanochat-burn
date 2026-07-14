@@ -13,7 +13,7 @@
 |---|---|---|
 | GPT、RoPE、GQA、SWA、QK Norm、ReLU² | Stable | 有单元测试和 cached/full forward 一致性测试 |
 | Muon + AdamW | Stable | 支持梯度累积和 f16 数值保护 |
-| Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；optimizer 精确恢复仍在路线图中 |
+| Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 支持 optimizer 与数据位置精确恢复 |
 | W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
 | Blocked KV cache | Reference | 固定页面布局参考实现，不等同于带动态页表的完整 PagedAttention |
 | Speculative decoding | Reference | greedy 模式数学无损；draft cache 仍会重建，需以基准确认加速 |
@@ -45,7 +45,7 @@
 *   **低比特量化与生态对接 (Quantization & Serialization)**：
     *   **低比特权重量化**：Linear 投影支持 W8A16/W4A16 和通道/块对称缩放。
     *   **Safetensors 序列化**：支持模型参数导入导出和 Burn/PyTorch Linear layout 转置。
-    *   **统一 Artifact**：模型配置、tokenizer、权重和阶段 manifest 保存在同一目录中。
+    *   **统一 Artifact**：模型配置、tokenizer、权重、optimizer、trainer 状态和阶段 manifest 保存在同一目录中。
 *   **推理与对齐参考实现**：
     *   **KV Cache 与推测解码**：包含 blocked cache、完整前向 parity 测试和 greedy speculative reference path。
     *   **组内归一化 REINFORCE**：无需 Critic，按问题内 rollout reward 标准化优势。
@@ -110,6 +110,15 @@ cargo test
 ```bash
 cargo run --bin train --release -- --pretrain
 ```
+
+预训练默认每 5 步更新一次可恢复 checkpoint；中断后从同一 artifact 继续：
+
+```bash
+NANOCHAT_RESUME_ARTIFACT=runs/pretrain cargo run --bin train --release -- --pretrain
+```
+
+可通过 `NANOCHAT_CHECKPOINT_INTERVAL` 调整保存间隔，设为 `0` 时仅保存最终状态。设置
+`NANOCHAT_OUTPUT_ARTIFACT` 可将恢复后的训练写入新目录，并保留 checkpoint 之前的 metrics 历史。
 
 ### 3. 监督微调 (SFT)
 加载 `runs/pretrain/`，执行 Packed SFT，并输出 `runs/sft/`：

@@ -29,7 +29,8 @@
 - [x] 定义标准 artifact 目录和 manifest。
 - [x] 保存模型配置、tokenizer、模型权重和训练阶段。
 - [x] 保存并追加结构化训练指标。
-- [ ] 保存 optimizer、trainer、dataloader 与随机状态，支持精确断点续训。
+- [x] 保存 optimizer、trainer 与 dataloader 状态，支持预训练精确断点续训。
+- [ ] 在引入 dropout、随机采样训练或数据增强时保存并恢复对应随机状态。
 - [x] Pretrain 输出可被 SFT 加载。
 - [x] SFT 输出可被 RL 加载。
 - [x] Eval、CLI Chat 和 Web Chat 加载同一 artifact。
@@ -43,7 +44,7 @@ runs/<run-name>/
 ├── config.json
 ├── tokenizer.json
 ├── model.safetensors
-├── optimizer.bin
+├── optimizer.safetensors
 ├── trainer-state.json
 └── metrics.jsonl
 ```
@@ -70,7 +71,9 @@ runs/<run-name>/
 - [ ] 支持 ReLU2、QK Norm、GQA、SWA、Smear、Backout 开关。
 - [ ] 支持 Muon 与 AdamW 对照实验。
 - [ ] 生成 loss、BPB、tokens/s、内存占用和模型质量报告。
-- [ ] 增加 tiny overfit、resume equivalence 和 deterministic decode 集成测试。
+- [ ] 增加 tiny overfit 集成测试。
+- [x] 增加 resume equivalence 集成测试。
+- [ ] 增加 deterministic decode 集成测试。
 
 验收条件：读者可通过一组小实验观察每项架构设计对数值和训练的影响。
 

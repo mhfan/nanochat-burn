@@ -1,5 +1,6 @@
 
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, channel};
 
 use crate::{tokenizer::BpeTokenizer, dataset::{PretrainingDataset, SftDataset}};
@@ -7,6 +8,14 @@ use crate::{tokenizer::BpeTokenizer, dataset::{PretrainingDataset, SftDataset}};
 pub struct Batch {
     pub x: Vec<i32>,
     pub y: Vec<i32>,
+    pub shard_idx: usize,
+    pub token_offset: usize,
+    pub epoch: usize,
+    pub next_position: DataLoaderPosition,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataLoaderPosition {
     pub shard_idx: usize,
     pub token_offset: usize,
     pub epoch: usize,
@@ -30,6 +39,13 @@ impl DistributedDataLoaderConfig {
         Self { batch_size, sequence_length, rank: 0, world_size: 1,
             start_shard_idx: 0, start_token_offset: 0, start_epoch: 0,
         }
+    }
+
+    pub fn with_position(mut self, position: DataLoaderPosition) -> Self {
+        self.start_shard_idx = position.shard_idx;
+        self.start_token_offset = position.token_offset;
+        self.start_epoch = position.epoch;
+        self
     }
 
     fn validate(self) {
@@ -70,6 +86,11 @@ impl DistributedDataLoader {
                 eprintln!("DDP Rank {} has no shards assigned!", rank);
                 return;
             }
+            if start_token_offset > 0 && !shards_assigned.contains(&start_shard_idx) {
+                eprintln!("DDP Rank {} cannot resume from unassigned shard {}",
+                    rank, start_shard_idx);
+                return;
+            }
 
             let num_needed = batch_size.checked_mul(sequence_length + 1)
                 .expect("batch token count overflow");
@@ -83,6 +104,11 @@ impl DistributedDataLoader {
             let mut shard_pos =
                 shards_assigned.iter().position(|&idx| idx == start_shard_idx).unwrap_or(0);
             let (mut offset, mut epoch) = (start_token_offset, start_epoch);
+            if offset > dataset.shards[shards_assigned[shard_pos]].num_tokens {
+                eprintln!("DDP Rank {} resume offset {} exceeds shard {} length",
+                    rank, offset, shards_assigned[shard_pos]);
+                return;
+            }
 
             loop {
                 let active_shard_idx = shards_assigned[shard_pos];
@@ -103,9 +129,12 @@ impl DistributedDataLoader {
 
                 push_lm_rows(&tokens, batch_size, sequence_length, &mut x, &mut y);
 
-                let batch =
-                    Batch { x, y, shard_idx: active_shard_idx, token_offset: offset, epoch };
-                offset += num_needed;
+                offset = offset.checked_add(num_needed).expect("dataset token offset overflow");
+                let next_position =
+                    DataLoaderPosition { shard_idx: active_shard_idx, token_offset: offset, epoch };
+                let batch = Batch { x, y, shard_idx: active_shard_idx,
+                    token_offset: offset - num_needed, epoch, next_position,
+                };
                 if sender.send(batch).await.is_err() { break; }
             }
         });
@@ -198,6 +227,17 @@ impl SftDataLoader {
         assert_eq!(batch.shard_idx, 0); // Rank 0 assigned shard 0
         assert_eq!(batch.epoch, 1);
         assert_eq!(batch.x.len(), 4); // B * T = 2 * 2 = 4
+
+        let position = batch.next_position;
+        let expected = loader_r0.next_batch().await.unwrap();
+        let mut resumed = DistributedDataLoader::new(vec![t1_bin.clone(), t2_bin.clone()],
+            config.with_position(position));
+        let actual = resumed.next_batch().await.unwrap();
+        assert_eq!(actual.x, expected.x);
+        assert_eq!(actual.y, expected.y);
+        assert_eq!(actual.shard_idx, expected.shard_idx);
+        assert_eq!(actual.token_offset, expected.token_offset);
+        assert_eq!(actual.epoch, expected.epoch);
 
         // Clean up
         let _ = fs::remove_file(t1_txt);

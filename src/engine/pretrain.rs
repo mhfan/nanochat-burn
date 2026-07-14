@@ -3,7 +3,8 @@ use std::{path::{Path, PathBuf}, time::Instant};
 use burn::tensor::backend::AutodiffBackend;
 
 use crate::{artifact::{MetricRecord, PRETRAIN_ARTIFACT, TrainingStage, append_metric,
-        path_from_env, reset_metrics, save_artifact},
+        copy_metrics_through, load_artifact, load_resume_state, reset_metrics, save_artifact,
+        save_resume_state},
     dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
     dataset::pretokenize_text_to_bin,
     engine::{TrainingConfig, TrainingEngine}, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
@@ -52,46 +53,72 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   Starting Foundational Pretraining        ");
     tracing::info!("=============================================");
 
-    // 1. Train tokenizer
-    let tokenizer = BpeTokenizer::train_from_iterator(
-        SYNTHETIC_PRETRAIN_CORPUS.iter().copied(), 512);
+    let resume = std::env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
+    let output = std::env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
+        .or_else(|| resume.clone()).unwrap_or_else(|| PathBuf::from(PRETRAIN_ARTIFACT));
 
-    // 2. Generate and pretokenize data
+    let (tokenizer, mut engine) = if let Some(path) = &resume {
+        let artifact = load_artifact::<B>(path, device)
+            .unwrap_or_else(|error| panic!("failed to load pretrain artifact: {error}"));
+        assert_eq!(artifact.manifest.stage, TrainingStage::Pretrain,
+            "pretraining can only resume a pretrain artifact");
+        let training_config = artifact.config.training.clone()
+            .expect("pretrain artifact does not contain a training config");
+        let (optimizer, trainer) =
+            load_resume_state::<B>(path, artifact.config.model.n_layer, device)
+                .unwrap_or_else(|error| panic!("failed to load pretrain state: {error}"));
+        let engine = TrainingEngine::from_state(artifact.model, optimizer, training_config,
+            &artifact.tokenizer, trainer);
+        copy_metrics_through(path, &output, engine.step)
+            .unwrap_or_else(|error| panic!("failed to restore pretrain metrics: {error}"));
+        tracing::info!("Resuming pretraining from {:?} at iteration {}", path, engine.step);
+        (artifact.tokenizer, engine)
+    } else {
+        let tokenizer = BpeTokenizer::train_from_iterator(
+            SYNTHETIC_PRETRAIN_CORPUS.iter().copied(), 512);
+        let config = GptConfig { sequence_len: 256, vocab_size: tokenizer.get_vocab_size(),
+            n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
+            window_pattern: "L".to_string(), quantization: None,
+        };
+        let training_config = TrainingConfig {
+            num_iterations: 15, warmup_steps: 3, warmdown_ratio: 0.3, final_lr_frac: 0.1,
+            learning_rate: 1e-3, weight_decay: 0.1, device_batch_size: 2,
+            sequence_length: config.sequence_len, total_batch_size: 4,
+        };
+        let model = Gpt::<B>::new(config, device);
+        reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
+        let engine = TrainingEngine::new(model, training_config, &tokenizer);
+        (tokenizer, engine)
+    };
+
     let bin_path = generate_pretrain_dataset(&tokenizer);
-
-    // 3. Configure training
-    let config = GptConfig { sequence_len: 256, vocab_size: tokenizer.get_vocab_size(),
-        n_layer: 2, n_head: 2, n_kv_head: 1, n_embd: 16,
-        window_pattern: "L".to_string(), quantization: None,
-    };
-
-    let training_config = TrainingConfig {
-        num_iterations: 15, warmup_steps: 3, warmdown_ratio: 0.3, final_lr_frac: 0.1,
-        learning_rate: 1e-3, weight_decay: 0.1, device_batch_size: 2,
-        sequence_length: config.sequence_len, total_batch_size: 4,
-    };
-
-    let model = Gpt::<B>::new(config, device);
-    let mut engine = TrainingEngine::new(model, training_config.clone(), &tokenizer);
-
-    // 4. Initialize DataLoader
-    let loader_config = DistributedDataLoaderConfig::single_process(
+    let training_config = engine.config.clone();
+    let mut loader_config = DistributedDataLoaderConfig::single_process(
         training_config.device_batch_size, training_config.sequence_length);
+    if let Some(position) = engine.dataloader_position {
+        loader_config = loader_config.with_position(position);
+    }
     let mut loader = DistributedDataLoader::new(vec![bin_path], loader_config);
 
     tracing::info!("Starting pretraining optimization iterations...");
     let start_time = Instant::now();
-    let output = path_from_env("NANOCHAT_OUTPUT_ARTIFACT", PRETRAIN_ARTIFACT);
-    reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
+    let elapsed_before_resume = engine.total_training_time_secs;
+    let checkpoint_interval = checkpoint_interval();
 
-    for i in 1..=training_config.num_iterations {
+    while engine.step < training_config.num_iterations {
+        let i = engine.step + 1;
         let loss = engine.train_step(&mut loader, device).await;
         tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}", i,
             training_config.num_iterations, loss);
         append_metric(&output, &MetricRecord { stage: TrainingStage::Pretrain, step: i, loss,
             smoothed_loss: Some(loss), learning_rate: None, reward: None,
-            elapsed_secs: start_time.elapsed().as_secs_f64(),
+            elapsed_secs: elapsed_before_resume + start_time.elapsed().as_secs_f64(),
         }).unwrap_or_else(|error| panic!("failed to append pretrain metric: {error}"));
+        if checkpoint_interval > 0 && i % checkpoint_interval == 0 &&
+            i < training_config.num_iterations {
+            save_pretrain_checkpoint(&output, &engine, &tokenizer);
+            tracing::info!("Saved pretraining checkpoint at iteration {}", i);
+        }
     }
 
     let elapsed = start_time.elapsed();
@@ -99,7 +126,19 @@ pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device) {
     tracing::info!("   Pretraining Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    save_artifact(&output, TrainingStage::Pretrain, &engine.model, &tokenizer,
-        Some(&training_config)).unwrap_or_else(|error| panic!("failed to save pretrain artifact: {error}"));
+    save_pretrain_checkpoint(&output, &engine, &tokenizer);
     tracing::info!("Pretraining artifact saved to {:?}", output);
+}
+
+fn checkpoint_interval() -> usize {
+    std::env::var("NANOCHAT_CHECKPOINT_INTERVAL").map_or(5, |value| value.parse()
+        .unwrap_or_else(|_| panic!("NANOCHAT_CHECKPOINT_INTERVAL must be a non-negative integer")))
+}
+
+fn save_pretrain_checkpoint<B: AutodiffBackend>(output: &Path, engine: &TrainingEngine<B>,
+    tokenizer: &BpeTokenizer) {
+    save_artifact(output, TrainingStage::Pretrain, &engine.model, tokenizer, Some(&engine.config))
+        .unwrap_or_else(|error| panic!("failed to save pretrain artifact: {error}"));
+    save_resume_state(output, &engine.optimizer, &engine.state())
+        .unwrap_or_else(|error| panic!("failed to save pretrain state: {error}"));
 }

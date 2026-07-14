@@ -1,10 +1,11 @@
 use std::{fs, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{checkpoint::{load_safetensors_to_gpt, save_gpt_to_safetensors},
-    engine::TrainingConfig, gpt::{Gpt, GptConfig}, tokenizer::BpeTokenizer,
+    engine::{TrainerState, TrainingConfig}, gpt::{Gpt, GptConfig}, optim::MuonAdamW,
+    tokenizer::BpeTokenizer,
 };
 
 pub const PRETRAIN_ARTIFACT: &str = "runs/pretrain";
@@ -15,6 +16,8 @@ const MANIFEST_FILE: &str = "manifest.json";
 const CONFIG_FILE: &str = "config.json";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 const MODEL_FILE: &str = "model.safetensors";
+const OPTIMIZER_FILE: &str = "optimizer.safetensors";
+const TRAINER_STATE_FILE: &str = "trainer-state.json";
 const METRICS_FILE: &str = "metrics.jsonl";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +34,10 @@ pub struct ArtifactManifest {
     pub model_file: String,
     #[serde(default = "default_metrics_file")]
     pub metrics_file: String,
+    #[serde(default)]
+    pub optimizer_file: Option<String>,
+    #[serde(default)]
+    pub trainer_state_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +97,31 @@ pub fn append_metric(root: impl AsRef<Path>, metric: &MetricRecord) -> Result<()
     file.write_all(b"\n").map_err(|error| format!("failed to write metric: {error}"))
 }
 
+pub fn copy_metrics_through(source: impl AsRef<Path>, destination: impl AsRef<Path>,
+    completed_step: usize) -> Result<(), String> {
+    let source = source.as_ref();
+    let manifest: ArtifactManifest = read_json(source.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+    let path = source.join(&manifest.metrics_file);
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {path:?}: {error}"))?;
+    let mut retained = String::new();
+    for (index, line) in contents.lines().enumerate() {
+        let metric: MetricRecord = serde_json::from_str(line)
+            .map_err(|error| format!("failed to parse metric line {}: {error}", index + 1))?;
+        if metric.step <= completed_step {
+            retained.push_str(line);
+            retained.push('\n');
+        }
+    }
+
+    let destination = destination.as_ref();
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create artifact directory {destination:?}: {error}"))?;
+    fs::write(destination.join(METRICS_FILE), retained)
+        .map_err(|error| format!("failed to restore metrics: {error}"))
+}
+
 pub fn save_artifact<B: Backend>(root: impl AsRef<Path>, stage: TrainingStage,
     model: &Gpt<B>, tokenizer: &BpeTokenizer, training: Option<&TrainingConfig>)
     -> Result<(), String> {
@@ -114,18 +146,45 @@ pub fn save_artifact<B: Backend>(root: impl AsRef<Path>, stage: TrainingStage,
         schema_version: SCHEMA_VERSION, stage, created_unix_secs,
         config_file: CONFIG_FILE.to_string(), tokenizer_file: TOKENIZER_FILE.to_string(),
         model_file: MODEL_FILE.to_string(), metrics_file: METRICS_FILE.to_string(),
+        optimizer_file: None, trainer_state_file: None,
     };
     write_json(root.join(MANIFEST_FILE), &manifest)
+}
+
+pub fn save_resume_state<B: AutodiffBackend>(root: impl AsRef<Path>,
+    optimizer: &MuonAdamW<B>, trainer: &TrainerState) -> Result<(), String> {
+    let root = root.as_ref();
+    let mut manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+
+    optimizer.save_state(root.join(OPTIMIZER_FILE))?;
+    write_json(root.join(TRAINER_STATE_FILE), trainer)?;
+    manifest.optimizer_file = Some(OPTIMIZER_FILE.to_string());
+    manifest.trainer_state_file = Some(TRAINER_STATE_FILE.to_string());
+    write_json(root.join(MANIFEST_FILE), &manifest)
+}
+
+pub fn load_resume_state<B: AutodiffBackend>(root: impl AsRef<Path>, n_layer: usize,
+    device: &B::Device) -> Result<(MuonAdamW<B>, TrainerState), String> {
+    let root = root.as_ref();
+    let manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+    let (optimizer_file, trainer_state_file) =
+        match (&manifest.optimizer_file, &manifest.trainer_state_file) {
+            (Some(optimizer), Some(trainer)) => (optimizer, trainer),
+            (None, None) => return Err("artifact does not contain resumable training state".into()),
+            _ => return Err("artifact contains incomplete resumable training state".into()),
+        };
+    let optimizer = MuonAdamW::load_state(root.join(optimizer_file), n_layer, device)?;
+    let trainer = read_json(root.join(trainer_state_file))?;
+    Ok((optimizer, trainer))
 }
 
 pub fn load_artifact<B: Backend>(root: impl AsRef<Path>, device: &B::Device)
     -> Result<LoadedArtifact<B>, String> {
     let root = root.as_ref();
     let manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
-    if manifest.schema_version != SCHEMA_VERSION {
-        return Err(format!("artifact schema {} is unsupported; expected {SCHEMA_VERSION}",
-            manifest.schema_version));
-    }
+    validate_manifest(&manifest)?;
 
     let config: ArtifactConfig = read_json(root.join(&manifest.config_file))?;
     config.model.validate().map_err(|error| format!("invalid model config: {error}"))?;
@@ -139,6 +198,13 @@ pub fn load_artifact<B: Backend>(root: impl AsRef<Path>, device: &B::Device)
     let mut model = Gpt::<B>::new(config.model.clone(), device);
     load_safetensors_to_gpt(&mut model, &root.join(&manifest.model_file), device)?;
     Ok(LoadedArtifact { model, tokenizer, manifest, config })
+}
+
+fn validate_manifest(manifest: &ArtifactManifest) -> Result<(), String> {
+    if manifest.schema_version == SCHEMA_VERSION { Ok(()) } else {
+        Err(format!("artifact schema {} is unsupported; expected {SCHEMA_VERSION}",
+            manifest.schema_version))
+    }
 }
 
 fn write_json(path: PathBuf, value: &impl Serialize) -> Result<(), String> {
@@ -157,7 +223,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
 
 #[cfg(test)] mod tests { use super::*;
     #[test] fn test_artifact_roundtrip() {
-        use crate::common::{ModelBackend, init_device};
+        use burn::tensor::Tensor;
+        use crate::{common::{ModelAutodiffBackend, ModelBackend, init_device,
+                tensor_data_to_f32_vec}, dataloader::DataLoaderPosition,
+            optim::AdamWState,
+        };
 
         let device = init_device();
         let tokenizer = BpeTokenizer::train_from_iterator(["artifact roundtrip"], 280);
@@ -175,16 +245,40 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             elapsed_secs: 0.5,
         }).unwrap();
         save_artifact(&root, TrainingStage::Pretrain, &model, &tokenizer, None).unwrap();
+        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(config.n_layer);
+        optimizer.wte = Some(AdamWState {
+            exp_avg: Tensor::<ModelBackend, 2>::from_data([[1.0, 2.0]], &device),
+            exp_avg_sq: Tensor::<ModelBackend, 2>::from_data([[3.0, 4.0]], &device),
+        });
+        let trainer = TrainerState { step: 3, smooth_train_loss: 0.75,
+            total_training_time_secs: 1.5,
+            dataloader_position: Some(DataLoaderPosition {
+                shard_idx: 1, token_offset: 42, epoch: 2,
+            }),
+        };
+        save_resume_state(&root, &optimizer, &trainer).unwrap();
+        append_metric(&root, &MetricRecord { stage: TrainingStage::Pretrain, step: 4,
+            loss: 0.5, smoothed_loss: Some(0.5), learning_rate: Some(1e-3), reward: None,
+            elapsed_secs: 2.0,
+        }).unwrap();
+        copy_metrics_through(&root, &root, trainer.step).unwrap();
         let loaded = load_artifact::<ModelBackend>(&root, &device).unwrap();
+        let (optimizer, restored_trainer) =
+            load_resume_state::<ModelAutodiffBackend>(&root, config.n_layer, &device).unwrap();
 
         assert_eq!(loaded.manifest.stage, TrainingStage::Pretrain);
+        assert_eq!(loaded.manifest.optimizer_file.as_deref(), Some(OPTIMIZER_FILE));
         assert_eq!(loaded.config.model.sequence_len, config.sequence_len);
         assert_eq!(loaded.tokenizer.encode_ordinary("artifact"),
             tokenizer.encode_ordinary("artifact"));
         let metrics = fs::read_to_string(root.join(&loaded.manifest.metrics_file)).unwrap();
+        assert_eq!(metrics.lines().count(), 1);
         let metric: MetricRecord = serde_json::from_str(metrics.trim()).unwrap();
         assert_eq!(metric.step, 1);
         assert_eq!(metric.loss, 1.25);
+        assert_eq!(restored_trainer, trainer);
+        assert_eq!(tensor_data_to_f32_vec(optimizer.wte.unwrap().exp_avg.into_data()),
+            vec![1.0, 2.0]);
         fs::remove_dir_all(root).ok();
     }
 }
