@@ -25,7 +25,16 @@ n_kv_head = 1
 n_embd = 16
 window_pattern = "L"
 
+[pretrain.model.features]
+relu_squared = true
+qk_norm = true
+gqa = true
+swa = true
+smear = true
+backout = true
+
 [pretrain.training]
+optimizer = "muon_adam_w"
 num_iterations = 6
 warmup_steps = 1
 warmdown_ratio = 0.3
@@ -40,6 +49,7 @@ dataset_path = "data/fixtures/tiny/sft.jsonl"
 log_interval = 1
 
 [sft.training]
+optimizer = "muon_adam_w"
 num_iterations = 6
 warmup_steps = 1
 warmdown_ratio = 0.5
@@ -50,6 +60,7 @@ device_batch_size = 2
 total_batch_size = 2
 
 [rl]
+algorithm = "group_normalized_reinforce"
 dataset_path = "data/fixtures/tiny/eval.jsonl"
 num_steps = 1
 learning_rate = 0.0001
@@ -59,6 +70,9 @@ max_generation_tokens = 16
 temperature = 1.0
 top_k = 20
 repetition_penalty = 1.0
+kl_coefficient = 0.01
+clip_epsilon = 0.2
+update_epochs = 1
 
 [eval]
 max_generation_tokens = 16

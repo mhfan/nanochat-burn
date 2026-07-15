@@ -4,7 +4,8 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{common::{int_tensor_2d, scalar_to_f32},
-    dataloader::{DataLoaderPosition, DistributedDataLoader}, gpt::Gpt, optim::MuonAdamW,
+    dataloader::{DataLoaderPosition, DistributedDataLoader}, gpt::Gpt,
+    optim::{MuonAdamW, OptimizerKind},
     tokenizer::BpeTokenizer,
 };
 
@@ -15,12 +16,15 @@ pub mod pretrain;
 pub mod recipe;
 pub mod rl;
 pub mod sandbox;
+pub mod scheduler;
 pub mod sft;
 pub mod speculative;
 
 /// Training configuration hyperparameters
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrainingConfig {
+    #[serde(default)]
+    pub optimizer: OptimizerKind,
     pub num_iterations: usize,
     pub warmup_steps: usize,
     pub warmdown_ratio: f32,
@@ -165,6 +169,7 @@ pub struct TrainingEngine<B: AutodiffBackend> {
     pub smooth_train_loss: f32,
     pub total_training_time_secs: f64,
     pub dataloader_position: Option<DataLoaderPosition>,
+    pub last_tokens_per_second: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -173,6 +178,8 @@ pub struct TrainerState {
     pub smooth_train_loss: f32,
     pub total_training_time_secs: f64,
     pub dataloader_position: Option<DataLoaderPosition>,
+    #[serde(default)]
+    pub rng_state: Option<u64>,
 }
 
 impl<B: AutodiffBackend> TrainingEngine<B> {
@@ -180,10 +187,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
         assert!(config.sequence_length <= model.config.sequence_len,
             "training sequence length exceeds model capacity");
-        let optimizer = MuonAdamW::new(model.config.n_layer);
+        let optimizer = MuonAdamW::with_kind(model.config.n_layer, config.optimizer);
         let token_bytes = get_token_bytes(tokenizer);
         Self { model, optimizer, config, token_bytes, step: 0,
             smooth_train_loss: 0.0, total_training_time_secs: 0.0, dataloader_position: None,
+            last_tokens_per_second: 0.0,
         }
     }
 
@@ -201,17 +209,20 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert!(state.total_training_time_secs.is_finite() &&
             state.total_training_time_secs >= 0.0,
             "total training time must be finite and non-negative");
+        assert_eq!(optimizer.kind, config.optimizer,
+            "resumed optimizer kind differs from training config");
         Self { model, optimizer, config, token_bytes: get_token_bytes(tokenizer), step: state.step,
             smooth_train_loss: state.smooth_train_loss,
             total_training_time_secs: state.total_training_time_secs,
             dataloader_position: state.dataloader_position,
+            last_tokens_per_second: 0.0,
         }
     }
 
     pub fn state(&self) -> TrainerState {
         TrainerState { step: self.step, smooth_train_loss: self.smooth_train_loss,
             total_training_time_secs: self.total_training_time_secs,
-            dataloader_position: self.dataloader_position,
+            dataloader_position: self.dataloader_position, rng_state: None,
         }
     }
 
@@ -252,6 +263,9 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
 
         let elapsed = start_time.elapsed().as_secs_f64();
+        self.last_tokens_per_second =
+            (self.config.total_batch_size * self.config.sequence_length) as f32 /
+            elapsed.max(f64::EPSILON) as f32;
         if self.step > 10 { self.total_training_time_secs += elapsed; }
 
         // Compute debiased smoothed loss
@@ -284,7 +298,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let wd = get_weight_decay(50, 100, 0.28);
         assert!(wd > 0.0 && wd <= 0.28);
 
-        let config = TrainingConfig { num_iterations: 10, warmup_steps: 1,
+        let config = TrainingConfig { optimizer: OptimizerKind::MuonAdamW,
+            num_iterations: 10, warmup_steps: 1,
             warmdown_ratio: 0.5, final_lr_frac: 0.1, learning_rate: 1e-3,
             weight_decay: 0.1, device_batch_size: 2, sequence_length: 16,
             total_batch_size: 4,
@@ -300,7 +315,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
+            quantization: None,
         };
 
         let device = crate::common::init_device();
@@ -319,9 +335,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             ["resume equivalence needs enough deterministic training tokens"], 280);
         let model_config = GptConfig { sequence_len: 4, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
+            quantization: None,
         };
-        let training_config = TrainingConfig { num_iterations: 2, warmup_steps: 0,
+        let training_config = TrainingConfig { optimizer: OptimizerKind::MuonAdamW,
+            num_iterations: 2, warmup_steps: 0,
             warmdown_ratio: 0.0, final_lr_frac: 1.0, learning_rate: 1e-3,
             weight_decay: 0.1, device_batch_size: 1, sequence_length: 4,
             total_batch_size: 1,
@@ -380,6 +398,56 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             .map(|(actual, expected)| (actual - expected).abs()).fold(0.0f32, f32::max);
         assert!(max_error <= 5e-4,
             "resumed logits exceed f16 equivalence tolerance: max error {max_error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[tokio::test] async fn test_tiny_corpus_overfit() {
+        use crate::{common::{ModelAutodiffBackend, init_device},
+            dataloader::DistributedDataLoaderConfig, dataset::pretokenize_text_to_bin,
+            gpt::{GptConfig, ModelFeatures},
+        };
+        let device = init_device();
+        ModelAutodiffBackend::seed(&device, 11);
+        let text = "rust learns tiny repeated patterns ".repeat(32);
+        let tokenizer = BpeTokenizer::train_from_iterator([text.as_str()], 280);
+        let root = std::env::temp_dir().join(format!(
+            "nanochat-overfit-test-{}", std::process::id()));
+        let (text_path, token_path) = (root.join("train.txt"), root.join("train.bin"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&text_path, &text).unwrap();
+        pretokenize_text_to_bin(&text_path, &token_path, &tokenizer).unwrap();
+
+        let model = Gpt::<ModelAutodiffBackend>::new(GptConfig {
+            sequence_len: 4, vocab_size: tokenizer.get_vocab_size(), n_layer: 1,
+            n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".into(),
+            features: ModelFeatures::default(), quantization: None,
+        }, &device);
+        let config = TrainingConfig { optimizer: OptimizerKind::AdamW,
+            num_iterations: 16, warmup_steps: 0, warmdown_ratio: 0.0,
+            final_lr_frac: 1.0, learning_rate: 0.01, weight_decay: 0.0,
+            device_batch_size: 1, sequence_length: 4, total_batch_size: 1,
+        };
+        let loader_config = DistributedDataLoaderConfig::single_process(1, 4);
+        let mut engine = TrainingEngine::new(model, config, &tokenizer);
+        let mut eval_loader =
+            DistributedDataLoader::new(vec![token_path.clone()], loader_config);
+        let batch = eval_loader.next_batch().await.unwrap();
+        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device), None);
+        let initial_loss = scalar_to_f32(engine.model.compute_loss(
+            logits, int_tensor_2d(batch.y, [1, 4], &device)).into_scalar());
+        let mut loader =
+            DistributedDataLoader::new(vec![token_path.clone()], loader_config);
+        for _ in 0..engine.config.num_iterations {
+            engine.train_step(&mut loader, &device).await;
+        }
+        let mut eval_loader = DistributedDataLoader::new(vec![token_path], loader_config);
+        let batch = eval_loader.next_batch().await.unwrap();
+        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device), None);
+        let final_loss = scalar_to_f32(engine.model.compute_loss(
+            logits, int_tensor_2d(batch.y, [1, 4], &device)).into_scalar());
+        assert!(final_loss < initial_loss,
+            "tiny overfit loss did not decrease: {initial_loss} -> {final_loss}");
         std::fs::remove_dir_all(root).ok();
     }
 }

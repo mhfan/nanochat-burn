@@ -1,7 +1,7 @@
 
 use std::path::Path;
 use burn::tensor::backend::Backend;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{common::{extract_answer, int_tensor_2d, read_jsonl}, gpt::Gpt,
     engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
@@ -18,10 +18,10 @@ pub struct EvalItem {
     pub test: Option<String>,         // For HumanEval
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvalScore { pub name: String, pub score: f32 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvalReport { pub scores: Vec<EvalScore>, pub aggregate: Option<f32> }
 
 pub fn load_eval_dataset<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<EvalItem>> {
@@ -40,7 +40,7 @@ fn fit_prompt(mut tokens: Vec<usize>, max_len: usize) -> Vec<usize> {
 
 fn generate_completion<B: Backend>(engine: &InferenceEngine<B>, tokenizer: &BpeTokenizer,
     prompt_tokens: &[usize], max_tokens: usize, device: &B::Device) -> String {
-    let config = GenerationConfig { max_tokens, sampling: SamplingConfig::greedy() };
+    let config = GenerationConfig { max_tokens, sampling: SamplingConfig::greedy(), seed: 42 };
     let (rollouts, _) = engine.generate_batch(prompt_tokens, 1, config, device);
     tokenizer.decode(&rollouts[0][prompt_tokens.len()..])
 }

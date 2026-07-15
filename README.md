@@ -13,12 +13,12 @@
 |---|---|---|
 | GPT、RoPE、GQA、SWA、QK Norm、ReLU² | Stable | 有单元测试和 cached/full forward 一致性测试 |
 | Muon + AdamW | Stable | 支持梯度累积和 f16 数值保护 |
-| Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 支持 optimizer 与数据位置精确恢复 |
+| Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 与 RL 保存 optimizer/trainer，RL 额外恢复采样 RNG |
 | TOML 实验配置 | Experimental | 一个强类型配置统一模型、数据、三阶段超参数和 artifact 链路，并随产物保存 |
 | W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
-| Blocked KV cache | Reference | 固定页面布局参考实现，不等同于带动态页表的完整 PagedAttention |
-| Speculative decoding | Reference | greedy 模式数学无损；draft cache 仍会重建，需以基准确认加速 |
-| Group-normalized REINFORCE | Reference | 使用组内优势归一化，不是带 ratio clip 和 reference KL 的完整 GRPO |
+| Paged KV cache | Experimental | free-list、请求 block table 与逐页 online-softmax attention；服务级动态 batching 尚未接入 |
+| Speculative decoding | Reference | greedy 模式数学无损，支持增量 draft rollback、acceptance 与真实加速比基准 |
+| REINFORCE / GRPO | Experimental | 支持组内优势、old-policy ratio clip、reference KL、rollout 记录和恢复 |
 | Python code executor | Experimental | 有超时和输出限制，但不是 OS 级安全沙箱 |
 | Python/Rust 数值 parity | Reference | Fixtures 覆盖 tokenizer、模型、optimizer、cache 与 f32/f16/W8/W4 误差预算，并可自动生成报告 |
 
@@ -87,6 +87,7 @@ cargo run --features ndarray --example tokenizer
     │   │   ├── parity.rs       # Python/Rust 模型 parity 与误差预算
     │   │   └── quant.rs        # W8/W4 权重量化与后端快路径
     │   ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 对接
+    │   ├── benchmark.rs        # Prefill/decode、量化与 speculative 基准
     │   ├── optim.rs            # 阶段 4: Polar Express Muon + AdamW 混合正交优化器
     │   ├── engine.rs           # 阶段 4/5: 训练与推理引擎底座、BPB 评估器
     │   ├── experiment.rs       # 强类型 TOML 实验配置、校验与持久化
@@ -97,11 +98,15 @@ cargo run --features ndarray --example tokenizer
     │   │   ├── rl.rs           # 组内归一化 REINFORCE 工作流
     │   │   ├── speculative.rs  # 阶段 5: 无损推测解码双模型推理引擎 (Draft + Target Model)
     │   │   ├── sandbox.rs      # 阶段 6: 带超时和输出限制的 Python 子进程
+    │   │   ├── scheduler.rs    # Continuous batching admission/cancel 调度器
     │   │   ├── eval.rs         # 阶段 6: 评测子系统及 benchmark 评估 (gsm8k, spellingbee 等)
     │   │   └── sft.rs          # 阶段 6: 监督微调 (packed SFT) 工作流
     │   └── bin/
     │       ├── train.rs        # 训练入口 (支持 --pretrain, --sft, --rl 参数动态切换)
     │       ├── eval.rs         # 多任务评测入口
+    │       ├── report.rs       # 训练、BPB、吞吐与质量汇总
+    │       ├── bench_infer.rs       # Prefill/decode 与量化基准
+    │       ├── bench_spec.rs        # 推测解码 acceptance/speedup 基准
     │       ├── chat.rs         # CLI 命令行多轮流式对话客户端
     │       └── chat_web.rs     # Axum SSE 多轮对话服务器
 ```
@@ -170,6 +175,38 @@ uv run tools/export_torch_parity.py all --nanochat-root /path/to/python-nanochat
 也可以设置 `NANOCHAT_ROOT=/path/to/python-nanochat`。该路径仅在重新生成跨语言 fixtures
 时需要，日常构建、测试、训练和 Web UI 不依赖父目录；`all` 可替换为 `modules`、`model` 或
 `optimizer`，只重新生成对应 fixture。
+
+### 消融、报告与推理基准
+
+`pretrain.model.features` 可独立关闭 `relu_squared`、`qk_norm`、`gqa`、`swa`、`smear`
+和 `backout`；关闭 GQA 时需令 `n_kv_head = n_head`。训练配置中的
+`optimizer = "muon_adam_w"` 可替换为 `"adam_w"` 进行同配置对照。
+RL 可用 `--rl-algorithm group_normalized_reinforce` 或 `--rl-algorithm grpo` 覆盖配置，
+便于保持其余参数完全一致地生成两组 artifact。
+
+```bash
+cargo run --bin report -- runs/pretrain runs/sft runs/rl
+cargo run --release --bin bench_infer -- --artifact runs/sft --batches 1,2,4
+cargo run --release --bin bench_infer -- --artifact runs/sft --quantization 4
+cargo run --release --bin bench_spec -- runs/sft runs/pretrain
+```
+
+报告写入 `runs/report.json`，推理基准写入 `runs/benchmarks/`。基准记录 prefill、首 token、
+decode tokens/s、batch scaling、理论 KV cache 字节数，以及量化误差/估算线性权重大小；目前不声称
+这些估算值等同于驱动报告的峰值显存。
+
+同一 SFT artifact 的小规模对齐对照可用两个输出目录运行；随后分别执行 `eval`，再交给
+`report` 汇总，报告会从 `experiment.toml` 区分两种算法：
+
+```bash
+NANOCHAT_OUTPUT_ARTIFACT=runs/compare/reinforce cargo run --bin train -- --rl \
+  --rl-algorithm group_normalized_reinforce
+NANOCHAT_OUTPUT_ARTIFACT=runs/compare/grpo cargo run --bin train -- --rl \
+  --rl-algorithm grpo
+NANOCHAT_ARTIFACT=runs/compare/reinforce cargo run --bin eval
+NANOCHAT_ARTIFACT=runs/compare/grpo cargo run --bin eval
+cargo run --bin report -- runs/sft runs/compare/reinforce runs/compare/grpo
+```
 
 ### 端到端 Tiny Recipe
 

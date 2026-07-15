@@ -30,7 +30,7 @@
 - [x] 保存模型配置、tokenizer、模型权重和训练阶段。
 - [x] 保存并追加结构化训练指标。
 - [x] 保存 optimizer、trainer 与 dataloader 状态，支持预训练精确断点续训。
-- [ ] 在引入 dropout、随机采样训练或数据增强时保存并恢复对应随机状态。
+- [x] 在引入 dropout、随机采样训练或数据增强时保存并恢复对应随机状态。
 - [x] Pretrain 输出可被 SFT 加载。
 - [x] SFT 输出可被 RL 加载。
 - [x] Eval、CLI Chat 和 Web Chat 加载同一 artifact。
@@ -75,46 +75,46 @@ runs/<run-name>/
 - [ ] 编写推理章节。
 - [ ] 编写对齐章节。
 - [ ] 每章包含公式、源码入口、最小实验和常见错误。
-- [ ] 支持 ReLU2、QK Norm、GQA、SWA、Smear、Backout 开关。
-- [ ] 支持 Muon 与 AdamW 对照实验。
-- [ ] 生成 loss、BPB、tokens/s、内存占用和模型质量报告。
-- [ ] 增加 tiny overfit 集成测试。
+- [x] 支持 ReLU2、QK Norm、GQA、SWA、Smear、Backout 开关。
+- [x] 支持 Muon 与 AdamW 对照实验。
+- [ ] 生成 loss、BPB、tokens/s、内存占用和模型质量报告。（除实际峰值内存外均已接入）
+- [x] 增加 tiny overfit 集成测试。
 - [x] 增加 resume equivalence 集成测试。
-- [ ] 增加 deterministic decode 集成测试。
+- [x] 增加 deterministic decode 集成测试。
 
 验收条件：读者可通过一组小实验观察每项架构设计对数值和训练的影响。
 
 ## M4：推理性能基线
 
-- [ ] 保留 CPU `ReferenceSampler`，增加设备端 `DeviceSampler`。
-- [ ] 避免每个 token 回传完整 vocabulary logits。
-- [ ] 建立 prefill/decode 分离基准。
-- [ ] 记录首 token 延迟、tokens/s、显存和 batch scaling。
-- [ ] 为量化记录模型大小、误差和吞吐收益。
-- [ ] 为 speculative decoding 记录 acceptance rate 和真实加速比。
-- [ ] 实现 draft KV cache truncate/rollback，移除全量重建。
+- [x] 保留 CPU `ReferenceSampler`，增加设备端 `DeviceSampler`。
+- [x] 避免每个 token 回传完整 vocabulary logits。
+- [x] 建立 prefill/decode 分离基准。
+- [ ] 记录首 token 延迟、tokens/s、显存和 batch scaling。（缺实际峰值显存采样）
+- [x] 为量化记录模型大小、误差和吞吐收益。
+- [x] 为 speculative decoding 记录 acceptance rate 和真实加速比。
+- [x] 实现 draft KV cache truncate/rollback，移除全量重建。
 
 验收条件：WGPU 性能路径和参考路径数值一致，且性能提升由基准证明。
 
 ## M5：真正的分页缓存与并发调度
 
-- [ ] 抽象连续 KV cache 与分页 KV cache 的公共接口。
-- [ ] 实现 page allocator、free list 和请求级 block table。
-- [ ] attention 直接消费分页 KV，不在每步重构连续张量。
-- [ ] 支持请求动态加入、完成、取消和页回收。
-- [ ] 实现 iteration-level continuous batching。
-- [ ] 增加 StreamingLLM attention sinks 与页面驱逐实验。
+- [x] 抽象连续 KV cache 与分页 KV cache 的公共接口。
+- [x] 实现 page allocator、free list 和请求级 block table。
+- [x] attention 直接消费分页 KV，不在每步重构连续张量。
+- [ ] 支持请求动态加入、完成、取消和页回收。（调度与页回收组件已完成，待服务路径集成）
+- [ ] 实现 iteration-level continuous batching。（调度器已完成，待批量模型执行集成）
+- [x] 增加 StreamingLLM attention sinks 与页面驱逐实验。
 
 验收条件：多请求负载下页面能复用和回收，并优于静态 batch 基线。
 
 ## M6：对齐算法
 
-- [ ] 将现有算法明确为 group-normalized REINFORCE。
-- [ ] 保存 rollout token log-probs 和生成策略版本。
-- [ ] 实现 reference model KL penalty。
-- [ ] 实现 old-policy ratio 和 clipped GRPO objective。
-- [ ] 增加 reward、KL、clip fraction 和 response length 指标。
-- [ ] 对比 SFT、REINFORCE 和 GRPO 的小规模实验。
+- [x] 将现有算法明确为 group-normalized REINFORCE。
+- [x] 保存 rollout token log-probs 和生成策略版本。
+- [x] 实现 reference model KL penalty。
+- [x] 实现 old-policy ratio 和 clipped GRPO objective。
+- [x] 增加 reward、KL、clip fraction 和 response length 指标。
+- [x] 对比 SFT、REINFORCE 和 GRPO 的小规模实验。
 
 验收条件：目标函数、日志指标和测试能够区分 REINFORCE 与 GRPO。
 

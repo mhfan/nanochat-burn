@@ -25,8 +25,32 @@ impl Default for SpeculativeConfig {
 pub struct SpeculativeState<B: Backend> {
     pub target_state: GeneratorState<B>,
     pub draft_state: GeneratorState<B>,
+    pub draft_logits: Tensor<B, 2>,
     pub current_tokens: Vec<usize>,
     pub step: usize,
+    pub proposed_draft_tokens: usize,
+    pub accepted_draft_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpeculativeStats {
+    pub proposed_draft_tokens: usize,
+    pub accepted_draft_tokens: usize,
+}
+
+impl SpeculativeStats {
+    pub fn acceptance_rate(self) -> f32 {
+        if self.proposed_draft_tokens == 0 { 0.0 } else {
+            self.accepted_draft_tokens as f32 / self.proposed_draft_tokens as f32
+        }
+    }
+}
+
+impl<B: Backend> SpeculativeState<B> {
+    pub fn stats(&self) -> SpeculativeStats {
+        SpeculativeStats { proposed_draft_tokens: self.proposed_draft_tokens,
+            accepted_draft_tokens: self.accepted_draft_tokens }
+    }
 }
 
 pub struct SpeculativeInferenceEngine<B: Backend,
@@ -53,22 +77,38 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     /// Prefill prompt sequence for both models, initializing states
     pub fn prefill(&self, prompt_tokens: &[usize], device: &B::Device)
         -> (SpeculativeState<B>, Tensor<B, 2>) {
-        let (draft_state, _) = self.draft_engine.prefill(prompt_tokens, 1, device);
+        self.prefill_seeded(prompt_tokens, 42, device)
+    }
+
+    pub fn prefill_seeded(&self, prompt_tokens: &[usize], seed: u64, device: &B::Device)
+        -> (SpeculativeState<B>, Tensor<B, 2>) {
+        let (draft_state, draft_logits) =
+            self.draft_engine.prefill_seeded(prompt_tokens, 1, seed, device);
         let (target_state, target_logits) =
-            self.target_engine.prefill(prompt_tokens, 1, device);
+            self.target_engine.prefill_seeded(prompt_tokens, 1, seed, device);
 
         let state = SpeculativeState {
-            target_state, draft_state,
+            target_state, draft_state, draft_logits,
             current_tokens: prompt_tokens.to_vec(),
             step: prompt_tokens.len(),
+            proposed_draft_tokens: 0,
+            accepted_draft_tokens: 0,
         };
 
         (state, target_logits)
     }
 
-    fn sync_draft_state(&self, state: &mut SpeculativeState<B>, device: &B::Device) {
-        let (draft_state, _) = self.draft_engine.prefill(&state.current_tokens, 1, device);
-        state.draft_state = draft_state;
+    fn advance_draft_state(&self, state: &mut SpeculativeState<B>, tokens: &[usize],
+        device: &B::Device) {
+        let vocab_size = self.draft_engine.model.config.vocab_size;
+        for &token in tokens {
+            let logits = self.draft_engine.model.forward_with_cache(
+                token_tensor(&[token], device), &mut state.draft_state.cache,
+                state.draft_state.step);
+            self.draft_engine.record_generated_token(&mut state.draft_state, 0, token);
+            state.draft_state.step += 1;
+            state.draft_logits = logits.reshape([1, vocab_size]);
+        }
     }
 
     fn target_step(&self, state: &mut SpeculativeState<B>, target_logits: Tensor<B, 2>,
@@ -78,7 +118,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         let token = tokens[0];
         state.current_tokens.push(token);
         state.step += 1;
-        self.sync_draft_state(state, device);
+        self.advance_draft_state(state, &tokens, device);
 
         let special = self.tokenizer.special_token_ids();
         let finished = token == special.assistant_end || token == special.bos;
@@ -108,12 +148,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         }
 
         // 1. Autoregressively draft K tokens using the fast Draft Model
-        let last_tok = *state.current_tokens.last().unwrap();
         let mut draft_tokens = Vec::with_capacity(draft_tokens_per_step);
-        let draft_vocab_size = self.draft_engine.model.config.vocab_size;
-        let mut cur_draft_logits = self.draft_engine.model
-            .forward_with_cache(token_tensor(&[last_tok], device),
-                &mut state.draft_state.cache, state.step - 1).reshape([1, draft_vocab_size]);
+        let mut cur_draft_logits = state.draft_logits.clone();
 
         let mut temp_draft_state = state.draft_state.clone();
         temp_draft_state.step = state.step;
@@ -128,6 +164,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         }
 
         if draft_tokens.is_empty() { return self.target_step(state, target_logits, sampling, device); }
+        state.proposed_draft_tokens += draft_tokens.len();
 
         // 2. Parallelly evaluate all K draft tokens in the Target Model
         let draft_len = draft_tokens.len();
@@ -139,7 +176,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         // 3. Lossless verification check
         let mut accepted_tokens = Vec::new();
         let mut final_next_logits = target_logits.clone();
-        let (mut is_finished, mut accepted_count) = (false, 0);
+        let (mut is_finished, mut accepted_count, mut accepted_draft_count) = (false, 0, 0);
 
         for i in 0..draft_len {
             let draft_tok = draft_tokens[i];
@@ -160,6 +197,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 state.current_tokens.push(draft_tok);
                 self.target_engine.record_generated_token(&mut state.target_state, 0, draft_tok);
                 accepted_count += 1;
+                accepted_draft_count += 1;
 
                 if draft_tok == special_tokens.assistant_end || draft_tok == special_tokens.bos {
                     is_finished = true;
@@ -226,10 +264,12 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         // 4. Synchronize state pointers and rebuild the draft cache from the accepted sequence.
         let final_len = state.step + accepted_count;
+        state.accepted_draft_tokens += accepted_draft_count;
+        state.target_state.cache.truncate(final_len);
         state.target_state.step = final_len;
         state.step = final_len;
         if is_finished { state.target_state.completed[0] = true; }
-        self.sync_draft_state(state, device);
+        self.advance_draft_state(state, &accepted_tokens, device);
 
         (accepted_tokens, final_next_logits, is_finished)
     }
@@ -237,8 +277,14 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
     /// High-level generation loop returning the fully generated token sequence
     pub fn generate(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
         device: &B::Device) -> Vec<usize> {
+        self.generate_with_stats(prompt_tokens, config, device).0
+    }
+
+    pub fn generate_with_stats(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
+        device: &B::Device) -> (Vec<usize>, SpeculativeStats) {
         config.generation.sampling.validate();
-        let (mut state, mut cur_logits) = self.prefill(prompt_tokens, device);
+        let (mut state, mut cur_logits) =
+            self.prefill_seeded(prompt_tokens, config.generation.seed, device);
         let max_total_len = prompt_tokens.len().saturating_add(config.generation.max_tokens)
             .min(self.target_engine.model.config.sequence_len)
             .min(self.draft_engine.model.config.sequence_len);
@@ -253,7 +299,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         }
 
         state.current_tokens.truncate(max_total_len);
-        state.current_tokens
+        let stats = state.stats();
+        (state.current_tokens, stats)
     }
 }
 
@@ -266,11 +313,11 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         let target_config = crate::gpt::GptConfig { sequence_len: 16,
             vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
-            window_pattern: "L".to_string(), quantization: None,
+            window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
         let draft_config = crate::gpt::GptConfig { sequence_len: 16,
             vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
-            window_pattern: "L".to_string(), quantization: None,
+            window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
 
         use crate::common::ModelBackend;
@@ -300,7 +347,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         // 2. Generate with Speculative Decoding (deterministic greedy: temperature = 0.0, K = 2)
         let config = SpeculativeConfig { draft_tokens: 2,
-            generation: GenerationConfig { max_tokens: 3, sampling: SamplingConfig::greedy() },
+            generation: GenerationConfig {
+                max_tokens: 3, sampling: SamplingConfig::greedy(), seed: 42,
+            },
         };
         let spec_res = spec_engine.generate(&prompt_tokens, config, &device);
 

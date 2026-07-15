@@ -215,7 +215,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
 
         let config = crate::gpt::GptConfig { sequence_len: 16, vocab_size: 32, n_layer: 2,
             n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            quantization: None,
+            features: Default::default(), quantization: None,
         };
 
         // 1. Create a dummy source model

@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod benchmark;
 pub mod checkpoint;
 pub mod common;
 pub mod dataloader;
@@ -7,4 +8,5 @@ pub mod engine;
 pub mod experiment;
 pub mod gpt;
 pub mod optim;
+pub mod report;
 pub mod tokenizer;

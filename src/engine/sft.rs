@@ -111,11 +111,12 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
         .unwrap_or_else(|error| panic!("failed to load pretrain artifact {input:?}: {error}"));
     tracing::info!("Loaded {:?} artifact from {:?}", loaded.manifest.stage, input);
     let (mut model, tokenizer) = (loaded.model, loaded.tokenizer);
-    let mut optimizer = MuonAdamW::new(model.config.n_layer);
     let mut packer = SftPacker::new(&dataset, &tokenizer);
 
     let training_config = config.training.resolve(model.config.sequence_len)
         .unwrap_or_else(|error| panic!("invalid SFT training config: {error}"));
+    let mut optimizer =
+        MuonAdamW::with_kind(model.config.n_layer, training_config.optimizer);
     let (batch_size, max_seq_len) =
         (training_config.device_batch_size, training_config.sequence_length);
     let bos_token = tokenizer.get_bos_token_id();
@@ -128,6 +129,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
     reset_metrics(&output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
 
     for step in 1..=num_iterations {
+        let step_start = Instant::now();
         if packer.conversations.is_empty() {
             packer = SftPacker::new(&dataset, &tokenizer);
         }
@@ -165,6 +167,11 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
         append_metric(&output, &MetricRecord { stage: TrainingStage::Sft, step, loss: loss_val,
             smoothed_loss: Some(smooth_loss), learning_rate: Some(lr), reward: None,
             elapsed_secs: start_time.elapsed().as_secs_f64(),
+            bpb: None,
+            tokens_per_second: Some((actual_batch_size * max_seq_len) as f32 /
+                step_start.elapsed().as_secs_f32().max(f32::EPSILON)),
+            memory_bytes: None, quality: None, kl: None, clip_fraction: None,
+            response_length: None, acceptance_rate: None,
         }).unwrap_or_else(|error| panic!("failed to append SFT metric: {error}"));
     }
 

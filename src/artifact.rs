@@ -41,6 +41,8 @@ pub struct ArtifactManifest {
     pub trainer_state_file: Option<String>,
     #[serde(default)]
     pub experiment_file: Option<String>,
+    #[serde(default)]
+    pub rollouts_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,22 @@ pub struct MetricRecord {
     pub learning_rate: Option<f32>,
     pub reward: Option<f32>,
     pub elapsed_secs: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bpb: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_second: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kl: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_fraction: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_length: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_rate: Option<f32>,
 }
 
 fn default_metrics_file() -> String { METRICS_FILE.to_string() }
@@ -158,7 +176,19 @@ pub fn save_artifact<B: Backend>(root: impl AsRef<Path>, stage: TrainingStage,
         config_file: CONFIG_FILE.to_string(), tokenizer_file: TOKENIZER_FILE.to_string(),
         model_file: MODEL_FILE.to_string(), metrics_file: METRICS_FILE.to_string(),
         optimizer_file: None, trainer_state_file: None, experiment_file: None,
+        rollouts_file: None,
     };
+    write_json(root.join(MANIFEST_FILE), &manifest)
+}
+
+pub fn set_rollouts_file(root: impl AsRef<Path>, filename: &str) -> Result<(), String> {
+    let root = root.as_ref();
+    if filename.is_empty() || !root.join(filename).is_file() {
+        return Err(format!("rollout file {filename:?} does not exist in {root:?}"));
+    }
+    let mut manifest: ArtifactManifest = read_json(root.join(MANIFEST_FILE))?;
+    validate_manifest(&manifest)?;
+    manifest.rollouts_file = Some(filename.to_string());
     write_json(root.join(MANIFEST_FILE), &manifest)
 }
 
@@ -263,7 +293,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         let tokenizer = BpeTokenizer::train_from_iterator(["artifact roundtrip"], 280);
         let config = GptConfig { sequence_len: 8, vocab_size: tokenizer.get_vocab_size(),
             n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 16,
-            window_pattern: "L".to_string(), quantization: None,
+            window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
         let model = Gpt::<ModelBackend>::new(config.clone(), &device);
         let root = std::env::temp_dir().join(format!(
@@ -272,7 +302,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         reset_metrics(&root).unwrap();
         append_metric(&root, &MetricRecord { stage: TrainingStage::Pretrain, step: 1,
             loss: 1.25, smoothed_loss: Some(1.25), learning_rate: Some(1e-3), reward: None,
-            elapsed_secs: 0.5,
+            elapsed_secs: 0.5, bpb: None, tokens_per_second: Some(128.0), memory_bytes: None,
+            quality: None, kl: None, clip_fraction: None, response_length: None,
+            acceptance_rate: None,
         }).unwrap();
         save_artifact(&root, TrainingStage::Pretrain, &model, &tokenizer, None).unwrap();
         let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(config.n_layer);
@@ -285,13 +317,16 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             dataloader_position: Some(DataLoaderPosition {
                 shard_idx: 1, token_offset: 42, epoch: 2,
             }),
+            rng_state: Some(99),
         };
         save_resume_state(&root, &optimizer, &trainer).unwrap();
         let experiment = ExperimentConfig::load(DEFAULT_EXPERIMENT_CONFIG).unwrap();
         save_experiment_config(&root, &experiment).unwrap();
         append_metric(&root, &MetricRecord { stage: TrainingStage::Pretrain, step: 4,
             loss: 0.5, smoothed_loss: Some(0.5), learning_rate: Some(1e-3), reward: None,
-            elapsed_secs: 2.0,
+            elapsed_secs: 2.0, bpb: Some(1.2), tokens_per_second: Some(140.0),
+            memory_bytes: None, quality: None, kl: None, clip_fraction: None,
+            response_length: None, acceptance_rate: None,
         }).unwrap();
         copy_metrics_through(&root, &root, trainer.step).unwrap();
         let loaded = load_artifact::<ModelBackend>(&root, &device).unwrap();

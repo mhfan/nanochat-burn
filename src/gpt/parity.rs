@@ -142,6 +142,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
     let module = MLP {
         c_fc: fixture_linear(&mlp.c_fc_weight, &device),
         c_proj: fixture_linear(&mlp.c_proj_weight, &device),
+        relu_squared: true,
         _phantom: PhantomData,
     };
     assert_fixture_close(module.forward(fixture_tensor::<ModelBackend, 3>(&mlp.input, &device)),
@@ -162,6 +163,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         n_head: config.n_head,
         n_kv_head: config.n_kv_head,
         head_dim: config.n_embd / config.n_head,
+        qk_norm: true,
         mask: precompute_window_mask(-1, config.sequence_len, &device),
     };
     let actual = module.forward(fixture_tensor::<ModelBackend, 3>(&attention.input, &device),

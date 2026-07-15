@@ -1,12 +1,13 @@
 
 use std::collections::VecDeque;
 use burn::tensor::{Tensor, backend::Backend};
+use serde::{Deserialize, Serialize};
 
 use crate::{common::int_tensor_2d, engine::calculator::use_calculator,
     gpt::{ForwardLayer, Gpt, KVCache}, tokenizer::BpeTokenizer,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SamplingConfig {
     pub temperature: f32,
     pub top_k: Option<usize>,
@@ -35,10 +36,62 @@ impl Default for SamplingConfig {
 pub struct GenerationConfig {
     pub max_tokens: usize,
     pub sampling: SamplingConfig,
+    pub seed: u64,
 }
 
 impl Default for GenerationConfig {
-    fn default() -> Self { Self { max_tokens: 128, sampling: SamplingConfig::default() } }
+    fn default() -> Self {
+        Self { max_tokens: 128, sampling: SamplingConfig::default(), seed: 42 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SamplingRng { state: u64 }
+
+impl SamplingRng {
+    pub const fn new(seed: u64) -> Self { Self { state: seed } }
+    pub const fn state(self) -> u64 { self.state }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D049BB133111EB);
+        value ^ (value >> 31)
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as f32) * (1.0 / (1u32 << 24) as f32)
+    }
+}
+
+pub trait TokenSampler<B: Backend> {
+    fn sample(&self, logits: Tensor<B, 2>, sampling: SamplingConfig,
+        generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReferenceSampler;
+
+impl<B: Backend> TokenSampler<B> for ReferenceSampler {
+    fn sample(&self, logits: Tensor<B, 2>, sampling: SamplingConfig,
+        generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
+        sample_next_token_with_rng(logits, sampling, generated_tokens, rng)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DeviceSampler;
+
+impl<B: Backend> TokenSampler<B> for DeviceSampler {
+    fn sample(&self, logits: Tensor<B, 2>, sampling: SamplingConfig,
+        generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
+        if sampling == SamplingConfig::greedy() {
+            return logits.argmax(1).into_data().to_vec::<i32>().unwrap()
+                .into_iter().map(|token| token as usize).collect();
+        }
+        ReferenceSampler.sample(logits, sampling, generated_tokens, rng)
+    }
 }
 
 /// Tracks self-regressive token generation state per sample
@@ -51,6 +104,7 @@ pub struct GeneratorState<B: Backend> {
     pub python_expr_tokens: Vec<Vec<usize>>,
     pub completed: Vec<bool>,
     pub step: usize,
+    pub rng: SamplingRng,
 }
 
 /// High-performance self-regressive inference engine
@@ -90,6 +144,11 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     /// Run prefill phase over the prompt sequence across all batch items
     pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
         device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
+        self.prefill_seeded(prompt_tokens, num_samples, 42, device)
+    }
+
+    pub fn prefill_seeded(&self, prompt_tokens: &[usize], num_samples: usize, seed: u64,
+        device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
         assert!(prompt_len > 0, "prompt must contain at least one token");
         assert!(num_samples > 0, "num_samples must be greater than zero");
@@ -122,6 +181,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             python_expr_tokens: vec![Vec::new(); num_samples],
             completed: vec![false; num_samples],
             step: prompt_len,
+            rng: SamplingRng::new(seed),
         };
 
         (state, last_logits)
@@ -143,7 +203,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         let special_tokens = self.tokenizer.special_token_ids();
 
         // Sample candidate tokens
-        let sampled_tokens = sample_next_token(logits, sampling, &state.current_tokens);
+        let sampled_tokens = DeviceSampler.sample(
+            logits, sampling, &state.current_tokens, &mut state.rng);
 
         let mut next_token_column = Vec::with_capacity(num_samples);
         let mut is_sampled_mask = Vec::with_capacity(num_samples);
@@ -182,7 +243,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
     pub fn generate_batch(&self, prompt_tokens: &[usize], num_samples: usize,
         config: GenerationConfig, device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
         config.sampling.validate();
-        let (mut state, mut cur_logits) = self.prefill(prompt_tokens, num_samples, device);
+        let (mut state, mut cur_logits) =
+            self.prefill_seeded(prompt_tokens, num_samples, config.seed, device);
 
         let special_tokens = self.tokenizer.special_token_ids();
 
@@ -219,6 +281,11 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 /// Dynamic sample selection based on temperature, top_k, and repetition penalties
 pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
     generated_tokens: &[Vec<usize>]) -> Vec<usize> {
+    sample_next_token_with_rng(logits, sampling, generated_tokens, &mut SamplingRng::new(42))
+}
+
+pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
+    generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
     sampling.validate();
     let [batch_size, vocab_size] = logits.shape().dims();
     assert!(vocab_size > 0, "cannot sample from an empty vocabulary");
@@ -281,7 +348,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 
         let (mut cum_sum, mut chosen_idx) = (0.0f32,
             indices.iter().copied().find(|&idx| exp_logits[idx] > 0.0).unwrap_or(indices[0]));
-        let r: f32 = rand::random();
+        let r = rng.next_f32();
         for &idx in &indices {
             cum_sum += exp_logits[idx];
             if r < cum_sum {
@@ -304,6 +371,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
         let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 32, quantization: None,
             window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
+            features: Default::default(),
         };
 
         use crate::common::ModelBackend;
@@ -325,7 +393,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 
         let config = crate::gpt::GptConfig { sequence_len: 32, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
+            quantization: None,
         };
 
         use crate::common::ModelBackend;
@@ -337,6 +406,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
             sampling: SamplingConfig {
                 temperature: 1.0, top_k: Some(5), repetition_penalty: 1.0,
             },
+            seed: 42,
         };
         let (results, masks) = engine.generate_batch(&prompt_tokens, 2, config, &device);
 
@@ -350,7 +420,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
         let tokenizer = BpeTokenizer::train_from_iterator(["2 + 2"], 280);
         let config = crate::gpt::GptConfig { sequence_len: 16, n_layer: 1, n_head: 2,
             n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), quantization: None,
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
+            quantization: None,
         };
         let model = Gpt::<crate::common::ModelBackend>::new(config, &device);
         let engine = InferenceEngine::new(model, tokenizer);
@@ -365,5 +436,47 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 
         assert_eq!(state.forced_tokens[0].front(), Some(&special.output_start));
         assert_eq!(state.forced_tokens[0].back(), Some(&special.output_end));
+    }
+
+    #[test] fn test_seeded_decode_is_deterministic() {
+        let device = crate::common::init_device();
+        let tokenizer = BpeTokenizer::train_from_iterator(
+            ["seeded stochastic decoding must resume exactly"], 280);
+        let config = crate::gpt::GptConfig { sequence_len: 16, n_layer: 1, n_head: 2,
+            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
+            quantization: None,
+        };
+        let model = Gpt::<crate::common::ModelBackend>::new(config, &device);
+        let engine = InferenceEngine::new(model, tokenizer);
+        let generation = GenerationConfig { max_tokens: 4, seed: 7,
+            sampling: SamplingConfig {
+                temperature: 0.8, top_k: Some(8), repetition_penalty: 1.0,
+            },
+        };
+
+        let first = engine.generate_batch(&[1, 2, 3], 1, generation, &device).0;
+        let second = engine.generate_batch(&[1, 2, 3], 1, generation, &device).0;
+        assert_eq!(first, second);
+
+        let mut rng = SamplingRng::new(123);
+        rng.next_u64();
+        let encoded = serde_json::to_string(&rng).unwrap();
+        let mut restored: SamplingRng = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(rng.next_u64(), restored.next_u64());
+    }
+
+    #[test] fn test_device_and_reference_greedy_samplers_match() {
+        let device = crate::common::init_device();
+        let logits = Tensor::<crate::common::ModelBackend, 2>::from_data(
+            [[-1.0, 3.0, 2.0], [4.0, 4.0, 1.0]], &device);
+        let history = vec![vec![], vec![]];
+        let mut reference_rng = SamplingRng::new(1);
+        let mut device_rng = SamplingRng::new(1);
+        let reference = ReferenceSampler.sample(
+            logits.clone(), SamplingConfig::greedy(), &history, &mut reference_rng);
+        let on_device = DeviceSampler.sample(
+            logits, SamplingConfig::greedy(), &history, &mut device_rng);
+        assert_eq!(on_device, reference);
     }
 }

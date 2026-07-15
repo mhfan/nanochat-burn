@@ -29,6 +29,18 @@ path = "src/bin/train.rs"
 name = "eval"
 path = "src/bin/eval.rs"
 
+[[bin]]
+name = "report"
+path = "src/bin/report.rs"
+
+[[bin]]
+name = "bench_infer"
+path = "src/bin/bench_infer.rs"
+
+[[bin]]
+name = "bench_spec"
+path = "src/bin/bench_spec.rs"
+
 [dependencies]
 # Burn 核心框架与自动微分支持
 burn = { version = "0.21", features = ["train", "wgpu", "dataset"] }

@@ -7,7 +7,7 @@ use crate::{artifact::{MetricRecord, TrainingStage, append_metric,
         save_experiment_config, save_resume_state},
     dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
     dataset::pretokenize_text_to_bin,
-    engine::TrainingEngine,
+    engine::{TrainingEngine, evaluate_bpb},
     experiment::{ExperimentConfig, PretrainConfig, PretrainCorpus}, gpt::Gpt,
     tokenizer::BpeTokenizer,
 };
@@ -126,7 +126,7 @@ pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
     if let Some(position) = engine.dataloader_position {
         loader_config = loader_config.with_position(position);
     }
-    let mut loader = DistributedDataLoader::new(vec![bin_path], loader_config);
+    let mut loader = DistributedDataLoader::new(vec![bin_path.clone()], loader_config);
 
     tracing::info!("Starting pretraining optimization iterations...");
     let start_time = Instant::now();
@@ -136,11 +136,23 @@ pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
     while engine.step < training_config.num_iterations {
         let i = engine.step + 1;
         let loss = engine.train_step(&mut loader, device).await;
+        let should_report_bpb = i == training_config.num_iterations ||
+            checkpoint_interval > 0 && i % checkpoint_interval == 0;
+        let bpb = if should_report_bpb {
+            let eval_config = DistributedDataLoaderConfig::single_process(
+                training_config.device_batch_size, engine.model.config.sequence_len);
+            let mut eval_loader = DistributedDataLoader::new(vec![bin_path.clone()], eval_config);
+            Some(evaluate_bpb(&engine.model, &mut eval_loader, 1,
+                &engine.token_bytes, device).await)
+        } else { None };
         tracing::info!("Iteration {:02}/{:02} | Loss: {:.6}", i,
             training_config.num_iterations, loss);
         append_metric(output, &MetricRecord { stage: TrainingStage::Pretrain, step: i, loss,
             smoothed_loss: Some(loss), learning_rate: None, reward: None,
             elapsed_secs: elapsed_before_resume + start_time.elapsed().as_secs_f64(),
+            bpb, tokens_per_second: Some(engine.last_tokens_per_second), memory_bytes: None,
+            quality: None, kl: None, clip_fraction: None, response_length: None,
+            acceptance_rate: None,
         }).unwrap_or_else(|error| panic!("failed to append pretrain metric: {error}"));
         if checkpoint_interval > 0 && i % checkpoint_interval == 0 &&
             i < training_config.num_iterations {

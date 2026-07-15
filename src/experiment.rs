@@ -2,7 +2,7 @@ use std::{fs, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{engine::TrainingConfig, gpt::GptConfig};
+use crate::{engine::TrainingConfig, gpt::GptConfig, optim::OptimizerKind};
 
 pub const EXPERIMENT_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_EXPERIMENT_CONFIG: &str = "configs/mini.toml";
@@ -56,6 +56,8 @@ pub struct SftConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StageTrainingConfig {
+    #[serde(default)]
+    pub optimizer: OptimizerKind,
     pub num_iterations: usize,
     pub warmup_steps: usize,
     pub warmdown_ratio: f32,
@@ -71,6 +73,8 @@ pub struct StageTrainingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RlConfig {
+    #[serde(default)]
+    pub algorithm: RlAlgorithm,
     pub dataset_path: PathBuf,
     pub num_steps: usize,
     pub learning_rate: f32,
@@ -80,7 +84,25 @@ pub struct RlConfig {
     pub temperature: f32,
     pub top_k: Option<usize>,
     pub repetition_penalty: f32,
+    #[serde(default = "default_kl_coefficient")]
+    pub kl_coefficient: f32,
+    #[serde(default = "default_clip_epsilon")]
+    pub clip_epsilon: f32,
+    #[serde(default = "default_update_epochs")]
+    pub update_epochs: usize,
 }
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RlAlgorithm {
+    #[default]
+    GroupNormalizedReinforce,
+    Grpo,
+}
+
+const fn default_kl_coefficient() -> f32 { 0.01 }
+const fn default_clip_epsilon() -> f32 { 0.2 }
+const fn default_update_epochs() -> usize { 1 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -203,7 +225,8 @@ impl StageTrainingConfig {
     }
 
     fn build(&self, sequence_length: usize) -> TrainingConfig {
-        TrainingConfig { num_iterations: self.num_iterations, warmup_steps: self.warmup_steps,
+        TrainingConfig { optimizer: self.optimizer, num_iterations: self.num_iterations,
+            warmup_steps: self.warmup_steps,
             warmdown_ratio: self.warmdown_ratio, final_lr_frac: self.final_lr_frac,
             learning_rate: self.learning_rate, weight_decay: self.weight_decay,
             device_batch_size: self.device_batch_size, sequence_length,
@@ -231,6 +254,13 @@ impl RlConfig {
         if !self.repetition_penalty.is_finite() || self.repetition_penalty <= 0.0 {
             return Err("rl repetition_penalty must be finite and positive".into());
         }
+        if !self.kl_coefficient.is_finite() || self.kl_coefficient < 0.0 {
+            return Err("rl kl_coefficient must be finite and non-negative".into());
+        }
+        if !self.clip_epsilon.is_finite() || !(0.0..1.0).contains(&self.clip_epsilon) {
+            return Err("rl clip_epsilon must be between zero and one".into());
+        }
+        if self.update_epochs == 0 { return Err("rl update_epochs must be positive".into()); }
         Ok(())
     }
 }
@@ -290,8 +320,7 @@ fn validate_path(path: &Path, name: &str) -> Result<(), String> {
         let mut config: ExperimentConfig =
             toml::from_str(include_str!("../configs/mini.toml")).unwrap();
         config.pretrain.training.sequence_length = Some(config.pretrain.model.sequence_len + 1);
-        assert_eq!(config.validate().unwrap_err(), concat!(
-            "invalid pretrain training: sequence_length 257 exceeds model capacity 256"));
+        assert_eq!(config.validate().unwrap_err(), "invalid pretrain training: sequence_length 257 exceeds model capacity 256");
         config.pretrain.training.sequence_length = None;
         config.sft.training.sequence_length = Some(128);
         assert_eq!(config.sft.training.resolve(config.pretrain.model.sequence_len)

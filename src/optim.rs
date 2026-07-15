@@ -6,6 +6,7 @@ use burn::{module::Param, optim::GradientsParams,
         backend::{AutodiffBackend, Backend}},
 };
 use safetensors::SafeTensors;
+use serde::{Deserialize, Serialize};
 
 use crate::gpt::{Gpt, has_ve};
 
@@ -33,17 +34,30 @@ pub struct MuonState<B: Backend, const D: usize> {
     pub second_momentum_buffer: Tensor<B, D>,
 }
 
-pub struct BlockMuonState<B: Backend> {
-    pub c_q: Option<MuonState<B, 2>>,
-    pub c_k: Option<MuonState<B, 2>>,
-    pub c_v: Option<MuonState<B, 2>>,
-    pub c_proj: Option<MuonState<B, 2>>,
-    pub ve_gate: Option<MuonState<B, 2>>,
-    pub c_fc: Option<MuonState<B, 2>>,
-    pub c_proj_mlp: Option<MuonState<B, 2>>,
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizerKind {
+    #[default]
+    MuonAdamW,
+    AdamW,
 }
 
-impl<B: Backend> Default for BlockMuonState<B> {
+pub enum MatrixOptimizerState<B: Backend> {
+    Muon(MuonState<B, 2>),
+    AdamW(AdamWState<B, 2>),
+}
+
+pub struct BlockOptimizerState<B: Backend> {
+    pub c_q: Option<MatrixOptimizerState<B>>,
+    pub c_k: Option<MatrixOptimizerState<B>>,
+    pub c_v: Option<MatrixOptimizerState<B>>,
+    pub c_proj: Option<MatrixOptimizerState<B>>,
+    pub ve_gate: Option<MatrixOptimizerState<B>>,
+    pub c_fc: Option<MatrixOptimizerState<B>>,
+    pub c_proj_mlp: Option<MatrixOptimizerState<B>>,
+}
+
+impl<B: Backend> Default for BlockOptimizerState<B> {
     fn default() -> Self {
         Self { c_q: None, c_k: None, c_v: None, c_proj: None,
             ve_gate: None, c_fc: None, c_proj_mlp: None,
@@ -52,6 +66,7 @@ impl<B: Backend> Default for BlockMuonState<B> {
 }
 
 pub struct MuonAdamW<B: AutodiffBackend> {
+    pub kind: OptimizerKind,
     pub wte: Option<AdamWState<B::InnerBackend, 2>>,
     pub lm_head: Option<AdamWState<B::InnerBackend, 2>>,
     pub value_embeds: Vec<Option<AdamWState<B::InnerBackend, 2>>>,
@@ -60,14 +75,19 @@ pub struct MuonAdamW<B: AutodiffBackend> {
     pub smear_gate: Option<AdamWState<B::InnerBackend, 2>>,
     pub smear_lambda: Option<AdamWState<B::InnerBackend, 1>>,
     pub backout_lambda: Option<AdamWState<B::InnerBackend, 1>>,
-    pub h: Vec<BlockMuonState<B::InnerBackend>>,
+    pub h: Vec<BlockOptimizerState<B::InnerBackend>>,
 }
 
 impl<B: AutodiffBackend> MuonAdamW<B> {
     pub fn new(n_layer: usize) -> Self {
+        Self::with_kind(n_layer, OptimizerKind::MuonAdamW)
+    }
+
+    pub fn with_kind(n_layer: usize, kind: OptimizerKind) -> Self {
         let value_embeds = (0..n_layer).filter(|&i| has_ve(i, n_layer)).map(|_| None).collect();
-        let h = (0..n_layer).map(|_| BlockMuonState::default()).collect();
+        let h = (0..n_layer).map(|_| BlockOptimizerState::default()).collect();
         Self {
+            kind,
             wte: None,
             lm_head: None,
             value_embeds,
@@ -89,67 +109,80 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         assert_eq!(self.h.len(), gpt.h.len(), "optimizer/model layer count mismatch");
         assert_eq!(self.value_embeds.len(), gpt.value_embeds.len(),
             "optimizer/model value embedding count mismatch");
-        let model_dim = gpt.config.n_embd as f32;
-        let dmodel_lr_scale = (model_dim / 768.0).powf(-0.5);
-
-        let adamw_lr = lr * dmodel_lr_scale * ADAMW_LR_SCALE;
-        let embedding_lr = lr * dmodel_lr_scale * EMBEDDING_LR_SCALE;
-        let value_embed_lr = embedding_lr * VALUE_EMBED_LR_SCALE;
-        let scalar_lr = lr * SCALAR_LR_SCALE;
-
-        // 1. Embeddings, lm_head, and scalars go into AdamW
-        update_adamw_param(&mut gpt.wte.weight, grads, &mut self.wte,
-            AdamWHyper::new(embedding_lr, 0.001, 0.8, 0.995, step));
-        update_adamw_param(&mut gpt.lm_head.weight, grads, &mut self.lm_head,
-            AdamWHyper::new(adamw_lr, 0.01, 0.8, 0.96, step));
-
-        for (ve_cnt, _) in
-            (0..gpt.config.n_layer).filter(|&i| has_ve(i, gpt.config.n_layer)).enumerate() {
-            update_adamw_param(&mut gpt.value_embeds[ve_cnt].weight, grads,
-                &mut self.value_embeds[ve_cnt],
-                AdamWHyper::new(value_embed_lr, 0.01, 0.8, 0.995, step));
+        let adamw_hyper = AdamWHyper::new(lr, weight_decay, 0.9, 0.95, step);
+        if self.kind == OptimizerKind::AdamW {
+            update_adamw_param(&mut gpt.wte.weight, grads, &mut self.wte, adamw_hyper);
+            update_adamw_param(&mut gpt.lm_head.weight, grads, &mut self.lm_head, adamw_hyper);
+            for (embedding, state) in gpt.value_embeds.iter_mut().zip(&mut self.value_embeds) {
+                update_adamw_param(&mut embedding.weight, grads, state, adamw_hyper);
+            }
+            update_adamw_param(&mut gpt.resid_lambdas, grads, &mut self.resid_lambdas,
+                adamw_hyper);
+            update_adamw_param(&mut gpt.x0_lambdas, grads, &mut self.x0_lambdas, adamw_hyper);
+            update_adamw_param(&mut gpt.smear_gate.weight, grads, &mut self.smear_gate,
+                adamw_hyper);
+            update_adamw_param(&mut gpt.smear_lambda, grads, &mut self.smear_lambda,
+                adamw_hyper);
+            update_adamw_param(&mut gpt.backout_lambda, grads, &mut self.backout_lambda,
+                adamw_hyper);
+        } else {
+            let dmodel_lr_scale = (gpt.config.n_embd as f32 / 768.0).powf(-0.5);
+            let adamw_lr = lr * dmodel_lr_scale * ADAMW_LR_SCALE;
+            let embedding_lr = lr * dmodel_lr_scale * EMBEDDING_LR_SCALE;
+            let value_embed_lr = embedding_lr * VALUE_EMBED_LR_SCALE;
+            let scalar_lr = lr * SCALAR_LR_SCALE;
+            update_adamw_param(&mut gpt.wte.weight, grads, &mut self.wte,
+                AdamWHyper::new(embedding_lr, 0.001, 0.8, 0.995, step));
+            update_adamw_param(&mut gpt.lm_head.weight, grads, &mut self.lm_head,
+                AdamWHyper::new(adamw_lr, 0.01, 0.8, 0.96, step));
+            for (embedding, state) in gpt.value_embeds.iter_mut().zip(&mut self.value_embeds) {
+                update_adamw_param(&mut embedding.weight, grads, state,
+                    AdamWHyper::new(value_embed_lr, 0.01, 0.8, 0.995, step));
+            }
+            update_adamw_param(&mut gpt.resid_lambdas, grads, &mut self.resid_lambdas,
+                AdamWHyper::new(scalar_lr * 0.01, 0.05, 0.8, 0.95, step));
+            update_adamw_param(&mut gpt.x0_lambdas, grads, &mut self.x0_lambdas,
+                AdamWHyper::new(scalar_lr, 0.0, 0.96, 0.95, step));
+            let smear_hyper = AdamWHyper::new(lr * SMEAR_LR_SCALE, 0.0, 0.8, 0.95, step);
+            update_adamw_param(&mut gpt.smear_gate.weight, grads, &mut self.smear_gate,
+                smear_hyper);
+            update_adamw_param(&mut gpt.smear_lambda, grads, &mut self.smear_lambda,
+                smear_hyper);
+            update_adamw_param(&mut gpt.backout_lambda, grads, &mut self.backout_lambda,
+                smear_hyper);
         }
 
-        update_adamw_param(&mut gpt.resid_lambdas, grads, &mut self.resid_lambdas,
-            AdamWHyper::new(scalar_lr * 0.01, 0.05, 0.8, 0.95, step));
-        update_adamw_param(&mut gpt.x0_lambdas, grads, &mut self.x0_lambdas,
-            AdamWHyper::new(scalar_lr, 0.0, 0.96, 0.95, step));
-
-        let smear_lr = lr * SMEAR_LR_SCALE;
-        let smear_hyper = AdamWHyper::new(smear_lr, 0.0, 0.8, 0.95, step);
-        update_adamw_param(&mut gpt.smear_gate.weight, grads, &mut self.smear_gate,
-            smear_hyper);
-        update_adamw_param(&mut gpt.smear_lambda, grads, &mut self.smear_lambda, smear_hyper);
-        update_adamw_param(&mut gpt.backout_lambda, grads, &mut self.backout_lambda,
-            smear_hyper);
-
-        // 2. Transformer Block matrices go into Muon
         let muon_hyper =
             MuonHyper { lr, weight_decay, momentum: 0.95, beta2: 0.9, ns_steps: 5 };
 
         for i in 0..gpt.config.n_layer {
             let (block, state) = (&mut gpt.h[i], &mut self.h[i]);
 
-            update_muon_param(&mut block.attn.c_q.weight, grads, &mut state.c_q, muon_hyper);
-            update_muon_param(&mut block.attn.c_k.weight, grads, &mut state.c_k, muon_hyper);
-            update_muon_param(&mut block.attn.c_v.weight, grads, &mut state.c_v, muon_hyper);
-            update_muon_param(&mut block.attn.c_proj.weight, grads, &mut state.c_proj,
-                muon_hyper);
+            update_matrix_param(&mut block.attn.c_q.weight, grads, &mut state.c_q,
+                self.kind, adamw_hyper, muon_hyper);
+            update_matrix_param(&mut block.attn.c_k.weight, grads, &mut state.c_k,
+                self.kind, adamw_hyper, muon_hyper);
+            update_matrix_param(&mut block.attn.c_v.weight, grads, &mut state.c_v,
+                self.kind, adamw_hyper, muon_hyper);
+            update_matrix_param(&mut block.attn.c_proj.weight, grads, &mut state.c_proj,
+                self.kind, adamw_hyper, muon_hyper);
 
             if has_ve(i, gpt.config.n_layer) &&
                 let Some(ref mut gate_linear) = block.attn.ve_gate {
-                update_muon_param(&mut gate_linear.weight, grads, &mut state.ve_gate,
-                    muon_hyper);
+                update_matrix_param(&mut gate_linear.weight, grads, &mut state.ve_gate,
+                    self.kind, adamw_hyper, muon_hyper);
             }
 
-            update_muon_param(&mut block.mlp.c_fc.weight, grads, &mut state.c_fc, muon_hyper);
-            update_muon_param(&mut block.mlp.c_proj.weight, grads, &mut state.c_proj_mlp,
-                muon_hyper);
+            update_matrix_param(&mut block.mlp.c_fc.weight, grads, &mut state.c_fc,
+                self.kind, adamw_hyper, muon_hyper);
+            update_matrix_param(&mut block.mlp.c_proj.weight, grads, &mut state.c_proj_mlp,
+                self.kind, adamw_hyper, muon_hyper);
         }
     }
 
     pub fn save_state(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let mut saver = OptimizerStateSaver::default();
+        saver.kind(self.kind);
         saver.adam("wte", &self.wte);
         saver.adam("lm_head", &self.lm_head);
         for (index, state) in self.value_embeds.iter().enumerate() {
@@ -163,13 +196,13 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
 
         for (index, state) in self.h.iter().enumerate() {
             let prefix = format!("h.{index}");
-            saver.muon(&format!("{prefix}.c_q"), &state.c_q);
-            saver.muon(&format!("{prefix}.c_k"), &state.c_k);
-            saver.muon(&format!("{prefix}.c_v"), &state.c_v);
-            saver.muon(&format!("{prefix}.c_proj"), &state.c_proj);
-            saver.muon(&format!("{prefix}.ve_gate"), &state.ve_gate);
-            saver.muon(&format!("{prefix}.c_fc"), &state.c_fc);
-            saver.muon(&format!("{prefix}.c_proj_mlp"), &state.c_proj_mlp);
+            saver.matrix(&format!("{prefix}.c_q"), &state.c_q);
+            saver.matrix(&format!("{prefix}.c_k"), &state.c_k);
+            saver.matrix(&format!("{prefix}.c_v"), &state.c_v);
+            saver.matrix(&format!("{prefix}.c_proj"), &state.c_proj);
+            saver.matrix(&format!("{prefix}.ve_gate"), &state.ve_gate);
+            saver.matrix(&format!("{prefix}.c_fc"), &state.c_fc);
+            saver.matrix(&format!("{prefix}.c_proj_mlp"), &state.c_proj_mlp);
         }
         saver.write(path.as_ref())
     }
@@ -180,7 +213,7 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             .map_err(|error| format!("failed to read optimizer state: {error}"))?;
         let tensors = SafeTensors::deserialize(&bytes)
             .map_err(|error| format!("failed to parse optimizer state: {error}"))?;
-        let mut optimizer = Self::new(n_layer);
+        let mut optimizer = Self::with_kind(n_layer, load_optimizer_kind(&tensors)?);
 
         optimizer.wte = load_adam(&tensors, "wte", device)?;
         optimizer.lm_head = load_adam(&tensors, "lm_head", device)?;
@@ -195,13 +228,13 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
 
         for (index, state) in optimizer.h.iter_mut().enumerate() {
             let prefix = format!("h.{index}");
-            state.c_q = load_muon(&tensors, &format!("{prefix}.c_q"), device)?;
-            state.c_k = load_muon(&tensors, &format!("{prefix}.c_k"), device)?;
-            state.c_v = load_muon(&tensors, &format!("{prefix}.c_v"), device)?;
-            state.c_proj = load_muon(&tensors, &format!("{prefix}.c_proj"), device)?;
-            state.ve_gate = load_muon(&tensors, &format!("{prefix}.ve_gate"), device)?;
-            state.c_fc = load_muon(&tensors, &format!("{prefix}.c_fc"), device)?;
-            state.c_proj_mlp = load_muon(&tensors, &format!("{prefix}.c_proj_mlp"), device)?;
+            state.c_q = load_matrix(&tensors, &format!("{prefix}.c_q"), device)?;
+            state.c_k = load_matrix(&tensors, &format!("{prefix}.c_k"), device)?;
+            state.c_v = load_matrix(&tensors, &format!("{prefix}.c_v"), device)?;
+            state.c_proj = load_matrix(&tensors, &format!("{prefix}.c_proj"), device)?;
+            state.ve_gate = load_matrix(&tensors, &format!("{prefix}.ve_gate"), device)?;
+            state.c_fc = load_matrix(&tensors, &format!("{prefix}.c_fc"), device)?;
+            state.c_proj_mlp = load_matrix(&tensors, &format!("{prefix}.c_proj_mlp"), device)?;
         }
         Ok(optimizer)
     }
@@ -213,6 +246,13 @@ struct SavedStateTensor { bytes: Vec<u8>, shape: Vec<usize> }
 struct OptimizerStateSaver { tensors: BTreeMap<String, SavedStateTensor> }
 
 impl OptimizerStateSaver {
+    fn kind(&mut self, kind: OptimizerKind) {
+        let value = if kind == OptimizerKind::AdamW { 1.0f32 } else { 0.0 };
+        self.tensors.insert("optimizer.kind".into(), SavedStateTensor {
+            bytes: value.to_le_bytes().to_vec(), shape: vec![1],
+        });
+    }
+
     fn tensor<B: Backend, const D: usize>(&mut self, name: String, tensor: Tensor<B, D>) {
         let shape = tensor.shape().dims::<D>().to_vec();
         let bytes = crate::common::tensor_data_to_f32_vec(tensor.into_data())
@@ -236,6 +276,20 @@ impl OptimizerStateSaver {
         }
     }
 
+    fn matrix<B: Backend>(&mut self, prefix: &str,
+        state: &Option<MatrixOptimizerState<B>>) {
+        match state {
+            Some(MatrixOptimizerState::Muon(state)) => self.muon(prefix, &Some(MuonState {
+                momentum_buffer: state.momentum_buffer.clone(),
+                second_momentum_buffer: state.second_momentum_buffer.clone(),
+            })),
+            Some(MatrixOptimizerState::AdamW(state)) => self.adam(prefix, &Some(AdamWState {
+                exp_avg: state.exp_avg.clone(), exp_avg_sq: state.exp_avg_sq.clone(),
+            })),
+            None => {}
+        }
+    }
+
     fn write(&self, path: &Path) -> Result<(), String> {
         let mut views = BTreeMap::new();
         for (name, tensor) in &self.tensors {
@@ -251,7 +305,7 @@ impl OptimizerStateSaver {
 
 fn load_tensor<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, name: &str,
     device: &B::Device) -> Result<Option<Tensor<B, D>>, String> {
-    if !tensors.names().iter().any(|candidate| *candidate == name) { return Ok(None); }
+    if !tensors.names().contains(&name) { return Ok(None); }
     let view = tensors.tensor(name)
         .map_err(|error| format!("failed to read optimizer tensor {name}: {error}"))?;
     if view.dtype() != safetensors::tensor::Dtype::F32 {
@@ -294,6 +348,35 @@ fn load_muon<B: Backend>(tensors: &SafeTensors<'_>, prefix: &str, device: &B::De
     }
 }
 
+fn load_optimizer_kind(tensors: &SafeTensors<'_>) -> Result<OptimizerKind, String> {
+    if !tensors.names().contains(&"optimizer.kind") {
+        return Ok(OptimizerKind::MuonAdamW);
+    }
+    let view = tensors.tensor("optimizer.kind")
+        .map_err(|error| format!("failed to read optimizer kind: {error}"))?;
+    if view.dtype() != safetensors::tensor::Dtype::F32 || view.shape() != [1] ||
+        view.data().len() != 4 {
+        return Err("optimizer kind marker is invalid".into());
+    }
+    let value = f32::from_le_bytes(view.data().try_into().unwrap());
+    match value as u8 {
+        0 => Ok(OptimizerKind::MuonAdamW),
+        1 => Ok(OptimizerKind::AdamW),
+        _ => Err(format!("optimizer kind marker {value} is unsupported")),
+    }
+}
+
+fn load_matrix<B: Backend>(tensors: &SafeTensors<'_>, prefix: &str, device: &B::Device)
+    -> Result<Option<MatrixOptimizerState<B>>, String> {
+    let (adam, muon) = (load_adam(tensors, prefix, device)?, load_muon(tensors, prefix, device)?);
+    match (adam, muon) {
+        (None, None) => Ok(None),
+        (Some(state), None) => Ok(Some(MatrixOptimizerState::AdamW(state))),
+        (None, Some(state)) => Ok(Some(MatrixOptimizerState::Muon(state))),
+        (Some(_), Some(_)) => Err(format!("optimizer matrix state {prefix} is ambiguous")),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AdamWHyper {
     lr: f32,
@@ -330,13 +413,35 @@ fn update_adamw_param<B: AutodiffBackend, const D: usize>(
     }
 }
 
-fn update_muon_param<B: AutodiffBackend>(param: &mut Param<Tensor<B, 2>>,
-    grads: &GradientsParams, state: &mut Option<MuonState<B::InnerBackend, 2>>,
-    hyper: MuonHyper) {
+fn update_matrix_param<B: AutodiffBackend>(param: &mut Param<Tensor<B, 2>>,
+    grads: &GradientsParams, state: &mut Option<MatrixOptimizerState<B::InnerBackend>>,
+    kind: OptimizerKind, adamw_hyper: AdamWHyper, muon_hyper: MuonHyper) {
     if let Some(grad) = grads.get::<B::InnerBackend, 2>(param.id) {
-        *param = Param::from_tensor(Tensor::from_inner(muon_step(
-            param.val().inner(), grad, state, hyper,
-        )));
+        let updated = match kind {
+            OptimizerKind::MuonAdamW => {
+                let mut inner = match state.take() {
+                    Some(MatrixOptimizerState::Muon(state)) => Some(state),
+                    Some(MatrixOptimizerState::AdamW(_)) =>
+                        panic!("AdamW matrix state cannot be used by Muon"),
+                    None => None,
+                };
+                let updated = muon_step(param.val().inner(), grad, &mut inner, muon_hyper);
+                *state = inner.map(MatrixOptimizerState::Muon);
+                updated
+            }
+            OptimizerKind::AdamW => {
+                let mut inner = match state.take() {
+                    Some(MatrixOptimizerState::AdamW(state)) => Some(state),
+                    Some(MatrixOptimizerState::Muon(_)) =>
+                        panic!("Muon matrix state cannot be used by AdamW"),
+                    None => None,
+                };
+                let updated = adamw_step(param.val().inner(), grad, &mut inner, adamw_hyper);
+                *state = inner.map(MatrixOptimizerState::AdamW);
+                updated
+            }
+        };
+        *param = Param::from_tensor(Tensor::from_inner(updated));
     }
 }
 
@@ -458,22 +563,30 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
             exp_avg: Tensor::<ModelBackend, 2>::from_data([[1.0, 2.0]], &device),
             exp_avg_sq: Tensor::<ModelBackend, 2>::from_data([[3.0, 4.0]], &device),
         });
-        optimizer.h[0].c_q = Some(MuonState {
+        optimizer.h[0].c_q = Some(MatrixOptimizerState::Muon(MuonState {
             momentum_buffer: Tensor::<ModelBackend, 2>::from_data(
                 [[5.0, 6.0], [7.0, 8.0]], &device),
             second_momentum_buffer: Tensor::<ModelBackend, 2>::from_data([[9.0], [10.0]], &device),
-        });
+        }));
         let path = std::env::temp_dir().join(format!(
             "nanochat-optimizer-test-{}.safetensors", std::process::id()));
 
         optimizer.save_state(&path).unwrap();
         let loaded = MuonAdamW::<ModelAutodiffBackend>::load_state(&path, 1, &device).unwrap();
 
+        assert_eq!(loaded.kind, OptimizerKind::MuonAdamW);
         assert_eq!(tensor_data_to_f32_vec(loaded.wte.unwrap().exp_avg.into_data()),
             vec![1.0, 2.0]);
-        assert_eq!(tensor_data_to_f32_vec(
-            loaded.h[0].c_q.as_ref().unwrap().second_momentum_buffer.clone().into_data()),
+        let Some(MatrixOptimizerState::Muon(state)) = loaded.h[0].c_q.as_ref() else {
+            panic!("expected Muon matrix state");
+        };
+        assert_eq!(tensor_data_to_f32_vec(state.second_momentum_buffer.clone().into_data()),
             vec![9.0, 10.0]);
+
+        let adamw = MuonAdamW::<ModelAutodiffBackend>::with_kind(1, OptimizerKind::AdamW);
+        adamw.save_state(&path).unwrap();
+        let adamw = MuonAdamW::<ModelAutodiffBackend>::load_state(&path, 1, &device).unwrap();
+        assert_eq!(adamw.kind, OptimizerKind::AdamW);
         std::fs::remove_file(path).ok();
     }
 }

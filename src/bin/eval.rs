@@ -34,7 +34,13 @@ fn main() {
     let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     tracing::info!("Evaluating {:?} artifact from {:?}", artifact.manifest.stage, artifact_path);
-    run_evaluations(&artifact.model, &artifact.tokenizer, &config.eval, &device);
+    let report = run_evaluations(&artifact.model, &artifact.tokenizer, &config.eval, &device);
+    let output = artifact_path.join("eval.json");
+    let encoded = serde_json::to_vec_pretty(&report)
+        .unwrap_or_else(|error| panic!("failed to serialize evaluation report: {error}"));
+    std::fs::write(&output, encoded)
+        .unwrap_or_else(|error| panic!("failed to write evaluation report {output:?}: {error}"));
+    tracing::info!("Evaluation report saved to {:?}", output);
 }
 
 #[cfg(test)] mod tests { use super::*;

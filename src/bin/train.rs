@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use nanochat_burn::{common::{ModelAutodiffBackend, init_device},
     engine::{pretrain::run_pretraining, recipe::run_recipe, rl::run_rl_training,
         sft::run_sft_training},
-    experiment::{DEFAULT_EXPERIMENT_CONFIG, ExperimentConfig},
+    experiment::{DEFAULT_EXPERIMENT_CONFIG, ExperimentConfig, RlAlgorithm},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,17 +27,28 @@ impl TrainingMode {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct TrainArgs { mode: TrainingMode, config: PathBuf }
+struct TrainArgs {
+    mode: TrainingMode,
+    config: PathBuf,
+    rl_algorithm: Option<RlAlgorithm>,
+}
 
 fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf>)
     -> Result<TrainArgs, String> {
-    let (mut mode, mut config) =
-        (None, env_config.unwrap_or_else(|| PathBuf::from(DEFAULT_EXPERIMENT_CONFIG)));
+    let (mut mode, mut config, mut rl_algorithm) =
+        (None, env_config.unwrap_or_else(|| PathBuf::from(DEFAULT_EXPERIMENT_CONFIG)), None);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--config" {
             config = args.next().map(PathBuf::from)
                 .ok_or_else(|| "--config requires a path".to_string())?;
+        } else if arg == "--rl-algorithm" {
+            rl_algorithm = Some(match args.next().as_deref() {
+                Some("group_normalized_reinforce") => RlAlgorithm::GroupNormalizedReinforce,
+                Some("grpo") => RlAlgorithm::Grpo,
+                Some(value) => return Err(format!("unsupported RL algorithm: {value}")),
+                None => return Err("--rl-algorithm requires a value".into()),
+            });
         } else if let Some(parsed) = TrainingMode::parse(&arg) {
             if mode.replace(parsed).is_some() {
                 return Err("training mode may only be specified once".into());
@@ -46,7 +57,11 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
             return Err(format!("unknown training argument: {arg}"));
         }
     }
-    Ok(TrainArgs { mode: mode.unwrap_or(TrainingMode::Pretrain), config })
+    let mode = mode.unwrap_or(TrainingMode::Pretrain);
+    if rl_algorithm.is_some() && mode != TrainingMode::Rl {
+        return Err("--rl-algorithm requires --rl".into());
+    }
+    Ok(TrainArgs { mode, config, rl_algorithm })
 }
 
 #[tokio::main] async fn main() {
@@ -58,8 +73,9 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
     let args = parse_args(std::env::args().skip(1),
         std::env::var_os("NANOCHAT_CONFIG").map(PathBuf::from))
         .unwrap_or_else(|error| panic!("{error}"));
-    let config = ExperimentConfig::load(&args.config)
+    let mut config = ExperimentConfig::load(&args.config)
         .unwrap_or_else(|error| panic!("{error}"));
+    if let Some(algorithm) = args.rl_algorithm { config.rl.algorithm = algorithm; }
     let device = init_device();
 
     tracing::info!("=============================================");
@@ -93,12 +109,15 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
         let args = parse_args(["--sft".into(), "--config".into(), "custom.toml".into()], None)
             .unwrap();
         assert_eq!(args, TrainArgs { mode: TrainingMode::Sft,
-            config: PathBuf::from("custom.toml") });
+            config: PathBuf::from("custom.toml"), rl_algorithm: None });
         let args = parse_args(Vec::new(), Some(PathBuf::from("env.toml"))).unwrap();
         assert_eq!(args, TrainArgs { mode: TrainingMode::Pretrain,
-            config: PathBuf::from("env.toml") });
+            config: PathBuf::from("env.toml"), rl_algorithm: None });
         assert!(parse_args(["--rl".into(), "--pretrain".into()], None).is_err());
         assert!(parse_args(["--config".into()], None).is_err());
         assert_eq!(parse_args(["--recipe".into()], None).unwrap().mode, TrainingMode::Recipe);
+        assert_eq!(parse_args(["--rl".into(), "--rl-algorithm".into(), "grpo".into()], None)
+            .unwrap().rl_algorithm, Some(RlAlgorithm::Grpo));
+        assert!(parse_args(["--rl-algorithm".into(), "grpo".into()], None).is_err());
     }
 }
