@@ -54,6 +54,15 @@ pub fn process_memory_bytes() -> Option<u64> {
     system.process(pid).map(sysinfo::Process::memory)
 }
 
+/// Extracts the final GSM8K-style answer following a `#### ` marker.
+///
+/// ```
+/// use nanochat_burn::common::extract_answer;
+///
+/// assert_eq!(extract_answer("The answer is #### 12,345"), Some(12_345));
+/// assert_eq!(extract_answer("#### -7 apples and 3 pears"), Some(-7));
+/// assert_eq!(extract_answer("No answer here"), None);
+/// ```
 pub fn extract_answer(text: &str) -> Option<i32> {
     let marker = "#### ";
     text.rfind(marker).and_then(|idx| {

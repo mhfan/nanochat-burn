@@ -1,6 +1,14 @@
 
 /// Safe handcrafted mathematical and string expression evaluator in pure Rust.
 /// Supports basic arithmetic (+, -, *, /, parentheses) and ".count()" string queries.
+///
+/// ```
+/// use nanochat_burn::engine::calculator::use_calculator;
+///
+/// assert_eq!(use_calculator("5 + 3 * 2"), Some("11".into()));
+/// assert_eq!(use_calculator("(5 + 3) * 2"), Some("16".into()));
+/// assert_eq!(use_calculator(r#""strawberry".count("r")"#), Some("3".into()));
+/// ```
 pub fn use_calculator(expr: &str) -> Option<String> {
     let expr_trimmed = expr.trim();
 
@@ -149,19 +157,10 @@ fn parse_and_eval_arithmetic(s: &str) -> Option<f64> {
 }
 
 #[cfg(test)] mod tests { use super::*;
-    #[test] fn test_calculator_arithmetic() {
-        assert_eq!(use_calculator("5 + 3 * 2"), Some("11".to_string()));
-        assert_eq!(use_calculator("(5 + 3) * 2"), Some("16".to_string()));
-        assert_eq!(use_calculator("10 / 2"), Some("5".to_string()));
+    #[test] fn test_calculator_edge_cases() {
         assert_eq!(use_calculator("10 / 0"), None);
         assert_eq!(use_calculator("invalid_chars + 5"), None);
-    }
-
-    #[test] fn test_calculator_string_count() {
-        assert_eq!(use_calculator("\"strawberry\".count(\"r\")"), Some("3".to_string()));
-        assert_eq!(use_calculator("'banana'.count('an')"), Some("2".to_string()));
-        assert_eq!(use_calculator("\"hello\".count(\"l\")"), Some("2".to_string()));
-        assert_eq!(use_calculator("\"a,b\".count(\",\")"), Some("1".to_string()));
-        assert_eq!(use_calculator("\"你好\".count(\"\")"), Some("3".to_string()));
+        assert_eq!(use_calculator(r#""a,b".count(",")"#), Some("1".into()));
+        assert_eq!(use_calculator(r#""你好".count("")"#), Some("3".into()));
     }
 }

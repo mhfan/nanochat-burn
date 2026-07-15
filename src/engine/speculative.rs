@@ -311,18 +311,14 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             vec!["Rust is extremely elegant, ultra-fast, and lossless speculative decoding works!"];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
 
-        let target_config = crate::gpt::GptConfig { sequence_len: 16,
-            vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
-            window_pattern: "L".to_string(), features: Default::default(), quantization: None,
-        };
-        let draft_config = crate::gpt::GptConfig { sequence_len: 16,
+        let config = crate::gpt::GptConfig { sequence_len: 16,
             vocab_size: tokenizer.get_vocab_size(), n_layer: 1, n_head: 4, n_kv_head: 1, n_embd: 32,
             window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
 
         use crate::common::ModelBackend;
-        let target_model: Gpt<ModelBackend> = Gpt::new(target_config.clone(), &device);
-        let draft_model: Gpt<ModelBackend> = Gpt::new(draft_config.clone(), &device);
+        let target_model: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
+        let draft_model: Gpt<ModelBackend> = Gpt::new(config, &device);
 
         let spec_engine = SpeculativeInferenceEngine::new(target_model.clone(),
             draft_model.clone(), tokenizer.clone());

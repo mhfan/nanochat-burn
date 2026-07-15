@@ -309,20 +309,13 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(config.gradient_accumulation_steps(), 2);
     }
 
-    #[tokio::test] async fn test_bpb_and_engine_instantiation() {
+    #[test] fn test_token_byte_lengths() {
         let corpus = vec!["Rust is extremely elegant and high-performance."];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
-        assert_eq!(get_token_bytes(&tokenizer).len(), tokenizer.get_vocab_size());
-
-        let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
-            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
-            quantization: None,
-        };
-
-        let device = crate::common::init_device();
-        let gpt: Gpt<crate::common::ModelBackend> = Gpt::new(config.clone(), &device);
-        assert_eq!(gpt.config.sequence_len, 8);
+        let token_bytes = get_token_bytes(&tokenizer);
+        assert_eq!(token_bytes.len(), tokenizer.get_vocab_size());
+        assert!(token_bytes[..256].iter().all(|&bytes| bytes == 1));
+        assert_eq!(token_bytes[tokenizer.get_bos_token_id()], 0);
     }
 
     #[tokio::test] async fn test_training_resume_equivalence() {

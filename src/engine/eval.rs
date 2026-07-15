@@ -187,13 +187,3 @@ pub fn run_evaluations<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
     tracing::info!("=============================================");
     EvalReport { scores, aggregate: Some(chatcore) }
 }
-
-#[cfg(test)] mod tests { use super::*;
-    #[test] fn test_extract_answer() {
-        assert_eq!(extract_answer("The answer is #### 42"), Some(42));
-        assert_eq!(extract_answer("#### -7"), Some(-7));
-        assert_eq!(extract_answer("No answer here"), None);
-        assert_eq!(extract_answer("#### 12,345"), Some(12345));
-        assert_eq!(extract_answer("#### 12 apples and 34 pears"), Some(12));
-    }
-}

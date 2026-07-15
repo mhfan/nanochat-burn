@@ -7,8 +7,8 @@ sft = "runs/sft"
 rl = "runs/rl"
 
 [pretrain]
-text_path = "data/pretrain.txt"
-token_path = "data/pretrain.bin"
+text_path = "runs/data/pretrain.txt"
+token_path = "runs/data/pretrain.bin"
 checkpoint_interval = 5
 
 [pretrain.corpus]

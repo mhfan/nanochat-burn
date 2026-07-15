@@ -372,20 +372,20 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
 }
 
 #[cfg(test)] mod tests { use super::*;
-    #[test] fn test_inference_engine_instantiation() {
+    use crate::{common::{ModelBackend, ModelDevice}, gpt::GptConfig};
+
+    fn test_engine(corpus: &str, sequence_len: usize, device: &ModelDevice)
+        -> InferenceEngine<ModelBackend> {
+        let tokenizer = BpeTokenizer::train_from_iterator([corpus], 280);
+        let config = GptConfig { sequence_len, n_layer: 1, n_head: 2, n_kv_head: 1,
+            n_embd: 16, quantization: None, window_pattern: "L".into(),
+            vocab_size: tokenizer.get_vocab_size(), features: Default::default() };
+        InferenceEngine::new(Gpt::new(config, device), tokenizer)
+    }
+
+    #[test] fn test_inference_prefill() {
         let device = crate::common::init_device();
-        let corpus = vec!["Interactive chat agent with Tool-Use integration."];
-        let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
-
-        let config = crate::gpt::GptConfig { sequence_len: 8, n_layer: 1, n_head: 2,
-            n_kv_head: 1, n_embd: 32, quantization: None,
-            window_pattern: "L".to_string(), vocab_size: tokenizer.get_vocab_size(),
-            features: Default::default(),
-        };
-
-        use crate::common::ModelBackend;
-        let gpt: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
-        let engine = InferenceEngine::new(gpt, tokenizer);
+        let engine = test_engine("Interactive chat agent with Tool-Use integration.", 8, &device);
 
         let prompt_tokens = vec![1, 2, 3];
         let (state, logits) = engine.prefill(&prompt_tokens, 2, &device);
@@ -397,18 +397,7 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
 
     #[test] fn test_inference_step_generation() {
         let device = crate::common::init_device();
-        let corpus = vec!["Interactive chat agent with Tool-Use integration."];
-        let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
-
-        let config = crate::gpt::GptConfig { sequence_len: 32, n_layer: 1, n_head: 2,
-            n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
-            quantization: None,
-        };
-
-        use crate::common::ModelBackend;
-        let gpt: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
-        let engine = InferenceEngine::new(gpt, tokenizer);
+        let engine = test_engine("Interactive chat agent with Tool-Use integration.", 16, &device);
 
         let prompt_tokens = vec![1, 2, 3];
         let config = GenerationConfig { max_tokens: 5,
@@ -426,14 +415,7 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
 
     #[test] fn test_tool_state_queues_calculator_output() {
         let device = crate::common::init_device();
-        let tokenizer = BpeTokenizer::train_from_iterator(["2 + 2"], 280);
-        let config = crate::gpt::GptConfig { sequence_len: 16, n_layer: 1, n_head: 2,
-            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
-            quantization: None,
-        };
-        let model = Gpt::<crate::common::ModelBackend>::new(config, &device);
-        let engine = InferenceEngine::new(model, tokenizer);
+        let engine = test_engine("2 + 2", 16, &device);
         let (mut state, _) = engine.prefill(&[1], 1, &device);
         let special = engine.tokenizer.special_token_ids();
 
@@ -449,15 +431,7 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
 
     #[test] fn test_seeded_decode_is_deterministic() {
         let device = crate::common::init_device();
-        let tokenizer = BpeTokenizer::train_from_iterator(
-            ["seeded stochastic decoding must resume exactly"], 280);
-        let config = crate::gpt::GptConfig { sequence_len: 16, n_layer: 1, n_head: 2,
-            n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
-            vocab_size: tokenizer.get_vocab_size(), features: Default::default(),
-            quantization: None,
-        };
-        let model = Gpt::<crate::common::ModelBackend>::new(config, &device);
-        let engine = InferenceEngine::new(model, tokenizer);
+        let engine = test_engine("seeded stochastic decoding must resume exactly", 16, &device);
         let generation = GenerationConfig { max_tokens: 4, seed: 7,
             sampling: SamplingConfig {
                 temperature: 0.8, top_k: Some(8), repetition_penalty: 1.0,

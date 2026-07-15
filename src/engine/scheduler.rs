@@ -53,6 +53,15 @@ impl<T> ContinuousBatchScheduler<T> {
 pub struct AttentionSinkPolicy { pub sink_tokens: usize, pub recent_tokens: usize }
 
 impl AttentionSinkPolicy {
+    /// Returns the non-overlapping prefix and recent-token ranges retained by the policy.
+    ///
+    /// ```
+    /// use nanochat_burn::engine::scheduler::AttentionSinkPolicy;
+    ///
+    /// let policy = AttentionSinkPolicy { sink_tokens: 4, recent_tokens: 8 };
+    /// assert_eq!(policy.retained_ranges(20), vec![0..4, 12..20]);
+    /// assert_eq!(policy.retained_ranges(6), vec![0..4, 4..6]);
+    /// ```
     pub fn retained_ranges(self, sequence_len: usize) -> Vec<std::ops::Range<usize>> {
         let sink_end = self.sink_tokens.min(sequence_len);
         let recent_start = sequence_len.saturating_sub(self.recent_tokens).max(sink_end);
@@ -77,9 +86,4 @@ impl AttentionSinkPolicy {
         assert_eq!(scheduler.active_len(), 0);
     }
 
-    #[test] fn test_attention_sink_ranges() {
-        let policy = AttentionSinkPolicy { sink_tokens: 4, recent_tokens: 8 };
-        assert_eq!(policy.retained_ranges(20), vec![0..4, 12..20]);
-        assert_eq!(policy.retained_ranges(6), vec![0..4, 4..6]);
-    }
 }

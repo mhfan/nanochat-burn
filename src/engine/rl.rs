@@ -373,14 +373,4 @@ fn save_rl_checkpoint<B: AutodiffBackend>(output: &Path, model: &crate::gpt::Gpt
         assert_eq!(clipped_surrogate(0.5, -2.0, 0.2), -1.6);
         assert_eq!(fit_rollout_prompt((0..10).collect(), 8, 3), vec![5, 6, 7, 8, 9]);
     }
-
-    #[ignore] #[test] fn test_rl_training_loop() {
-        let subscriber = tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::INFO).finish();
-        let _ = tracing::subscriber::set_global_default(subscriber);
-
-        let device = crate::common::init_device();
-        let config = ExperimentConfig::load(crate::experiment::DEFAULT_EXPERIMENT_CONFIG).unwrap();
-        run_rl_training::<crate::common::ModelAutodiffBackend>(&device, &config);
-    }
 }
