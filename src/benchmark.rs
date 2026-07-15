@@ -3,7 +3,8 @@ use std::{mem::size_of, time::Instant};
 use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 
-use crate::{engine::inference::{DeviceSampler, InferenceEngine, SamplingConfig,
+use crate::{common::DeviceMemoryUsage,
+    engine::inference::{DeviceSampler, InferenceEngine, SamplingConfig,
         SamplingRng, TokenSampler}, engine::speculative::{SpeculativeConfig,
         SpeculativeInferenceEngine}, gpt::{ForwardLayer, GptConfig}};
 
@@ -17,6 +18,10 @@ pub struct InferenceBenchmark {
     pub time_to_first_token_ms: f64,
     pub decode_tokens_per_second: f64,
     pub cache_bytes: u64,
+    #[serde(default)]
+    pub peak_device_bytes_in_use: Option<u64>,
+    #[serde(default)]
+    pub peak_device_bytes_reserved: Option<u64>,
     pub model_bytes: u64,
     pub quantization_bits: Option<usize>,
     pub quantization_max_error: Option<f32>,
@@ -76,7 +81,8 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     engine: &InferenceEngine<B, L>, prompt: &[usize], batch_size: usize,
     decode_tokens: usize, warmup: usize, iterations: usize, model_bytes: u64,
     quantization_bits: Option<usize>, quantization_max_error: Option<f32>,
-    device: &B::Device) -> InferenceBenchmark {
+    device: &B::Device, memory_usage: &impl Fn() -> Option<DeviceMemoryUsage>)
+    -> InferenceBenchmark {
     assert!(!prompt.is_empty(), "benchmark prompt must not be empty");
     assert!(batch_size > 0, "benchmark batch size must be positive");
     assert!(iterations > 0, "benchmark iterations must be positive");
@@ -119,14 +125,36 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     }
     let decode_tokens_per_second = generated as f64 / start.elapsed().as_secs_f64();
 
+    // Keep allocator synchronization outside timed sections.
+    let mut peak_memory = memory_usage();
+    let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
+    update_peak_memory(&mut peak_memory, memory_usage());
+    for _ in 0..decode_tokens {
+        let (_, _, next) = engine.step_generation(
+            &mut state, logits, SamplingConfig::greedy(), device);
+        logits = next;
+        update_peak_memory(&mut peak_memory, memory_usage());
+    }
+
     InferenceBenchmark { batch_size, prompt_tokens: prompt.len(), decode_tokens, iterations,
         prefill_latency_ms: prefill_secs * 1000.0 / iterations as f64,
         time_to_first_token_ms: ttft_secs * 1000.0 / iterations as f64,
         decode_tokens_per_second, cache_bytes: estimate_cache_bytes::<B>(
-            &engine.model.config, batch_size), model_bytes, quantization_bits,
+        &engine.model.config, batch_size),
+        peak_device_bytes_in_use: peak_memory.map(|usage| usage.bytes_in_use),
+        peak_device_bytes_reserved: peak_memory.map(|usage| usage.bytes_reserved),
+        model_bytes, quantization_bits,
         quantization_max_error,
         estimated_quantized_linear_bytes: quantization_bits.map(|bits|
             estimate_quantized_linear_bytes(&engine.model.config, bits)),
+    }
+}
+
+fn update_peak_memory(peak: &mut Option<DeviceMemoryUsage>, sample: Option<DeviceMemoryUsage>) {
+    if let Some(sample) = sample {
+        let peak = peak.get_or_insert(sample);
+        peak.bytes_in_use = peak.bytes_in_use.max(sample.bytes_in_use);
+        peak.bytes_reserved = peak.bytes_reserved.max(sample.bytes_reserved);
     }
 }
 
@@ -143,4 +171,15 @@ fn estimate_quantized_linear_bytes(config: &GptConfig, bits: usize) -> u64 {
         config.n_embd * config.n_embd * 8;
     let output = config.n_embd * config.vocab_size;
     ((config.n_layer * block + output) * bits).div_ceil(8) as u64
+}
+
+#[cfg(test)] mod tests { use super::*;
+    #[test] fn test_peak_memory_combines_allocator_samples() {
+        let mut peak = Some(DeviceMemoryUsage { bytes_in_use: 10, bytes_reserved: 20 });
+        update_peak_memory(&mut peak,
+            Some(DeviceMemoryUsage { bytes_in_use: 15, bytes_reserved: 18 }));
+        update_peak_memory(&mut peak,
+            Some(DeviceMemoryUsage { bytes_in_use: 12, bytes_reserved: 30 }));
+        assert_eq!(peak, Some(DeviceMemoryUsage { bytes_in_use: 15, bytes_reserved: 30 }));
+    }
 }

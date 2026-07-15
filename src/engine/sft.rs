@@ -170,7 +170,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
             bpb: None,
             tokens_per_second: Some((actual_batch_size * max_seq_len) as f32 /
                 step_start.elapsed().as_secs_f32().max(f32::EPSILON)),
-            memory_bytes: None, quality: None, kl: None, clip_fraction: None,
+            memory_bytes: crate::common::process_memory_bytes(),
+            quality: None, kl: None, clip_fraction: None,
             response_length: None, acceptance_rate: None,
         }).unwrap_or_else(|error| panic!("failed to append SFT metric: {error}"));
     }

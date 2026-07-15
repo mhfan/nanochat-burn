@@ -77,7 +77,7 @@ runs/<run-name>/
 - [ ] 每章包含公式、源码入口、最小实验和常见错误。
 - [x] 支持 ReLU2、QK Norm、GQA、SWA、Smear、Backout 开关。
 - [x] 支持 Muon 与 AdamW 对照实验。
-- [ ] 生成 loss、BPB、tokens/s、内存占用和模型质量报告。（除实际峰值内存外均已接入）
+- [x] 生成 loss、BPB、tokens/s、内存占用和模型质量报告。
 - [x] 增加 tiny overfit 集成测试。
 - [x] 增加 resume equivalence 集成测试。
 - [x] 增加 deterministic decode 集成测试。
@@ -89,7 +89,7 @@ runs/<run-name>/
 - [x] 保留 CPU `ReferenceSampler`，增加设备端 `DeviceSampler`。
 - [x] 避免每个 token 回传完整 vocabulary logits。
 - [x] 建立 prefill/decode 分离基准。
-- [ ] 记录首 token 延迟、tokens/s、显存和 batch scaling。（缺实际峰值显存采样）
+- [x] 记录首 token 延迟、tokens/s、显存和 batch scaling。
 - [x] 为量化记录模型大小、误差和吞吐收益。
 - [x] 为 speculative decoding 记录 acceptance rate 和真实加速比。
 - [x] 实现 draft KV cache truncate/rollback，移除全量重建。
@@ -101,8 +101,8 @@ runs/<run-name>/
 - [x] 抽象连续 KV cache 与分页 KV cache 的公共接口。
 - [x] 实现 page allocator、free list 和请求级 block table。
 - [x] attention 直接消费分页 KV，不在每步重构连续张量。
-- [ ] 支持请求动态加入、完成、取消和页回收。（调度与页回收组件已完成，待服务路径集成）
-- [ ] 实现 iteration-level continuous batching。（调度器已完成，待批量模型执行集成）
+- [x] 支持请求动态加入、完成、取消和页回收。
+- [x] 实现 iteration-level continuous batching。
 - [x] 增加 StreamingLLM attention sinks 与页面驱逐实验。
 
 验收条件：多请求负载下页面能复用和回收，并优于静态 batch 基线。

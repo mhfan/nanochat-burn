@@ -27,12 +27,13 @@ fn main() {
     let report = build_report(&runs).unwrap_or_else(|error| panic!("{error}"));
     write_report(&report, &output).unwrap_or_else(|error| panic!("{error}"));
 
-    println!("stage\talgorithm\tstep\tloss\tbpb\ttokens/s\tmodel MiB\tquality");
+    println!("stage\talgorithm\tstep\tloss\tbpb\ttokens/s\tpeak RSS MiB\tmodel MiB\tquality");
     for run in &report.runs {
-        println!("{:?}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}", run.stage,
+        println!("{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}", run.stage,
             run.rl_algorithm.map_or_else(|| "-".into(), |value| format!("{value:?}")),
             display(run.step), display(run.loss), display(run.bpb),
-            display(run.tokens_per_second), run.model_bytes as f64 / 1_048_576.0,
+            display(run.tokens_per_second), display_mib(run.memory_bytes),
+            run.model_bytes as f64 / 1_048_576.0,
             display(run.quality));
     }
     println!("Report saved to {}", output.display());
@@ -40,6 +41,10 @@ fn main() {
 
 fn display(value: Option<impl std::fmt::Display>) -> String {
     value.map_or_else(|| "-".into(), |value| value.to_string())
+}
+
+fn display_mib(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".into(), |bytes| format!("{:.2}", bytes as f64 / 1_048_576.0))
 }
 
 #[cfg(test)] mod tests { use super::*;

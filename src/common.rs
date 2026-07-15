@@ -17,6 +17,12 @@ pub type ModelBackend = Wgpu<f16, i32>;
 pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
 pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceMemoryUsage {
+    pub bytes_in_use: u64,
+    pub bytes_reserved: u64,
+}
+
 /// 初始化系统计算设备：优先使用 WGPU GPU；
 /// 如果环境变量 BURN_DEVICE=cpu，则强行使用 CPU 运行以规避 GPU JIT 编译开销
 pub fn init_device() -> ModelDevice {
@@ -27,6 +33,25 @@ pub fn init_device() -> ModelDevice {
             std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu"));
         if use_cpu { burn::backend::wgpu::WgpuDevice::Cpu } else { Default::default() }
     }
+}
+
+#[cfg(not(feature = "ndarray"))]
+pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
+    use cubecl_runtime::runtime::Runtime;
+    let usage = burn::backend::wgpu::WgpuRuntime::client(device).memory_usage().ok()?;
+    Some(DeviceMemoryUsage {
+        bytes_in_use: usage.bytes_in_use, bytes_reserved: usage.bytes_reserved,
+    })
+}
+
+#[cfg(feature = "ndarray")]
+pub fn device_memory_usage(_device: &ModelDevice) -> Option<DeviceMemoryUsage> { None }
+
+pub fn process_memory_bytes() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
+    system.process(pid).map(sysinfo::Process::memory)
 }
 
 pub fn extract_answer(text: &str) -> Option<i32> {
@@ -67,6 +92,16 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
 }
 
 #[cfg(test)] mod tests { use super::*;
+    #[cfg(not(feature = "ndarray"))]
+    #[test] fn verify_device_memory_usage() {
+        let device = init_device();
+        let tensor = Tensor::<ModelBackend, 1>::zeros([1024], &device);
+        let _ = tensor.clone().into_data();
+        let usage = device_memory_usage(&device).expect("WGPU allocator memory report");
+        assert!(usage.bytes_in_use > 0);
+        assert!(usage.bytes_reserved >= usage.bytes_in_use);
+    }
+
     #[test] fn verify_autodiff_pipeline() {
         // 初始化测试日志，以便在测试失败时观察底层驱动输出
         //tracing_subscriber::fmt().with_env_filter("info").init();

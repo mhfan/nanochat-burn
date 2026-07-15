@@ -70,6 +70,8 @@ tracing = "0.1"
 memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
 bytemuck = "1"
 rand = "0.10"
+sysinfo = "0.38"
+cubecl-runtime = "0.10"
 
 # Web 服务框架（仅 chat_web 二进制需要，通过 'web' feature 按需编译）
 axum = { version = "0.8", optional = true }

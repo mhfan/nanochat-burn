@@ -17,6 +17,7 @@ pub mod recipe;
 pub mod rl;
 pub mod sandbox;
 pub mod scheduler;
+pub mod serving;
 pub mod sft;
 pub mod speculative;
 

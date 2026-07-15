@@ -16,7 +16,7 @@
 | Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 与 RL 保存 optimizer/trainer，RL 额外恢复采样 RNG |
 | TOML 实验配置 | Experimental | 一个强类型配置统一模型、数据、三阶段超参数和 artifact 链路，并随产物保存 |
 | W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
-| Paged KV cache | Experimental | free-list、请求 block table 与逐页 online-softmax attention；服务级动态 batching 尚未接入 |
+| Paged KV cache | Experimental | free-list、请求 block table、逐页 online-softmax attention，以及按 request slot/position 合并的 iteration-level continuous batching |
 | Speculative decoding | Reference | greedy 模式数学无损，支持增量 draft rollback、acceptance 与真实加速比基准 |
 | REINFORCE / GRPO | Experimental | 支持组内优势、old-policy ratio clip、reference KL、rollout 记录和恢复 |
 | Python code executor | Experimental | 有超时和输出限制，但不是 OS 级安全沙箱 |
@@ -84,8 +84,10 @@ cargo run --features ndarray --example tokenizer
     │   ├── dataloader.rs       # 阶段 2: 分片、预取与断点位置
     │   ├── gpt.rs              # 阶段 3: GPT 架构实现 (Rotary Embeddings, Softcap, GQA 等)
     │   ├── gpt/
+    │   │   ├── cache.rs        # 分页 KV cache、page allocator 与 block table
     │   │   ├── parity.rs       # Python/Rust 模型 parity 与误差预算
-    │   │   └── quant.rs        # W8/W4 权重量化与后端快路径
+    │   │   ├── quant.rs        # W8/W4 权重量化与后端快路径
+    │   │   └── tests.rs        # GPT、cache 与量化集成测试
     │   ├── checkpoint.rs       # 阶段 3: Checkpoint 序列化与 Safetensors 对接
     │   ├── benchmark.rs        # Prefill/decode、量化与 speculative 基准
     │   ├── optim.rs            # 阶段 4: Polar Express Muon + AdamW 混合正交优化器
@@ -99,6 +101,7 @@ cargo run --features ndarray --example tokenizer
     │   │   ├── speculative.rs  # 阶段 5: 无损推测解码双模型推理引擎 (Draft + Target Model)
     │   │   ├── sandbox.rs      # 阶段 6: 带超时和输出限制的 Python 子进程
     │   │   ├── scheduler.rs    # Continuous batching admission/cancel 调度器
+    │   │   ├── serving.rs      # 动态请求迭代、取消和 KV cache slot 回收
     │   │   ├── eval.rs         # 阶段 6: 评测子系统及 benchmark 评估 (gsm8k, spellingbee 等)
     │   │   └── sft.rs          # 阶段 6: 监督微调 (packed SFT) 工作流
     │   └── bin/
@@ -191,9 +194,10 @@ cargo run --release --bin bench_infer -- --artifact runs/sft --quantization 4
 cargo run --release --bin bench_spec -- runs/sft runs/pretrain
 ```
 
-报告写入 `runs/report.json`，推理基准写入 `runs/benchmarks/`。基准记录 prefill、首 token、
-decode tokens/s、batch scaling、理论 KV cache 字节数，以及量化误差/估算线性权重大小；目前不声称
-这些估算值等同于驱动报告的峰值显存。
+报告写入 `runs/report.json`，推理基准写入 `runs/benchmarks/`。训练报告记录各指标时刻观测到的
+进程 RSS 峰值；推理基准记录 prefill、首 token、decode tokens/s、batch scaling、理论 KV cache
+字节数，以及 CubeCL allocator 实测的设备 `bytes_in_use`/`bytes_reserved` 峰值。NdArray 没有设备
+allocator，相关字段为 `null`，不会用进程内存冒充显存。
 
 同一 SFT artifact 的小规模对齐对照可用两个输出目录运行；随后分别执行 `eval`，再交给
 `report` 汇总，报告会从 `experiment.toml` 区分两种算法：
@@ -285,9 +289,11 @@ NANOCHAT_ARTIFACT=runs/sft cargo run --bin chat --release
     *（在 CPU 下极速体验自回归生成：`BURN_DEVICE=cpu cargo run --bin chat --release`）*
 
 *   **Web 对话服务端**：
-    启动基于 Axum 的流式 SSE Web 服务：
+    启动基于 Axum 的流式 SSE Web 服务。服务通过单一迭代 worker 动态接纳请求，并将不同上下文
+    位置的 active 请求合入一次 batched decode forward；完成、断连或输出积压时会回收对应 KV
+    cache slot。`NANOCHAT_MAX_BATCH` 控制同时 active 的请求上限（默认 8）：
     ```bash
-    cargo run --features web --bin chat_web --release
+    NANOCHAT_MAX_BATCH=8 cargo run --features web --bin chat_web --release
     ```
     启动后可在浏览器中访问 [http://127.0.0.1:8080](http://127.0.0.1:8080)。
 

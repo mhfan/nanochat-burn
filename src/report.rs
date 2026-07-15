@@ -14,6 +14,7 @@ pub struct RunSummary {
     pub loss: Option<f32>,
     pub bpb: Option<f32>,
     pub tokens_per_second: Option<f32>,
+    pub memory_bytes: Option<u64>,
     pub model_bytes: u64,
     pub quality: Option<f32>,
     pub reward: Option<f32>,
@@ -30,6 +31,7 @@ pub fn summarize_run(path: impl AsRef<Path>) -> Result<RunSummary, String> {
     let metrics = read_jsonl::<MetricRecord>(path.join(&manifest.metrics_file))?;
     let latest = metrics.last();
     let bpb = metrics.iter().rev().find_map(|metric| metric.bpb);
+    let memory_bytes = metrics.iter().filter_map(|metric| metric.memory_bytes).max();
     let eval_path = path.join("eval.json");
     let quality = if eval_path.is_file() {
         read_json::<EvalReport>(eval_path)?.aggregate
@@ -46,7 +48,8 @@ pub fn summarize_run(path: impl AsRef<Path>) -> Result<RunSummary, String> {
     }).transpose()?.filter(|_| manifest.stage == TrainingStage::ReinforcementLearning);
     Ok(RunSummary { path: path.to_path_buf(), stage: manifest.stage, rl_algorithm,
         step: latest.map(|metric| metric.step), loss: latest.map(|metric| metric.loss), bpb,
-        tokens_per_second: latest.and_then(|metric| metric.tokens_per_second), model_bytes,
+        tokens_per_second: latest.and_then(|metric| metric.tokens_per_second), memory_bytes,
+        model_bytes,
         quality, reward: latest.and_then(|metric| metric.reward),
         kl: latest.and_then(|metric| metric.kl),
         clip_fraction: latest.and_then(|metric| metric.clip_fraction),

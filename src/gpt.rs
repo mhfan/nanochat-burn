@@ -251,6 +251,18 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         self.c_proj.forward_layer(y)
     }
 
+    pub fn forward_with_cache_rows(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, requests: &[usize],
+        steps: &[usize]) -> Tensor<B, 3> {
+        let [batch_size, t, _] = x.shape().dims();
+        let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
+        cache.update_rows(self.layer_idx, k, v, requests, steps);
+        let y = cache.attend_rows(self.layer_idx, q, self.mask.clone(), requests, steps,
+            self.n_head, self.n_kv_head, self.head_dim)
+            .reshape([batch_size, t, self.n_head * self.head_dim]);
+        self.c_proj.forward_layer(y)
+    }
+
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
         cos: Tensor<B, 4>, sin: Tensor<B, 4>,) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
@@ -296,6 +308,14 @@ impl<B: Backend, L: ForwardLayer<B>> Block<B, L> {
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
         cos: Tensor<B, 4>, sin: Tensor<B, 4>) -> Tensor<B, 3> {
         let x = x.clone() + self.attn.forward(norm(x.clone()), ve, cos, sin);
+        x.clone() + self.mlp.forward(norm(x))
+    }
+
+    pub fn forward_with_cache_rows(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, requests: &[usize],
+        steps: &[usize]) -> Tensor<B, 3> {
+        let x = x.clone() + self.attn.forward_with_cache_rows(
+            norm(x.clone()), ve, cos, sin, cache, requests, steps);
         x.clone() + self.mlp.forward(norm(x))
     }
 }
@@ -403,6 +423,25 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         (cos, sin)
     }
 
+    fn precompute_rotary_embeddings_rows(&self, positions: &[usize], len: usize,
+        head_dim: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let inv_freq: Vec<f32> = (0..head_dim).step_by(2)
+            .map(|i| 1.0 / ROPE_BASE_FREQ.powf(i as f32 / head_dim as f32)).collect();
+        let mut cos_data = Vec::with_capacity(positions.len() * len * head_dim / 2);
+        let mut sin_data = Vec::with_capacity(positions.len() * len * head_dim / 2);
+        for &start in positions {
+            for position in start..start + len {
+                let position = position as f32;
+                cos_data.extend(inv_freq.iter().map(|&freq| (position * freq).cos()));
+                sin_data.extend(inv_freq.iter().map(|&freq| (position * freq).sin()));
+            }
+        }
+        let shape = Shape::new([positions.len(), len, 1, head_dim / 2]);
+        let cos = Tensor::from_data(TensorData::new(cos_data, shape.clone()), device);
+        let sin = Tensor::from_data(TensorData::new(sin_data, shape), device);
+        (cos, sin)
+    }
+
     fn smear_embeddings(&self, x: Tensor<B, 3>, previous: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
         let [batch_size, seq_len, n_embd] = x.shape().dims();
         let start = usize::from(previous.is_none());
@@ -446,6 +485,35 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         });
         let output = self.smear_embeddings(x, previous);
         cache.token_history = Some(history.slice_assign([0..batch_size, step..end], idx));
+        output
+    }
+
+    fn smear_embeddings_with_cache_rows(&self, idx: Tensor<B, 2, Int>, x: Tensor<B, 3>,
+        cache: &mut KVCache<B>, requests: &[usize], steps: &[usize]) -> Tensor<B, 3> {
+        let [source_batch_size, seq_len, _] = x.shape().dims();
+        assert_eq!(idx.shape().dims(), [source_batch_size, seq_len],
+            "token embedding shape mismatch");
+        assert_eq!(requests.len(), source_batch_size, "cache request mapping size mismatch");
+        assert_eq!(steps.len(), source_batch_size, "cache position mapping size mismatch");
+        let has_previous = steps.first().is_some_and(|&step| step > 0);
+        assert!(steps.iter().all(|&step| (step > 0) == has_previous),
+            "a cached batch cannot mix prefill and decode rows");
+
+        let mut history = cache.token_history.take().unwrap_or_else(||
+            Tensor::<B, 2, Int>::zeros([cache.batch_size, cache.max_seq_len], &idx.device()));
+        let previous = has_previous.then(|| {
+            let rows = requests.iter().zip(steps).map(|(&request, &step)|
+                history.clone().slice([request..request + 1, step - 1..step])).collect();
+            norm(self.wte.forward(Tensor::cat(rows, 0)))
+        });
+        let output = self.smear_embeddings(x, previous);
+        for (source, (&request, &step)) in requests.iter().zip(steps).enumerate() {
+            let end = step.checked_add(seq_len).expect("cache position overflow");
+            assert!(end <= cache.max_seq_len, "cached sequence exceeds cache capacity");
+            history = history.slice_assign([request..request + 1, step..end],
+                idx.clone().slice([source..source + 1, 0..seq_len]));
+        }
+        cache.token_history = Some(history);
         output
     }
 
@@ -506,9 +574,64 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         (logits / LOGIT_CLIP_VAL).tanh() * LOGIT_CLIP_VAL
     }
 
+    fn forward_inner_rows(&self, idx: Tensor<B, 2, Int>, cache: &mut KVCache<B>,
+        requests: &[usize], steps: &[usize]) -> Tensor<B, 3> {
+        let [batch_size, seq_len] = idx.shape().dims();
+        assert!(seq_len > 0, "input must contain at least one token");
+        assert_eq!(requests.len(), batch_size, "cache request mapping size mismatch");
+        assert_eq!(steps.len(), batch_size, "cache position mapping size mismatch");
+        assert!((0..requests.len()).all(|index|
+            !requests[..index].contains(&requests[index])),
+            "cache request mapping contains duplicates");
+        assert!(steps.iter().all(|&step| step.checked_add(seq_len)
+            .is_some_and(|end| end <= self.config.sequence_len)),
+            "input exceeds model sequence length");
+
+        let head_dim = self.config.n_embd / self.config.n_head;
+        let (cos, sin) = self.precompute_rotary_embeddings_rows(
+            steps, seq_len, head_dim, &idx.device());
+        let x_normed = norm(self.wte.forward(idx.clone()));
+        let mut x = if self.config.features.smear {
+            self.smear_embeddings_with_cache_rows(
+                idx.clone(), x_normed, cache, requests, steps)
+        } else { x_normed };
+
+        let (x0, mut x_backout) = (x.clone(), None);
+        let backout_layer = self.config.n_layer / 2;
+        let resid_val = self.resid_lambdas.clone().val();
+        let x0_val = self.x0_lambdas.clone().val();
+        let mut ve_cnt = 0;
+        for i in 0..self.config.n_layer {
+            let r_lambda = resid_val.clone().slice([i..i + 1]).reshape([1, 1, 1]);
+            let x0_lambda = x0_val.clone().slice([i..i + 1]).reshape([1, 1, 1]);
+            x = x * r_lambda + x0.clone() * x0_lambda;
+            let ve = if has_ve(i, self.config.n_layer) {
+                let ve_embed = self.value_embeds[ve_cnt].forward(idx.clone());
+                ve_cnt += 1;
+                Some(ve_embed)
+            } else { None };
+            x = self.h[i].forward_with_cache_rows(
+                x, ve, cos.clone(), sin.clone(), cache, requests, steps);
+            if self.config.features.backout && i == backout_layer {
+                x_backout = Some(x.clone());
+            }
+        }
+        if let Some(xb) = x_backout {
+            x = x - xb * self.backout_lambda.clone().val().reshape([1, 1, 1]);
+        }
+        let logits = self.lm_head.forward_layer(norm(x))
+            .slice([0..batch_size, 0..seq_len, 0..self.config.vocab_size]);
+        (logits / LOGIT_CLIP_VAL).tanh() * LOGIT_CLIP_VAL
+    }
+
     pub fn forward_with_cache(&self, idx: Tensor<B, 2, Int>, cache: &mut KVCache<B>,
         step: usize) -> Tensor<B, 3> {
         self.forward_inner(idx, Some(cache), step)
+    }
+
+    pub fn forward_with_cache_rows(&self, idx: Tensor<B, 2, Int>, cache: &mut KVCache<B>,
+        requests: &[usize], steps: &[usize]) -> Tensor<B, 3> {
+        self.forward_inner_rows(idx, cache, requests, steps)
     }
 
     pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>)

@@ -2,7 +2,8 @@ use std::{fs, path::PathBuf};
 
 use burn::tensor::{Int, Tensor, TensorData};
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
-    benchmark::{InferenceBenchmark, benchmark_inference}, common::{ModelBackend, init_device},
+    benchmark::{InferenceBenchmark, benchmark_inference},
+    common::{DeviceMemoryUsage, ModelBackend, device_memory_usage, init_device},
     engine::inference::InferenceEngine, gpt::{ForwardLayer, Gpt},
 };
 
@@ -62,13 +63,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
 
 fn run<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
     tokenizer: nanochat_burn::tokenizer::BpeTokenizer, args: &Args, model_bytes: u64,
-    quantization_error: Option<f32>, device: &B::Device) -> Vec<InferenceBenchmark> {
+    quantization_error: Option<f32>, device: &B::Device,
+    memory_usage: &impl Fn() -> Option<DeviceMemoryUsage>) -> Vec<InferenceBenchmark> {
     let engine = InferenceEngine::new(model, tokenizer.clone());
     let bos = tokenizer.get_bos_token_id();
     let prompt = vec![bos; args.prompt_tokens];
     args.batches.iter().map(|&batch| benchmark_inference(&engine, &prompt, batch,
         args.decode_tokens, args.warmup, args.iterations, model_bytes, args.quantization,
-        quantization_error, device)).collect()
+        quantization_error, device, memory_usage)).collect()
 }
 
 fn main() {
@@ -90,9 +92,11 @@ fn main() {
             quantized.forward(prompt, None).into_data());
         let error = baseline.into_iter().zip(quantized_logits)
             .map(|(left, right)| (left - right).abs()).fold(0.0f32, f32::max);
-        run(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device)
+        run(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device,
+            &|| device_memory_usage(&device))
     } else {
-        run(artifact.model, artifact.tokenizer, &args, model_bytes, None, &device)
+        run(artifact.model, artifact.tokenizer, &args, model_bytes, None, &device,
+            &|| device_memory_usage(&device))
     };
 
     if let Some(parent) = args.output.parent() && !parent.as_os_str().is_empty() {
@@ -100,9 +104,11 @@ fn main() {
     }
     fs::write(&args.output, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
     for report in &reports {
-        println!("batch={} prefill={:.2}ms ttft={:.2}ms decode={:.2} tok/s cache={:.2}MiB",
+        println!("batch={} prefill={:.2}ms ttft={:.2}ms decode={:.2} tok/s cache={:.2}MiB device={}",
             report.batch_size, report.prefill_latency_ms, report.time_to_first_token_ms,
-            report.decode_tokens_per_second, report.cache_bytes as f64 / 1_048_576.0);
+            report.decode_tokens_per_second, report.cache_bytes as f64 / 1_048_576.0,
+            report.peak_device_bytes_reserved.map_or_else(|| "n/a".into(),
+                |bytes| format!("{:.2}MiB", bytes as f64 / 1_048_576.0)));
     }
     println!("Benchmark saved to {}", args.output.display());
 }

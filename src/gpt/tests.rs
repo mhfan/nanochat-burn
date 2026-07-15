@@ -111,6 +111,38 @@ fn test_cached_forward_matches_full_and_incremental_forward() {
 }
 
 #[test]
+fn test_row_mapped_cache_batches_different_positions() {
+    let device = crate::common::init_device();
+    let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
+        n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
+        features: Default::default(),
+    };
+    let mut gpt: Gpt<ModelBackend> = Gpt::new(config, &device);
+    gpt.h[0].attn.c_proj = random_linear(32, 32, Distribution::Uniform(-0.1, 0.1), &device);
+    gpt.smear_lambda = tensor_param(vec![1.0], &device);
+    let head_dim = gpt.config.n_embd / gpt.config.n_head;
+    let mut cache = KVCache::new_paged(1, 2, 16, 1, head_dim, 2, &device);
+
+    gpt.forward_with_cache_rows(
+        Int2DModelTensor::from_data([[12, 45, 67]], &device), &mut cache, &[0], &[0]);
+    gpt.forward_with_cache_rows(
+        Int2DModelTensor::from_data([[12, 45]], &device), &mut cache, &[1], &[0]);
+    let batched = gpt.forward_with_cache_rows(
+        Int2DModelTensor::from_data([[68], [67]], &device),
+        &mut cache, &[0, 1], &[3, 2]);
+
+    let expected_first = gpt.forward(
+        Int2DModelTensor::from_data([[12, 45, 67, 68]], &device), None)
+        .slice([0..1, 3..4, 0..gpt.config.vocab_size]);
+    let expected_second = gpt.forward(
+        Int2DModelTensor::from_data([[12, 45, 67]], &device), None)
+        .slice([0..1, 2..3, 0..gpt.config.vocab_size]);
+    let expected = Tensor::cat(vec![expected_first, expected_second], 0);
+    let diff = crate::common::scalar_to_f32((batched - expected).abs().max().into_scalar());
+    assert!(diff < 5e-5, "row-mapped cache logits differ from full forward by {diff}");
+}
+
+#[test]
 fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 8, vocab_size: 280, n_layer: 1, n_head: 4,
@@ -209,6 +241,7 @@ fn test_attention_sink_eviction_preserves_logical_pages() {
     let mut cache = KVCache::<ModelBackend>::new_paged(1, 1, 16, 1, 8, 2, &device);
     cache.ensure_pages(0, 7);
     cache.len = 16;
+    cache.request_lens[0] = 16;
     cache.evict_for_attention_sinks(0, 2, 4);
     let table = cache.block_table(0);
     assert!(table[0].is_some());

@@ -1,15 +1,16 @@
 
-use std::{convert::Infallible, env, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, env, sync::Arc};
 
 use axum::{Json, Router, http::StatusCode, routing::{get, post},
     response::{Html, IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
 use nanochat_burn::{
     artifact::{inference_artifact_path, load_artifact},
-    common::{ModelBackend, ModelDevice, init_device},
-    engine::inference::{InferenceEngine, SamplingConfig},
+    common::{ModelBackend, init_device},
+    engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
+        scheduler::RequestId, serving::DynamicGenerationEngine},
     gpt::quant::LinearOrQuantized,
-    tokenizer::{Conversation, ConversationMessage, MessageContent},
+    tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -73,11 +74,21 @@ impl futures_core::Stream for SseStream {
     }
 }
 
-// Shared engine state wrapper
 struct AppState {
-    device: ModelDevice,
-    engine: InferenceEngine<ModelBackend, LinearOrQuantized<ModelBackend>>,
+    device: String,
+    tokenizer: BpeTokenizer,
+    sequence_len: usize,
+    jobs: mpsc::Sender<GenerationJob>,
 }
+
+struct GenerationJob {
+    prompt_tokens: Vec<usize>,
+    config: GenerationConfig,
+    events: mpsc::Sender<Result<Event, Infallible>>,
+}
+
+type WebGenerationEngine =
+    DynamicGenerationEngine<ModelBackend, LinearOrQuantized<ModelBackend>>;
 
 #[tokio::main] async fn main() {
     // Initialize logging
@@ -118,8 +129,16 @@ struct AppState {
         artifact.model.into_linear_or_quantized()
     };
 
-    let engine = InferenceEngine::new(gpt, tokenizer);
-    let shared_state = Arc::new(AppState { engine, device });
+    let engine = InferenceEngine::new(gpt, tokenizer.clone());
+    let sequence_len = engine.model.config.sequence_len;
+    let max_batch: usize = env::var("NANOCHAT_MAX_BATCH").ok()
+        .and_then(|value| value.parse().ok()).filter(|&capacity| capacity > 0).unwrap_or(8);
+    let (jobs, job_rx) = mpsc::channel(max_batch.saturating_mul(4));
+    let generation = DynamicGenerationEngine::new(engine, device.clone(), max_batch);
+    tokio::spawn(generation_worker(generation, job_rx));
+    let shared_state = Arc::new(AppState {
+        device: format!("{device:?}"), tokenizer, sequence_len, jobs,
+    });
 
     // 3. Build Axum Router
     let app = Router::new()
@@ -138,7 +157,51 @@ struct AppState {
 async fn serve_ui() -> impl IntoResponse { Html(include_str!("../../data/assets/ui.html")) }
 
 async fn health_check(axum::Extension(state): axum::Extension<Arc<AppState>>) -> impl IntoResponse {
-    Json(HealthResponse { device: format!("{:?}", state.device), status: "ok" })
+    Json(HealthResponse { device: state.device.clone(), status: "ok" })
+}
+
+async fn generation_worker(mut generation: WebGenerationEngine,
+    mut jobs: mpsc::Receiver<GenerationJob>) {
+    let mut outputs = BTreeMap::new();
+    loop {
+        if generation.active_len() == 0 && generation.waiting_len() == 0 {
+            let Some(job) = jobs.recv().await else { break; };
+            submit_job(&mut generation, &mut outputs, job);
+        }
+        while let Ok(job) = jobs.try_recv() {
+            submit_job(&mut generation, &mut outputs, job);
+        }
+
+        let cancelled: Vec<_> = outputs.iter()
+            .filter_map(|(&id, sender)| sender.is_closed().then_some(id)).collect();
+        for id in cancelled {
+            generation.cancel(id);
+            outputs.remove(&id);
+        }
+
+        for step in generation.step() {
+            let sender = outputs.get(&step.request_id).cloned();
+            let send_failed = if let (Some(token), Some(sender)) = (step.token, sender) {
+                let text = generation.tokenizer().decode(&[token]);
+                let event = Event::default()
+                    .json_data(serde_json::json!({ "token": text })).unwrap();
+                sender.try_send(Ok(event)).is_err()
+            } else { false };
+            if send_failed {
+                generation.cancel(step.request_id);
+                outputs.remove(&step.request_id);
+            } else if step.finish_reason.is_some() {
+                outputs.remove(&step.request_id);
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn submit_job(generation: &mut WebGenerationEngine,
+    outputs: &mut BTreeMap<RequestId, mpsc::Sender<Result<Event, Infallible>>>, job: GenerationJob) {
+    let id = generation.submit(job.prompt_tokens, job.config);
+    outputs.insert(id, job.events);
 }
 
 async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>,
@@ -146,52 +209,30 @@ async fn chat_completions(axum::Extension(state): axum::Extension<Arc<AppState>>
     -> Result<impl IntoResponse, (StatusCode, String)> {
     validate_request(&payload).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let (tx, rx) = mpsc::channel(100);
-    let engine_ref = state.clone();
-
-    tokio::spawn(async move {
-        let mut conversation = Conversation { messages: payload.messages };
-
-        // Add dummy assistant response to construct correct SFT prompt
-        conversation.messages.push(ConversationMessage {
-            content: MessageContent::Simple(String::new()),
-            role: "assistant".to_string(),
-        });
-
-        let tokenizer = &engine_ref.engine.tokenizer;
-        let max_tok = payload.max_tokens.unwrap_or(256)
-            .min(engine_ref.engine.model.config.sequence_len.saturating_sub(1));
-        let prompt_limit = engine_ref.engine.model.config.sequence_len - max_tok;
-        let (prompt_tokens, _) = tokenizer.render_conversation(&conversation, prompt_limit);
-
-        let special_tokens = tokenizer.special_token_ids();
-        let mut clean_prompt = prompt_tokens;
-        if clean_prompt.last().is_some_and(|&last| {
-            last == special_tokens.assistant_end || last == special_tokens.bos
-        }) { clean_prompt.pop(); }
-
-        let top_k = payload.top_k.or(Some(50));
-        let temp = payload.temperature.unwrap_or(0.7);
-        let sampling = SamplingConfig { temperature: temp, top_k, repetition_penalty: 1.2, };
-
-        let (mut gen_state, mut cur_logits) =
-            engine_ref.engine.prefill(&clean_prompt, 1, &engine_ref.device);
-
-        for _ in 0..max_tok {
-            if gen_state.completed[0] ||
-                gen_state.step >= engine_ref.engine.model.config.sequence_len { break; }
-            let (next_tokens, _, next_logits) = engine_ref.engine.step_generation(&mut gen_state,
-                cur_logits, sampling, &engine_ref.device);
-            cur_logits = next_logits;
-            let token = next_tokens[0];
-            if token == special_tokens.assistant_end || token == special_tokens.bos { break; }
-            let text = tokenizer.decode(&[token]);
-
-            let event_data = serde_json::json!({ "token": text });
-            let event = Event::default().json_data(event_data).unwrap();
-
-            if tx.send(Ok(event)).await.is_err() { break; }
-        }
+    let mut conversation = Conversation { messages: payload.messages };
+    conversation.messages.push(ConversationMessage {
+        content: MessageContent::Simple(String::new()), role: "assistant".to_string(),
     });
+
+    let max_tokens = payload.max_tokens.unwrap_or(256)
+        .min(state.sequence_len.saturating_sub(1));
+    let (prompt_tokens, _) = state.tokenizer.render_conversation(
+        &conversation, state.sequence_len - max_tokens);
+    let special = state.tokenizer.special_token_ids();
+    let mut prompt_tokens = prompt_tokens;
+    if prompt_tokens.last().is_some_and(|&token| {
+        token == special.assistant_end || token == special.bos
+    }) { prompt_tokens.pop(); }
+    if prompt_tokens.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "rendered prompt is empty".to_string()));
+    }
+
+    let sampling = SamplingConfig { temperature: payload.temperature.unwrap_or(0.7),
+        top_k: payload.top_k.or(Some(50)), repetition_penalty: 1.2 };
+    let config = GenerationConfig { max_tokens, sampling, seed: 42 };
+    state.jobs.send(GenerationJob { prompt_tokens, config, events: tx }).await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE,
+            "generation worker is unavailable".to_string()))?;
 
     Ok(Sse::new(SseStream { rx }).keep_alive(KeepAlive::default()))
 }

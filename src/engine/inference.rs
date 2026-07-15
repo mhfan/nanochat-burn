@@ -149,6 +149,17 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 
     pub fn prefill_seeded(&self, prompt_tokens: &[usize], num_samples: usize, seed: u64,
         device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
+        let head_dim = self.model.config.n_embd / self.model.config.n_head;
+        let cache = KVCache::new_allocated(
+            self.model.config.n_layer, num_samples, self.model.config.sequence_len,
+            self.model.config.n_kv_head, head_dim, device,
+        );
+        self.prefill_with_cache(prompt_tokens, num_samples, seed, cache, device)
+    }
+
+    pub(crate) fn prefill_with_cache(&self, prompt_tokens: &[usize], num_samples: usize,
+        seed: u64, mut cache: KVCache<B>, device: &B::Device)
+        -> (GeneratorState<B>, Tensor<B, 2>) {
         let prompt_len = prompt_tokens.len();
         assert!(prompt_len > 0, "prompt must contain at least one token");
         assert!(num_samples > 0, "num_samples must be greater than zero");
@@ -156,16 +167,14 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             "prompt length exceeds model sequence length");
         assert!(prompt_tokens.iter().all(|&token| token < self.model.config.vocab_size &&
             i32::try_from(token).is_ok()), "prompt contains an invalid token ID");
+        assert_eq!(cache.batch_size, num_samples, "cache batch size mismatch");
+        assert_eq!(cache.max_seq_len, self.model.config.sequence_len,
+            "cache sequence length differs from model capacity");
+        cache.truncate(0);
+
         let batch_idx_data: Vec<i32> = std::iter::repeat_n(prompt_tokens, num_samples)
             .flatten().map(|&t| t as i32).collect();
-
         let idx = int_tensor_2d(batch_idx_data, [num_samples, prompt_len], device);
-
-        let head_dim = self.model.config.n_embd / self.model.config.n_head;
-        let mut cache = KVCache::new_allocated(
-            self.model.config.n_layer, num_samples, self.model.config.sequence_len,
-            self.model.config.n_kv_head, head_dim, device,
-        );
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
 
         // Extract the logits at the last token position
