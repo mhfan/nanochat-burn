@@ -38,8 +38,8 @@ tracing = "0.1"
 
 # 数据与系统工具
 memmap2 = "0.9"
-bytemuck = "1"
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+bytemuck = "1.25"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 cubecl-runtime = "0.10"
 
 # Web 服务框架（仅 chat_web 二进制需要，通过 'web' feature 按需编译）
