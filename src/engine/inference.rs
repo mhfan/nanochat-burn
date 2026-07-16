@@ -138,7 +138,7 @@ fn apply_repetition_penalty<B: Backend>(logits: Tensor<B, 2>,
             .into_iter().map(|token| token as i32).collect();
         if indices.is_empty() { return row; }
 
-        let indices = Tensor::<B, 1, Int>::from_data(indices.as_slice(), &device);
+        let indices = Tensor::from_data(indices.as_slice(), &device);
         let selected = row.clone().select(1, indices.clone());
         let positive = selected.clone().greater_elem(0.0).float().cast(DType::F32);
         let adjusted = selected.clone().div_scalar(penalty) * positive.clone() +
@@ -226,7 +226,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             "cache sequence length differs from model capacity");
         cache.truncate(0);
 
-        let batch_idx_data: Vec<i32> = std::iter::repeat_n(prompt_tokens, num_samples)
+        let batch_idx_data: Vec<_> = std::iter::repeat_n(prompt_tokens, num_samples)
             .flatten().map(|&t| t as i32).collect();
         let idx = int_tensor_2d(batch_idx_data, [num_samples, prompt_len], device);
         let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);

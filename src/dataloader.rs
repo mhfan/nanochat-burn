@@ -80,7 +80,7 @@ impl DistributedDataLoader {
             };
 
             // 1. Determine shards assigned to this DDP rank
-            let shards_assigned: Vec<usize> =
+            let shards_assigned: Vec<_> =
                 (0..dataset.shards.len()).filter(|&i| i % world_size == rank).collect();
             if shards_assigned.is_empty() {
                 eprintln!("DDP Rank {} has no shards assigned!", rank);

@@ -95,7 +95,7 @@ impl<B: Backend> QuantizedLinear<B> {
 
 impl<B: Backend> PackedWeights<B> {
     fn dequantize(&self, bits: usize, block_size: usize) -> Tensor<B, 2> {
-        let [i_packed, o] = self.values.shape().dims::<2>();
+        let [i_packed, o] = self.values.shape().dims();
         let (pack_factor, mask, offset) = quant_layout(bits);
         let mut q_floats = Vec::<Tensor<B, 3>>::with_capacity(pack_factor);
         for shift in (0..32).step_by(bits) {
@@ -124,7 +124,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
     assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
 
     let weight = linear.weight.val();
-    let [i, _] = weight.shape().dims::<2>();
+    let [i, _] = weight.shape().dims();
     let (pack_factor, ..) = quant_layout(bits);
     assert!(i % pack_factor == 0,
         "input dimension {} must be divisible by pack factor {} for W{} quantization",
@@ -158,7 +158,7 @@ fn quantize_native<B: Backend>(weight: Tensor<B, 2>, bits: usize,
 
 fn quantize_packed<B: Backend>(weight: Tensor<B, 2>, bits: usize,
     block_size: usize) -> PackedWeights<B> {
-    let [i, o] = weight.shape().dims::<2>();
+    let [i, o] = weight.shape().dims();
     let (pack_factor, mask, offset) = quant_layout(bits);
     let max_val = offset - 1.0;
 
@@ -289,8 +289,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
         let weight = Tensor::<ModelBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 0.5), &device);
-        let bias =
-            Tensor::<ModelBackend, 1>::random([128], Distribution::Normal(0.0, 0.1), &device);
+        let bias = Tensor::random([128], Distribution::Normal(0.0, 0.1), &device);
         let linear = Linear {
             weight: Param::from_tensor(weight.clone()),
             bias: Some(Param::from_tensor(bias.clone())),

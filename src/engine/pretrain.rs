@@ -100,7 +100,7 @@ pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
         assert_eq!(training_config, configured_training,
             "resume artifact training config differs from experiment config");
         let (optimizer, trainer) =
-            load_resume_state::<B>(path, artifact.config.model.n_layer, device)
+            load_resume_state(path, artifact.config.model.n_layer, device)
                 .unwrap_or_else(|error| panic!("failed to load pretrain state: {error}"));
         let engine = TrainingEngine::from_state(artifact.model, optimizer, training_config,
             &artifact.tokenizer, trainer);
@@ -113,7 +113,7 @@ pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
         let tokenizer = BpeTokenizer::train_from_iterator(&corpus, config.model.vocab_size);
         assert_eq!(tokenizer.get_vocab_size(), config.model.vocab_size,
             "trained tokenizer vocabulary differs from model config");
-        let model = Gpt::<B>::new(config.model.clone(), device);
+        let model = Gpt::new(config.model.clone(), device);
         reset_metrics(output).unwrap_or_else(|error| panic!("failed to reset metrics: {error}"));
         let engine = TrainingEngine::new(model, configured_training, &tokenizer);
         (tokenizer, engine)

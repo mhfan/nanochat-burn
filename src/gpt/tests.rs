@@ -10,8 +10,8 @@ use super::*;
     use crate::common::ModelAutodiffBackend;
     let gpt: Gpt<ModelAutodiffBackend> = Gpt::new(config, &device);
 
-    let idx = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([2, 16], &device);
-    let targets = Tensor::<ModelAutodiffBackend, 2, Int>::zeros([2, 16], &device);
+    let idx = Tensor::zeros([2, 16], &device);
+    let targets = Tensor::zeros([2, 16], &device);
 
     let logits = gpt.forward(idx, None);
     assert_eq!(logits.shape().dims(), [2, 16, 280]);
@@ -31,11 +31,11 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
     let (batch_size, n_head, sequence_len, head_dim) = (2, 4, 32, 16);
     let q = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
         Distribution::Normal(0.0, 1.0), &device);
-    let k = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+    let k = Tensor::random([batch_size, n_head, sequence_len, head_dim],
         Distribution::Normal(0.0, 1.0), &device);
-    let v = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+    let v = Tensor::random([batch_size, n_head, sequence_len, head_dim],
         Distribution::Normal(0.0, 1.0), &device);
-    let mask = precompute_window_mask::<ModelBackend>(-1, sequence_len, &device);
+    let mask = precompute_window_mask(-1, sequence_len, &device);
     let reference = scaled_dot_product_attention_reference(
         q.clone(), k.clone(), v.clone(), mask.clone());
     let masked = scaled_dot_product_attention_burn(
@@ -75,9 +75,9 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
     let device = crate::common::init_device();
     let fc = linear(Tensor::<ModelBackend, 2>::from_data(
         [[1.0, 0.0], [0.0, 1.0]], &device));
-    let projection = linear(Tensor::<ModelBackend, 2>::from_data(
+    let projection = linear(Tensor::from_data(
         [[1.0, 0.0], [0.0, 1.0]], &device));
-    let input = Tensor::<ModelBackend, 3>::from_data([[[2.0, 3.0]]], &device);
+    let input = Tensor::from_data([[[2.0, 3.0]]], &device);
     let relu = MLP { c_fc: fc.clone(), c_proj: projection.clone(),
         relu_squared: false, _phantom: PhantomData };
     let relu_squared = MLP { c_fc: fc, c_proj: projection,
@@ -170,7 +170,7 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
         features: Default::default(),
     };
 
-    let gpt = Gpt::<ModelBackend>::new(config, &device).quantize(4, 0);
+    let gpt = Gpt::new(config, &device).quantize(4, 0);
     assert!(matches!(&gpt.h[0].attn.c_q, LinearOrQuantized::Quantized(_)));
     assert!(matches!(gpt.h[0].attn.ve_gate.as_ref(), Some(LinearOrQuantized::Standard(_))));
     assert!(matches!(&gpt.smear_gate, LinearOrQuantized::Standard(_)));
@@ -214,7 +214,7 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
 
         // 2. Autoregressive steps
         let mut current_token = Int2DModelTensor::from_data(
-            TensorData::new(vec![68i32; num_samples], Shape::new([num_samples, 1])), &device);
+            TensorData::new(vec![68; num_samples], Shape::new([num_samples, 1])), &device);
 
         for step_idx in 0..2 {
             let step = prompt_len + step_idx;
@@ -222,7 +222,7 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
             step_logits.push(logits_step.clone());
 
             current_token = Int2DModelTensor::from_data(
-                TensorData::new(vec![69i32; num_samples], Shape::new([num_samples, 1])),
+                TensorData::new(vec![69; num_samples], Shape::new([num_samples, 1])),
                 &device,
             );
         }

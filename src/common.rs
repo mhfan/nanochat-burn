@@ -69,15 +69,15 @@ pub fn extract_answer(text: &str) -> Option<i32> {
         let candidate = text[idx + marker.len()..].split_whitespace().next()?;
         let clean_num: String = candidate.chars()
             .filter(|c| c.is_ascii_digit() || *c == '-').collect();
-        clean_num.parse::<i32>().ok()
+        clean_num.parse().ok()
     })
 }
 
 pub fn tensor_data_to_f32_vec(data: TensorData) -> Vec<f32> {
     match data.dtype {
-        DType::F32 => data.to_vec::<f32>().unwrap(),
+        DType::F32 => data.to_vec().unwrap(),
         DType::F16 => data.to_vec::<f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
-        _ => data.to_vec::<f32>().unwrap_or_else(|_| {
+        _ => data.to_vec().unwrap_or_else(|_| {
             data.to_vec::<f16>().unwrap().into_iter().map(|v| v.to_f32()).collect()
         }),
     }
@@ -120,9 +120,8 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
         // 1. 创建前向张量（使用 Autodiff 包装 of Wgpu 后端）
         // 注意：Burn 中可以直接使用 Tensor::from_data 传入多维数组
         let x: Tensor<ModelAutodiffBackend, 2> =
-            Tensor::from_data([[1.0f32, 2.0], [3.0, 4.0]], &device);
-        let w: Tensor<ModelAutodiffBackend, 2> =
-            Tensor::from_data([[2.0f32, 0.0], [0.0, 2.0]], &device);
+            Tensor::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
+        let w = Tensor::from_data([[2.0, 0.0], [0.0, 2.0]], &device);
 
         // 2. 显式要求追踪这两个张量的梯度
         let (x, w) = (x.require_grad(), w.require_grad());

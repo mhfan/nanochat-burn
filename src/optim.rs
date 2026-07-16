@@ -322,7 +322,7 @@ fn load_tensor<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, name: &str
         return Err(format!("optimizer tensor {name} has an invalid byte length"));
     }
     let data = view.data().chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect::<Vec<_>>();
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
     Ok(Some(Tensor::from_data(TensorData::new(data, Shape::new(shape)), device)))
 }
 
@@ -408,7 +408,7 @@ fn update_adamw_param<B: AutodiffBackend, const D: usize>(
     param: &mut Param<Tensor<B, D>>, grads: &GradientsParams,
     state: &mut Option<AdamWState<B::InnerBackend, D>>, hyper: AdamWHyper,
 ) {
-    if let Some(grad) = grads.get::<B::InnerBackend, D>(param.id) {
+    if let Some(grad) = grads.get::<_, D>(param.id) {
         *param = Param::from_tensor(Tensor::from_inner(adamw_step(
             param.val().inner(), grad, state, hyper,
         )));
@@ -418,7 +418,7 @@ fn update_adamw_param<B: AutodiffBackend, const D: usize>(
 fn update_matrix_param<B: AutodiffBackend>(param: &mut Param<Tensor<B, 2>>,
     grads: &GradientsParams, state: &mut Option<MatrixOptimizerState<B::InnerBackend>>,
     kind: OptimizerKind, adamw_hyper: AdamWHyper, muon_hyper: MuonHyper) {
-    if let Some(grad) = grads.get::<B::InnerBackend, 2>(param.id) {
+    if let Some(grad) = grads.get::<_, 2>(param.id) {
         let updated = match kind {
             OptimizerKind::MuonAdamW => {
                 let mut inner = match state.take() {
@@ -546,7 +546,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         use crate::common::ModelBackend;
         let device = crate::common::init_device();
         let p = Tensor::<ModelBackend, 2>::from_data([[2.0, 0.0], [0.0, 3.0]], &device);
-        let grad = Tensor::<ModelBackend, 2>::from_data([[0.1, 0.2], [0.3, 0.4]], &device);
+        let grad = Tensor::from_data([[0.1, 0.2], [0.3, 0.4]], &device);
         let mut state = None;
 
         let hyper =
@@ -557,18 +557,18 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     }
 
     #[test] fn test_optimizer_state_roundtrip() {
-        use crate::common::{ModelAutodiffBackend, ModelBackend, init_device,
+        use crate::common::{ModelAutodiffBackend, init_device,
             tensor_data_to_f32_vec};
         let device = init_device();
         let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(1);
         optimizer.wte = Some(AdamWState {
-            exp_avg: Tensor::<ModelBackend, 2>::from_data([[1.0, 2.0]], &device),
-            exp_avg_sq: Tensor::<ModelBackend, 2>::from_data([[3.0, 4.0]], &device),
+            exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
+            exp_avg_sq: Tensor::from_data([[3.0, 4.0]], &device),
         });
         optimizer.h[0].c_q = Some(MatrixOptimizerState::Muon(MuonState {
-            momentum_buffer: Tensor::<ModelBackend, 2>::from_data(
+            momentum_buffer: Tensor::from_data(
                 [[5.0, 6.0], [7.0, 8.0]], &device),
-            second_momentum_buffer: Tensor::<ModelBackend, 2>::from_data([[9.0], [10.0]], &device),
+            second_momentum_buffer: Tensor::from_data([[9.0], [10.0]], &device),
         }));
         let path = std::env::temp_dir().join(format!(
             "nanochat-optimizer-test-{}.safetensors", std::process::id()));

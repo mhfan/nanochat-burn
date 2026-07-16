@@ -64,7 +64,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--iterations" => next_value(&mut args, &arg)?,
             _ => return Err(format!("unknown operator benchmark argument: {arg}")),
         };
-        let value = value.parse::<usize>()
+        let value = value.parse()
             .map_err(|_| format!("{arg} requires a non-negative integer"))?;
         match arg.as_str() {
             "--batch" => parsed.batch_size = value,
@@ -105,7 +105,7 @@ fn measure<B: Backend, const D: usize>(device: &B::Device, warmup: usize, iterat
 
 fn causal_mask<B: Backend>(sequence_len: usize, device: &B::Device) -> Tensor<B, 4, Bool> {
     let values = (0..sequence_len).flat_map(|row|
-        (0..sequence_len).map(move |column| column > row)).collect::<Vec<_>>();
+        (0..sequence_len).map(move |column| column > row)).collect();
     Tensor::from_data(TensorData::new(values, Shape::new([1, 1, sequence_len, sequence_len])),
         device)
 }
@@ -115,9 +115,9 @@ fn benchmark<B: Backend>(args: &Args, device: &B::Device) -> OperatorBenchmark {
     let shape = [args.batch_size, args.sequence_len, args.n_head, args.head_dim];
     let input = Tensor::<B, 4>::random(shape, Distribution::Normal(0.0, 1.0), device);
     let half_dim = args.head_dim / 2;
-    let cos = Tensor::<B, 4>::random([1, args.sequence_len, 1, half_dim],
+    let cos = Tensor::random([1, args.sequence_len, 1, half_dim],
         Distribution::Uniform(-1.0, 1.0), device);
-    let sin = Tensor::<B, 4>::random([1, args.sequence_len, 1, half_dim],
+    let sin = Tensor::random([1, args.sequence_len, 1, half_dim],
         Distribution::Uniform(-1.0, 1.0), device);
     let scores = Tensor::<B, 4>::random(
         [args.batch_size, args.n_head, args.sequence_len, args.sequence_len],

@@ -81,7 +81,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
             n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
             features: Default::default(), quantization: None,
         };
-        let source = Gpt::<ModelBackend>::new(config.clone(), &device);
+        let source = Gpt::new(config.clone(), &device);
         let path = std::env::temp_dir().join(format!(
             "nanochat-test-model-{}.safetensors", std::process::id()));
         save_gpt_to_safetensors(&source, &path).unwrap();
@@ -92,7 +92,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
             safetensors::Dtype::F32);
         assert!(tensors.tensor("value_embeds.1.weight").is_ok());
 
-        let mut restored = Gpt::<ModelBackend>::new(config, &device);
+        let mut restored = Gpt::new(config, &device);
         load_safetensors_to_gpt(&mut restored, &path, &device).unwrap();
         assert_eq!(crate::common::tensor_data_to_f32_vec(source.wte.weight.val().into_data()),
             crate::common::tensor_data_to_f32_vec(restored.wte.weight.val().into_data()));

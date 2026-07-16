@@ -131,7 +131,7 @@ impl BpeTokenizer {
         assert!(vocab_size >= 256 + SPECIAL_TOKENS.len(),
             "vocabulary must contain all byte and special tokens");
         // 1. Split into unique words with counts
-        let mut word_counts = HashMap::<Vec<u8>, usize>::new();
+        let mut word_counts = HashMap::new();
         let regex = Self::get_split_regex();
 
         for text in text_iterator {
@@ -144,8 +144,8 @@ impl BpeTokenizer {
         }
 
         // 2. Initialize vocabulary with base bytes 0..256
-        let mut mergeable_ranks = HashMap::<Vec<u8>, usize>::new();
-        let mut temp_inverse = HashMap::<usize, Vec<u8>>::new();
+        let mut mergeable_ranks = HashMap::new();
+        let mut temp_inverse = HashMap::new();
         for b in 0..256 {
             let byte_seq = vec![b as u8];
             mergeable_ranks.insert(byte_seq.clone(), b);
@@ -162,7 +162,7 @@ impl BpeTokenizer {
 
         while current_vocab_size < vocab_size_no_special {
             // Count frequencies of adjacent pairs
-            let mut pair_counts = HashMap::<(usize, usize), usize>::new();
+            let mut pair_counts = HashMap::new();
             for (count, tokens) in &words {
                 for i in 0..tokens.len().saturating_sub(1) {
                     pair_counts.entry((tokens[i], tokens[i + 1]))
@@ -621,7 +621,7 @@ impl BpeTokenizer {
 
         // Check that assistant SFT target tokens are masked with 1, and user prompt tokens are
         // masked with 0
-        let decoded_tokens: Vec<(String, i32)> =
+        let decoded_tokens: Vec<_> =
             ids.iter().zip(mask.iter()).map(|(&id, &m)| (tokenizer.decode(&[id]), m)).collect();
 
         // The character 'C' is from user prompt ("Compute"), it should have mask = 0

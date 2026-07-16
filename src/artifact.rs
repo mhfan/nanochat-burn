@@ -255,7 +255,7 @@ pub fn load_artifact<B: Backend>(root: impl AsRef<Path>, device: &B::Device)
             tokenizer.get_vocab_size(), config.model.vocab_size));
     }
 
-    let mut model = Gpt::<B>::new(config.model.clone(), device);
+    let mut model = Gpt::new(config.model.clone(), device);
     load_safetensors_to_gpt(&mut model, &root.join(&manifest.model_file), device)?;
     Ok(LoadedArtifact { model, tokenizer, manifest, config })
 }
@@ -309,8 +309,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         save_artifact(&root, TrainingStage::Pretrain, &model, &tokenizer, None).unwrap();
         let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(config.n_layer);
         optimizer.wte = Some(AdamWState {
-            exp_avg: Tensor::<ModelBackend, 2>::from_data([[1.0, 2.0]], &device),
-            exp_avg_sq: Tensor::<ModelBackend, 2>::from_data([[3.0, 4.0]], &device),
+            exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
+            exp_avg_sq: Tensor::from_data([[3.0, 4.0]], &device),
         });
         let trainer = TrainerState { step: 3, smooth_train_loss: 0.75,
             total_training_time_secs: 1.5,

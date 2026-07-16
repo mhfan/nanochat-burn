@@ -105,7 +105,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
     tracing::info!("Loaded RL dataset with {} questions", dataset.conversations.len());
 
     let input = path_from_env("NANOCHAT_INPUT_ARTIFACT", experiment.artifacts.sft.clone());
-    let base = load_artifact::<B>(&input, device)
+    let base = load_artifact(&input, device)
         .unwrap_or_else(|error| panic!("failed to load SFT artifact {input:?}: {error}"));
     assert_eq!(base.manifest.stage, TrainingStage::Sft,
         "RL reference model must come from an SFT artifact");
@@ -117,11 +117,11 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
     let (mut model, tokenizer, mut optimizer, mut step, mut sampling_rng,
         elapsed_before_resume) =
         if let Some(path) = resume.as_deref() {
-            let resumed = load_artifact::<B>(path, device)
+            let resumed = load_artifact(path, device)
                 .unwrap_or_else(|error| panic!("failed to load RL artifact {path:?}: {error}"));
             assert_eq!(resumed.manifest.stage, TrainingStage::ReinforcementLearning,
                 "RL can only resume an RL artifact");
-            let (optimizer, state) = load_resume_state::<B>(
+            let (optimizer, state) = load_resume_state(
                 path, resumed.model.config.n_layer, device)
                 .unwrap_or_else(|error| panic!("failed to load RL state: {error}"));
             let rng_state = state.rng_state.expect("RL state is missing sampling RNG state");
@@ -233,7 +233,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
         let target_values = flat_targets.clone();
         let inputs_tensor = int_tensor_2d(flat_inputs, [num_sequences, max_len - 1], device);
         let targets_tensor = int_tensor_2d(flat_targets, [num_sequences, max_len - 1], device);
-        let flat_adv_seq: Vec<f32> = all_advantages.iter()
+        let flat_adv_seq: Vec<_> = all_advantages.iter()
             .flat_map(|&adv| std::iter::repeat_n(adv, max_len - 1)).collect();
         let advantages_tensor = Tensor::<B, 1>::from_data(flat_adv_seq.as_slice(), device)
             .reshape([num_sequences, max_len - 1]);
@@ -245,7 +245,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
             .reshape([num_sequences, max_len - 1]) * -1.0;
         let old_values = crate::common::tensor_data_to_f32_vec(
             old_log_probs.clone().into_data());
-        let old_log_probs = Tensor::<B, 2>::from_data(old_log_probs.into_data(), device);
+        let old_log_probs = Tensor::from_data(old_log_probs.into_data(), device);
 
         let reference_log_probs = reference_model.compute_unreduced_loss(
             reference_model.forward(inputs_tensor.clone(), None), targets_tensor.clone())
@@ -253,7 +253,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
         let reference_values = crate::common::tensor_data_to_f32_vec(
             reference_log_probs.clone().into_data());
         let reference_log_probs =
-            Tensor::<B, 2>::from_data(reference_log_probs.into_data(), device);
+            Tensor::from_data(reference_log_probs.into_data(), device);
 
         let records = all_rollouts.iter().zip(&all_masks).zip(&all_rewards)
             .zip(&all_advantages).enumerate().map(
@@ -287,7 +287,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
                         1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon) *
                         advantages_tensor.clone();
                     Tensor::cat(vec![unclipped.unsqueeze_dim::<3>(2),
-                        clipped.unsqueeze_dim::<3>(2)], 2)
+                        clipped.unsqueeze_dim(2)], 2)
                         .min_dim(2).reshape([num_sequences, max_len - 1])
                 }
             };

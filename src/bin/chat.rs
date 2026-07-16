@@ -22,18 +22,18 @@ fn main() {
     println!("==================================================================\n");
 
     // Parse CLI parameters and environment variables for quantization.
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<_> = env::args().collect();
     let mut quantize_bits =
-        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
+        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse().ok());
     let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK").ok()
-        .and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        .and_then(|v| v.parse().ok()).unwrap_or(0);
 
     if let Some(pos) = args.iter().position(|arg| arg == "--quantize") &&
-        let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
         quantize_bits = Some(val);
     }
     if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") &&
-        let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
         quantize_block = val;
     }
 

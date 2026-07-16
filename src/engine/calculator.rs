@@ -141,7 +141,7 @@ impl<'a> Parser<'a> {
                 }
                 if !has_digits { return None; }
                 let num_str = &self.input[start..self.pos];
-                num_str.trim().parse::<f64>().ok()
+                num_str.trim().parse().ok()
             }
             _ => None,
         }

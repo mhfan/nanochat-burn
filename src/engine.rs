@@ -328,11 +328,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
     }
 
     #[test] fn test_bpb_totals_ignore_non_text_targets() {
-        use burn::tensor::{Int, Tensor};
+        use burn::tensor::Tensor;
         use crate::common::ModelBackend;
         let device = crate::common::init_device();
         let losses = Tensor::<ModelBackend, 1>::from_data([1.0, 2.0, 4.0, 8.0], &device);
-        let targets = Tensor::<ModelBackend, 1, Int>::from_data([0, 1, -1, 9], &device);
+        let targets = Tensor::from_data([0, 1, -1, 9], &device);
         let token_bytes = Tensor::<ModelBackend, 1>::from_data([1.0, 0.0, 2.0], &device)
             .cast(DType::F32);
         let (nats, bytes) = bpb_totals(losses, targets, token_bytes);
@@ -392,9 +392,9 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             Some(&training_config)).unwrap();
         save_resume_state(&checkpoint, &interrupted.optimizer, &interrupted.state()).unwrap();
 
-        let artifact = load_artifact::<ModelAutodiffBackend>(&checkpoint, &device).unwrap();
+        let artifact = load_artifact(&checkpoint, &device).unwrap();
         let (optimizer, state) =
-            load_resume_state::<ModelAutodiffBackend>(&checkpoint, 1, &device).unwrap();
+            load_resume_state(&checkpoint, 1, &device).unwrap();
         let position = state.dataloader_position.unwrap();
         let mut resumed = TrainingEngine::from_state(artifact.model, optimizer,
             training_config, &tokenizer, state);
@@ -411,7 +411,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(resumed.dataloader_position, uninterrupted.dataloader_position);
         assert_eq!(actual.len(), expected.len());
         let max_error = actual.into_iter().zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs()).fold(0.0f32, f32::max);
+            .map(|(actual, expected)| (actual - expected).abs()).fold(0.0, f32::max);
         assert!(max_error <= 5e-4,
             "resumed logits exceed f16 equivalence tolerance: max error {max_error}");
         std::fs::remove_dir_all(root).ok();

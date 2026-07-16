@@ -107,12 +107,12 @@ pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
 
 fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize,
     device: &B::Device) -> Tensor<B, 4, Bool> {
-    let mask_data: Vec<bool> = (0..sequence_len).flat_map(|i| {
+    let mask_data: Vec<_> = (0..sequence_len).flat_map(|i| {
             let left_bound =
                 if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
             (0..sequence_len).map(move |j| j > i || j < left_bound)
         }).collect();
-    Tensor::<B, 4, Bool>::from_data(
+    Tensor::from_data(
         TensorData::new(mask_data, Shape::new([1, 1, sequence_len, sequence_len])), device)
 }
 
@@ -386,10 +386,10 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 embedding(Tensor::random([padded_vocab_size, kv_dim], init, device))).collect();
 
         let window_sizes = config.compute_window_sizes();
-        let causal_mask = precompute_window_mask::<B>(-1, config.sequence_len, device);
+        let causal_mask = precompute_window_mask(-1, config.sequence_len, device);
         let short_window = window_sizes.iter().copied().find(|&window| window >= 0);
         let short_mask = short_window.map(|window|
-            precompute_window_mask::<B>(window, config.sequence_len, device));
+            precompute_window_mask(window, config.sequence_len, device));
         let h: Vec<_> = (0..config.n_layer).map(|i| {
                 let c_q = random_linear(n_embd, config.n_head * head_dim, init, device);
                 let c_k = random_linear(n_embd, kv_dim, init, device);
@@ -422,9 +422,9 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let lm_head =
             random_linear(n_embd, padded_vocab_size, Distribution::Normal(0.0, 0.001), device);
 
-        let resid_init: Vec<f32> = (0..config.n_layer)
+        let resid_init: Vec<_> = (0..config.n_layer)
             .map(|i| 1.15 - (0.10 * i as f32 / (config.n_layer - 1).max(1) as f32)).collect();
-        let x0_init: Vec<f32> = (0..config.n_layer)
+        let x0_init: Vec<_> = (0..config.n_layer)
             .map(|i| 0.20 - (0.15 * i as f32 / (config.n_layer - 1).max(1) as f32)).collect();
 
         let resid_lambdas = tensor_param(resid_init, device);
@@ -450,9 +450,9 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
 
     fn rotary_embeddings_rows(&self, positions: &[usize], len: usize)
         -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let indices: Vec<i32> = positions.iter().flat_map(|&start|
+        let indices: Vec<_> = positions.iter().flat_map(|&start|
             (start..start + len).map(|position| position as i32)).collect();
-        let indices = Tensor::<B, 1, Int>::from_data(
+        let indices = Tensor::from_data(
             TensorData::new(indices, Shape::new([positions.len() * len])),
             &self.rope_cos.device());
         let half_dim = self.config.n_embd / self.config.n_head / 2;
@@ -494,7 +494,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
 
         let history = cache.token_history.take().unwrap_or_else(|| {
             assert_eq!(step, 0, "cache has no token history before position {step}");
-            Tensor::<B, 2, Int>::zeros([batch_size, cache.max_seq_len], &idx.device())
+            Tensor::zeros([batch_size, cache.max_seq_len], &idx.device())
         });
         assert_eq!(history.shape().dims(), [batch_size, cache.max_seq_len],
             "cache token history shape mismatch");
@@ -519,7 +519,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             "a cached batch cannot mix prefill and decode rows");
 
         let mut history = cache.token_history.take().unwrap_or_else(||
-            Tensor::<B, 2, Int>::zeros([cache.batch_size, cache.max_seq_len], &idx.device()));
+            Tensor::zeros([cache.batch_size, cache.max_seq_len], &idx.device()));
         let previous = has_previous.then(|| {
             let rows = requests.iter().zip(steps).map(|(&request, &step)|
                 history.clone().slice([request..request + 1, step - 1..step])).collect();

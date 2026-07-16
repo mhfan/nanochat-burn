@@ -99,25 +99,25 @@ type WebGenerationEngine =
 
     // Parse CLI parameters and Environment Variables for quantization
     let mut quantize_bits =
-        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse::<usize>().ok());
+        env::var("NANOCHAT_QUANTIZE").ok().and_then(|v| v.parse().ok());
     let mut quantize_block = env::var("NANOCHAT_QUANTIZE_BLOCK").ok()
-        .and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        .and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<_> = env::args().collect();
     if let Some(pos) = args.iter().position(|arg| arg == "--quantize") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
             quantize_bits = Some(val);
         }
     }
     if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
             quantize_block = val;
         }
     }
 
     let device = init_device();
     let artifact_path = inference_artifact_path();
-    let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
+    let artifact = load_artifact(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     println!("Loaded {:?} artifact from {:?}", artifact.manifest.stage, artifact_path);
     let tokenizer = artifact.tokenizer;

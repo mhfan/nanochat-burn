@@ -15,7 +15,7 @@ fn main() {
     let device = init_device();
     let target_artifact = load_artifact::<ModelBackend>(&target, &device)
         .unwrap_or_else(|error| panic!("failed to load target {target:?}: {error}"));
-    let draft_artifact = load_artifact::<ModelBackend>(&draft, &device)
+    let draft_artifact = load_artifact(&draft, &device)
         .unwrap_or_else(|error| panic!("failed to load draft {draft:?}: {error}"));
     assert_eq!(target_artifact.tokenizer.get_vocab_size(),
         draft_artifact.tokenizer.get_vocab_size(), "target/draft tokenizer mismatch");

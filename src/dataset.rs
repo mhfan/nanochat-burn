@@ -42,7 +42,7 @@ impl PretrainingDataset {
         let byte_start = token_offset * 4;
         let byte_end = (token_offset + len) * 4;
         let bytes = &shard.mmap[byte_start..byte_end];
-        match bytemuck::try_cast_slice::<u8, u32>(bytes) {
+        match bytemuck::try_cast_slice(bytes) {
             Ok(tokens_u32) => tokens_u32.iter().copied().map(u32::from_le).collect(),
             Err(_) => bytes.chunks_exact(4)
                 .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect(),
@@ -79,7 +79,7 @@ pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
             io::Error::new(io::ErrorKind::InvalidData, "token ID exceeds u32 storage")
         })
     }).collect::<io::Result<_>>()?;
-    let bytes = bytemuck::cast_slice::<u32, u8>(&tokens_u32);
+    let bytes = bytemuck::cast_slice(&tokens_u32);
     File::create(bin_path)?.write_all(bytes)?;
     Ok(())
 }

@@ -105,7 +105,7 @@ fn fixture_tensor<B: Backend, const D: usize>(fixture: &TensorFixture,
 
 fn fixture_linear<B: Backend>(fixture: &TensorFixture, device: &B::Device) -> Linear<B> {
     assert_eq!(fixture.shape.len(), 2);
-    linear(fixture_tensor::<B, 2>(fixture, device).swap_dims(0, 1))
+    linear(fixture_tensor(fixture, device).swap_dims(0, 1))
 }
 
 #[cfg(feature = "ndarray")]
@@ -130,8 +130,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
 
     let rope = &fixture.rope;
     let actual = apply_rotary_emb(fixture_tensor::<ModelBackend, 4>(&rope.input, &device),
-        fixture_tensor::<ModelBackend, 4>(&rope.cos, &device),
-        fixture_tensor::<ModelBackend, 4>(&rope.sin, &device));
+        fixture_tensor(&rope.cos, &device), fixture_tensor(&rope.sin, &device));
     assert_fixture_close(actual, &rope.output, 2e-6, "RoPE");
 }
 
@@ -168,9 +167,8 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         mask: precompute_window_mask(-1, config.sequence_len, &device),
     };
     let actual = module.forward(fixture_tensor::<ModelBackend, 3>(&attention.input, &device),
-        Some(fixture_tensor::<ModelBackend, 3>(&attention.value_embedding, &device)),
-        fixture_tensor::<ModelBackend, 4>(&attention.cos, &device),
-        fixture_tensor::<ModelBackend, 4>(&attention.sin, &device));
+        Some(fixture_tensor(&attention.value_embedding, &device)),
+        fixture_tensor(&attention.cos, &device), fixture_tensor(&attention.sin, &device));
     assert_fixture_close(actual, &attention.output, 2e-5, "attention");
 }
 
@@ -218,24 +216,24 @@ fn fixture_ids<B: Backend>(values: &[Vec<i32>], device: &B::Device) -> Tensor<B,
     let rows = values.len();
     let columns = values.first().map_or(0, Vec::len);
     assert!(rows > 0 && columns > 0 && values.iter().all(|row| row.len() == columns));
-    let values = values.iter().flatten().copied().collect::<Vec<_>>();
+    let values = values.iter().flatten().copied().collect();
     Tensor::from_data(TensorData::new(values, Shape::new([rows, columns])), device)
 }
 
 fn model_from_fixture<B: Backend>(fixture: &ModelParityFixture, device: &B::Device) -> Gpt<B> {
     let parameters = &fixture.parameters;
     let mut model = Gpt::new(fixture.config.clone(), device);
-    model.wte = embedding(fixture_tensor::<B, 2>(
+    model.wte = embedding(fixture_tensor(
         named(parameters, "transformer.wte.weight"), device));
     model.lm_head = fixture_linear(named(parameters, "lm_head.weight"), device);
-    model.resid_lambdas = param(fixture_tensor::<B, 1>(
+    model.resid_lambdas = param(fixture_tensor(
         named(parameters, "resid_lambdas"), device));
-    model.x0_lambdas = param(fixture_tensor::<B, 1>(
+    model.x0_lambdas = param(fixture_tensor(
         named(parameters, "x0_lambdas"), device));
     model.smear_gate = fixture_linear(named(parameters, "smear_gate.weight"), device);
-    model.smear_lambda = param(fixture_tensor::<B, 1>(
+    model.smear_lambda = param(fixture_tensor(
         named(parameters, "smear_lambda"), device));
-    model.backout_lambda = param(fixture_tensor::<B, 1>(
+    model.backout_lambda = param(fixture_tensor(
         named(parameters, "backout_lambda"), device));
 
     for (layer, block) in model.h.iter_mut().enumerate() {
@@ -261,7 +259,7 @@ fn model_from_fixture<B: Backend>(fixture: &ModelParityFixture, device: &B::Devi
     let mut value_index = 0;
     for layer in 0..fixture.config.n_layer {
         if has_ve(layer, fixture.config.n_layer) {
-            model.value_embeds[value_index] = embedding(fixture_tensor::<B, 2>(
+            model.value_embeds[value_index] = embedding(fixture_tensor(
                 named(parameters, &format!("value_embeds.{layer}.weight")), device));
             value_index += 1;
         }
@@ -289,8 +287,8 @@ fn assert_linear_gradient(linear: &Linear<ModelAutodiffBackend>, gradients: &Par
 #[test] fn test_python_full_model_logits_loss_and_gradients_parity() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
-    let input = fixture_ids::<ModelAutodiffBackend>(&fixture.input_ids, &device);
-    let targets = fixture_ids::<ModelAutodiffBackend>(&fixture.targets, &device);
+    let input = fixture_ids(&fixture.input_ids, &device);
+    let targets = fixture_ids(&fixture.targets, &device);
     let logits = model.forward(input, None);
     assert_fixture_close(logits.clone(), &fixture.logits, 5e-5, "full-model logits");
 
@@ -358,7 +356,7 @@ fn assert_logits_close(actual: Tensor<ModelAutodiffBackend, 3>,
 #[test] fn test_full_chunked_and_token_cache_parity() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
-    let input = fixture_ids::<ModelAutodiffBackend>(&fixture.input_ids, &device);
+    let input = fixture_ids(&fixture.input_ids, &device);
     let full = model.forward(input.clone(), None);
     let chunked = cached_forward(&model, input.clone(), &[2, 2], 2, &device);
     let uneven = cached_forward(&model, input.clone(), &[3, 1], 3, &device);
@@ -379,10 +377,10 @@ fn fixture_max_abs_error<B: Backend, const D: usize>(actual: Tensor<B, D>,
 
 fn quantized_logit_errors<B: Backend>(fixture: &ModelParityFixture, device: &B::Device,
     input: Tensor<B, 2, Int>, reference: Tensor<B, 3>) -> (f32, f32) {
-    let w8 = model_from_fixture::<B>(fixture, device).quantize(8, 0);
+    let w8 = model_from_fixture(fixture, device).quantize(8, 0);
     let w8_error = crate::common::scalar_to_f32(
         (w8.forward(input.clone(), None) - reference.clone()).abs().max().into_scalar());
-    let w4 = model_from_fixture::<B>(fixture, device).quantize(4, 8);
+    let w4 = model_from_fixture(fixture, device).quantize(4, 8);
     let w4_error = crate::common::scalar_to_f32(
         (w4.forward(input, None) - reference).abs().max().into_scalar());
     (w8_error, w4_error)
@@ -397,7 +395,7 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
 #[cfg(feature = "ndarray")]
 #[test] fn test_f32_w8_w4_logit_error_budgets() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
-    let input = fixture_ids::<ModelBackend>(&fixture.input_ids, &device);
+    let input = fixture_ids(&fixture.input_ids, &device);
     let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
     let f32_logits = model.forward(input.clone(), None);
     let f32_error = fixture_max_abs_error(f32_logits.clone(), &fixture.logits);
@@ -416,7 +414,7 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
 #[test] fn test_f16_w8_w4_logit_error_budgets() {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
-    let input = fixture_ids::<ModelBackend>(&fixture.input_ids, &device);
+    let input = fixture_ids(&fixture.input_ids, &device);
     let f16_logits = model.forward(input.clone(), None);
     let error = fixture_max_abs_error(f16_logits.clone(), &fixture.logits);
     let (w8_error, w4_error) =

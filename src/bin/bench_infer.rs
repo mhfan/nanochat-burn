@@ -76,7 +76,7 @@ fn run<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
 fn main() {
     let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|error| panic!("{error}"));
     let device = init_device();
-    let artifact = load_artifact::<ModelBackend>(&args.artifact, &device)
+    let artifact = load_artifact(&args.artifact, &device)
         .unwrap_or_else(|error| panic!("failed to load {:?}: {error}", args.artifact));
     let model_bytes = fs::metadata(args.artifact.join(&artifact.manifest.model_file))
         .unwrap_or_else(|error| panic!("failed to stat model: {error}")).len();
@@ -91,7 +91,7 @@ fn main() {
         let quantized_logits = nanochat_burn::common::tensor_data_to_f32_vec(
             quantized.forward(prompt, None).into_data());
         let error = baseline.into_iter().zip(quantized_logits)
-            .map(|(left, right)| (left - right).abs()).fold(0.0f32, f32::max);
+            .map(|(left, right)| (left - right).abs()).fold(0.0, f32::max);
         run(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device,
             &|| device_memory_usage(&device))
     } else {

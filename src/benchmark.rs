@@ -112,7 +112,7 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     }
 
     let start = Instant::now();
-    let mut generated = 0usize;
+    let mut generated = 0;
     for _ in 0..iterations {
         let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
         for _ in 0..decode_tokens {
