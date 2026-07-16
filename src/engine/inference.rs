@@ -1,6 +1,7 @@
 
-use std::collections::VecDeque;
-use burn::tensor::{Tensor, backend::Backend};
+use std::collections::{BTreeSet, VecDeque};
+use burn::tensor::{DType, IndexingUpdateOp, Int, Tensor, TensorData, activation,
+    backend::Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{common::int_tensor_2d, engine::calculator::use_calculator,
@@ -86,12 +87,65 @@ pub struct DeviceSampler;
 impl<B: Backend> TokenSampler<B> for DeviceSampler {
     fn sample(&self, logits: Tensor<B, 2>, sampling: SamplingConfig,
         generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
-        if sampling == SamplingConfig::greedy() {
-            return logits.argmax(1).into_data().to_vec::<i32>().unwrap()
-                .into_iter().map(|token| token as usize).collect();
+        sampling.validate();
+        let [batch_size, vocab_size] = logits.shape().dims();
+        assert!(vocab_size > 0, "cannot sample from an empty vocabulary");
+        assert_eq!(generated_tokens.len(), batch_size, "token history batch size mismatch");
+
+        let logits = apply_repetition_penalty(
+            logits.cast(DType::F32), generated_tokens, sampling.repetition_penalty);
+        if sampling.temperature == 0.0 {
+            return int_tokens(logits.argmax(1));
         }
-        ReferenceSampler.sample(logits, sampling, generated_tokens, rng)
+
+        let logits = logits / sampling.temperature;
+        let (logits, token_indices) = match sampling.top_k.map(|k| k.min(vocab_size)) {
+            Some(k) if k < vocab_size => {
+                let (logits, indices) = logits.topk_with_indices(k, 1);
+                (logits, Some(indices))
+            }
+            _ => (logits, None),
+        };
+        let sample_width = logits.shape().dims::<2>()[1];
+        let probabilities = activation::softmax(logits, 1);
+        let uniform = Tensor::<B, 2>::from_data(TensorData::new(
+            (0..batch_size).map(|_| rng.next_f32()).collect(), [batch_size, 1]),
+            &probabilities.device()).cast(DType::F32);
+        let local_indices = probabilities.cumsum(1)
+            .lower(uniform.expand([batch_size, sample_width])).int()
+            .sum_dim(1).clamp(0, sample_width as i64 - 1);
+        int_tokens(match token_indices {
+            Some(indices) => indices.gather(1, local_indices),
+            None => local_indices,
+        })
     }
+}
+
+fn int_tokens<B: Backend, const D: usize>(tokens: Tensor<B, D, Int>) -> Vec<usize> {
+    tokens.into_data().to_vec::<i32>().unwrap()
+        .into_iter().map(|token| token as usize).collect()
+}
+
+fn apply_repetition_penalty<B: Backend>(logits: Tensor<B, 2>,
+    generated_tokens: &[Vec<usize>], penalty: f32) -> Tensor<B, 2> {
+    if penalty == 1.0 { return logits; }
+    let [batch_size, vocab_size] = logits.shape().dims();
+    let device = logits.device();
+    let rows = (0..batch_size).map(|batch| {
+        let row = logits.clone().slice([batch..batch + 1, 0..vocab_size]);
+        let indices: Vec<i32> = generated_tokens[batch].iter().copied()
+            .filter(|&token| token < vocab_size).collect::<BTreeSet<_>>()
+            .into_iter().map(|token| token as i32).collect();
+        if indices.is_empty() { return row; }
+
+        let indices = Tensor::<B, 1, Int>::from_data(indices.as_slice(), &device);
+        let selected = row.clone().select(1, indices.clone());
+        let positive = selected.clone().greater_elem(0.0).float().cast(DType::F32);
+        let adjusted = selected.clone().div_scalar(penalty) * positive.clone() +
+            selected.clone().mul_scalar(penalty) * positive.mul_scalar(-1.0).add_scalar(1.0);
+        row.select_assign(1, indices, adjusted - selected, IndexingUpdateOp::Add)
+    }).collect();
+    Tensor::cat(rows, 0)
 }
 
 /// Tracks self-regressive token generation state per sample
@@ -460,6 +514,23 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
             logits.clone(), SamplingConfig::greedy(), &history, &mut reference_rng);
         let on_device = DeviceSampler.sample(
             logits, SamplingConfig::greedy(), &history, &mut device_rng);
+        assert_eq!(on_device, reference);
+    }
+
+    #[test] fn test_device_sampler_applies_repetition_penalty() {
+        let device = crate::common::init_device();
+        let logits = Tensor::<crate::common::ModelBackend, 2>::from_data(
+            [[3.0, 2.0, 1.0]], &device);
+        let history = vec![vec![0, 0]];
+        let sampling = SamplingConfig {
+            temperature: 0.0, top_k: None, repetition_penalty: 2.0,
+        };
+        let mut reference_rng = SamplingRng::new(1);
+        let mut device_rng = SamplingRng::new(1);
+        let reference = ReferenceSampler.sample(
+            logits.clone(), sampling, &history, &mut reference_rng);
+        let on_device = DeviceSampler.sample(logits, sampling, &history, &mut device_rng);
+        assert_eq!(on_device, vec![1]);
         assert_eq!(on_device, reference);
     }
 }

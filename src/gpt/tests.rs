@@ -1,7 +1,6 @@
 use super::*;
 
-#[test]
-fn test_gpt_forward_and_loss() {
+#[test] fn test_gpt_forward_and_loss() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 32, vocab_size: 280, n_layer: 1, n_head: 2,
         n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(), quantization: None,
@@ -27,8 +26,33 @@ fn test_gpt_forward_and_loss() {
 use crate::common::ModelBackend;
 type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
 
-#[test]
-fn test_gpt_config_validation() {
+#[test] fn test_burn_attention_paths_match_reference() {
+    let device = crate::common::init_device();
+    let (batch_size, n_head, sequence_len, head_dim) = (2, 4, 32, 16);
+    let q = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+        Distribution::Normal(0.0, 1.0), &device);
+    let k = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+        Distribution::Normal(0.0, 1.0), &device);
+    let v = Tensor::<ModelBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+        Distribution::Normal(0.0, 1.0), &device);
+    let mask = precompute_window_mask::<ModelBackend>(-1, sequence_len, &device);
+    let reference = scaled_dot_product_attention_reference(
+        q.clone(), k.clone(), v.clone(), mask.clone());
+    let masked = scaled_dot_product_attention_burn(
+        q.clone(), k.clone(), v.clone(), Some(mask), false);
+    let causal = scaled_dot_product_attention_burn(q, k, v, None, true);
+    let masked_error = crate::common::scalar_to_f32(
+        (reference.clone() - masked).abs().max().into_scalar());
+    let causal_error = crate::common::scalar_to_f32(
+        (reference - causal).abs().max().into_scalar());
+    let tolerance = if cfg!(feature = "ndarray") { 5e-5 } else { 5e-3 };
+    assert!(masked_error <= tolerance,
+        "masked Burn attention max error {masked_error} exceeds {tolerance}");
+    assert!(causal_error <= tolerance,
+        "causal Burn attention max error {causal_error} exceeds {tolerance}");
+}
+
+#[test] fn test_gpt_config_validation() {
     let mut config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
         n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         features: Default::default(),
@@ -47,8 +71,7 @@ fn test_gpt_config_validation() {
     assert_eq!(config.compute_window_sizes(), vec![-1]);
 }
 
-#[test]
-fn test_relu_squared_ablation_changes_mlp_output() {
+#[test] fn test_relu_squared_ablation_changes_mlp_output() {
     let device = crate::common::init_device();
     let fc = linear(Tensor::<ModelBackend, 2>::from_data(
         [[1.0, 0.0], [0.0, 1.0]], &device));
@@ -66,8 +89,7 @@ fn test_relu_squared_ablation_changes_mlp_output() {
         relu_squared.forward(input).into_data()), vec![4.0, 9.0]);
 }
 
-#[test]
-fn test_cached_forward_matches_full_and_incremental_forward() {
+#[test] fn test_cached_forward_matches_full_and_incremental_forward() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
         n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
@@ -110,8 +132,7 @@ fn test_cached_forward_matches_full_and_incremental_forward() {
         "cached logits differ from full forward logits by {full_diff}");
 }
 
-#[test]
-fn test_row_mapped_cache_batches_different_positions() {
+#[test] fn test_row_mapped_cache_batches_different_positions() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
         n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
@@ -142,8 +163,7 @@ fn test_row_mapped_cache_batches_different_positions() {
     assert!(diff < 5e-5, "row-mapped cache logits differ from full forward by {diff}");
 }
 
-#[test]
-fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
+#[test] fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 8, vocab_size: 280, n_layer: 1, n_head: 4,
         n_kv_head: 1, n_embd: 64, window_pattern: "L".to_string(), quantization: None,
@@ -159,8 +179,7 @@ fn test_w4_quantization_keeps_unsupported_gate_layers_float() {
     assert_eq!(logits.shape().dims(), [1, 4, 280]);
 }
 
-#[test]
-fn test_paged_attention_roundtrip() {
+#[test] fn test_paged_attention_roundtrip() {
     let device = crate::common::init_device();
     let config = GptConfig { sequence_len: 16, vocab_size: 280, n_layer: 1, n_head: 4,
         n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
@@ -211,21 +230,20 @@ fn test_paged_attention_roundtrip() {
         outputs.push(step_logits);
     }
 
-    // Assert that the logits are mathematically identical across all page sizes
+    // Different page layouts may change floating-point reduction order on GPU.
     for step in 0..outputs[0].len() {
         let (logits_2, logits_4) = (&outputs[0][step], &outputs[1][step]);
 
-        let diff_8 = crate::common::scalar_to_f32(
+        let max_error = crate::common::scalar_to_f32(
             (logits_2.clone() - logits_4.clone()).abs().max().into_scalar(),
         );
 
-        assert_eq!(diff_8, 0.0,
-            "Logits differ between page_size=2 and page_size=4 at step {}", step);
+        assert!(max_error <= 5e-5,
+            "page_size=2/4 logits differ by {max_error} at step {step}");
     }
 }
 
-#[test]
-fn test_page_allocator_reuses_released_pages() {
+#[test] fn test_page_allocator_reuses_released_pages() {
     let mut allocator = PageAllocator::new(3);
     let (first, second) = (allocator.allocate().unwrap(), allocator.allocate().unwrap());
     assert_eq!(allocator.available(), 1);
@@ -235,8 +253,7 @@ fn test_page_allocator_reuses_released_pages() {
     assert_eq!(allocator.available(), 2);
 }
 
-#[test]
-fn test_attention_sink_eviction_preserves_logical_pages() {
+#[test] fn test_attention_sink_eviction_preserves_logical_pages() {
     let device = crate::common::init_device();
     let mut cache = KVCache::<ModelBackend>::new_paged(1, 1, 16, 1, 8, 2, &device);
     cache.ensure_pages(0, 7);

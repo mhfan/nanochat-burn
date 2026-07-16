@@ -118,16 +118,14 @@ runs/<run-name>/
 
 验收条件：目标函数、日志指标和测试能够区分 REINFORCE 与 GRPO。
 
-## M7：GPU 算子与前沿功能
+## M7：GPU 算子优化
 
-- [ ] 基于 profiling 选择 CubeCL 融合热点。
-- [ ] 实验 Fused RMSNorm、RoPE 和 Softmax。
-- [ ] 评估 Burn/CUDA 可用的 FlashAttention 路径。
-- [ ] 实现 NTK-aware 或 YaRN RoPE scaling。
-- [ ] 实现随机采样下严格无损的 speculative decoding。
-- [ ] 在基线成熟后评估 Medusa heads。
+- [x] 基于可复现的 `bench_ops` profiling 选择 CubeCL 融合热点。
+- [x] 实验 RMSNorm、RoPE 和 Softmax；无稳定收益的算子保留 Burn Fusion 泛型实现。
+- [x] 接入 Burn/CubeCL attention，并评估原生 causal、显式 mask 与 Flash/autotune 路径。
 
-验收条件：每个特化算子均有参考实现、数值 parity 测试和端到端性能数据。
+验收条件：每个实际采用的特化算子均有参考实现、数值 parity 测试和端到端性能数据。结果与
+复现命令见 [`docs/gpu-operators.md`](docs/gpu-operators.md)。
 
 ## 发布标准
 

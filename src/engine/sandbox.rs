@@ -1,9 +1,11 @@
 
 use std::{fs::{self, File, OpenOptions}, io::{self, Read, Write}, path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio}, thread::JoinHandle, time::{Duration, Instant},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const MAX_OUTPUT_BYTES: u64 = 1 << 20;
+static NEXT_SCRIPT_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -58,7 +60,8 @@ impl Drop for TempFileGuard { fn drop(&mut self) { let _ = fs::remove_file(&self
 
 fn create_temp_script(directory: &Path) -> io::Result<(PathBuf, File)> {
     for _ in 0..16 {
-        let path = directory.join(format!("sandbox_{}.py", rand::random::<u64>()));
+        let id = NEXT_SCRIPT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!("sandbox_{}_{id}.py", std::process::id()));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,

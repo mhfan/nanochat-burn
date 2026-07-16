@@ -2,8 +2,8 @@
 use std::marker::PhantomData;
 
 use burn::{module::{Module, Param}, nn::{Embedding, Linear},
-    tensor::{Distribution, Element, Int, Shape, Tensor, TensorData, activation,
-        backend::Backend},
+    tensor::{Bool, Distribution, Element, Int, Shape, Tensor, TensorData, activation,
+        backend::Backend, module, ops::AttentionModuleOptions},
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,20 +106,53 @@ pub fn has_ve(layer_idx: usize, n_layer: usize) -> bool {
 }
 
 fn precompute_window_mask<B: Backend>(window_size: i32, sequence_len: usize,
-    device: &B::Device) -> Tensor<B, 4> {
-    let mask_data: Vec<f32> = (0..sequence_len).flat_map(|i| {
+    device: &B::Device) -> Tensor<B, 4, Bool> {
+    let mask_data: Vec<bool> = (0..sequence_len).flat_map(|i| {
             let left_bound =
                 if window_size < 0 { 0 } else { i.saturating_sub(window_size as usize) };
-            (0..sequence_len).map(move |j| {
-                if j > i || j < left_bound { -1e9f32 } else { 0.0f32 }
-            })
+            (0..sequence_len).map(move |j| j > i || j < left_bound)
         }).collect();
-    Tensor::<B, 4>::from_data(
+    Tensor::<B, 4, Bool>::from_data(
         TensorData::new(mask_data, Shape::new([1, 1, sequence_len, sequence_len])), device)
 }
 
+fn precompute_rope_cache<B: Backend>(sequence_len: usize, head_dim: usize,
+    device: &B::Device) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    let inv_freq: Vec<_> = (0..head_dim).step_by(2)
+        .map(|i| 1.0 / ROPE_BASE_FREQ.powf(i as f32 / head_dim as f32)).collect();
+    let mut cos = Vec::with_capacity(sequence_len * inv_freq.len());
+    let mut sin = Vec::with_capacity(sequence_len * inv_freq.len());
+    for position in 0..sequence_len {
+        let position = position as f32;
+        cos.extend(inv_freq.iter().map(|&frequency| (position * frequency).cos()));
+        sin.extend(inv_freq.iter().map(|&frequency| (position * frequency).sin()));
+    }
+    let shape = Shape::new([sequence_len, head_dim / 2]);
+    (Tensor::from_data(TensorData::new(cos, shape.clone()), device),
+        Tensor::from_data(TensorData::new(sin, shape), device))
+}
+
+pub fn scaled_dot_product_attention_reference<B: Backend>(q: Tensor<B, 4>,
+    k: Tensor<B, 4>, v: Tensor<B, 4>, mask: Tensor<B, 4, Bool>) -> Tensor<B, 4> {
+    let [batch_size, n_head, query_len, _] = q.shape().dims();
+    let key_len = k.shape().dims::<4>()[2];
+    let scale = 1.0 / (q.shape().dims::<4>()[3] as f32).sqrt();
+    let mask = mask.expand([batch_size, n_head, query_len, key_len]);
+    let scores = (q.matmul(k.swap_dims(2, 3)) * scale).mask_fill(mask, f32::NEG_INFINITY);
+    activation::softmax(scores, 3).matmul(v)
+}
+
+pub fn scaled_dot_product_attention_burn<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>,
+    v: Tensor<B, 4>, mask: Option<Tensor<B, 4, Bool>>, is_causal: bool) -> Tensor<B, 4> {
+    let [batch_size, n_head, query_len, _] = q.shape().dims();
+    let key_len = k.shape().dims::<4>()[2];
+    let mask = mask.map(|mask| mask.expand([batch_size, n_head, query_len, key_len]));
+    module::attention(q, k, v, mask, None,
+        AttentionModuleOptions { is_causal, ..Default::default() })
+}
+
 pub fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, eps: f32) -> Tensor<B, D> {
-    let variance = (x.clone() * x.clone()).mean_dim(D - 1);
+    let variance = x.clone().square().mean_dim(D - 1);
     x * (variance + eps).sqrt().recip()
 }
 
@@ -190,7 +223,8 @@ pub struct CausalSelfAttention<B: Backend, L = Linear<B>> {
     pub n_kv_head: usize,
     pub head_dim: usize,
     pub qk_norm: bool,
-    pub mask: Tensor<B, 4>,
+    pub is_causal: bool,
+    pub mask: Tensor<B, 4, Bool>,
 }
 
 impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
@@ -208,7 +242,7 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
             let ve_reshaped = ve_tensor.reshape([b, t, self.n_kv_head, self.head_dim]);
             let x_slice = x.slice([0..b, 0..t, 0..channels.min(VE_GATE_INPUT_DIM)]);
             let gate_logits = ve_gate_linear.forward_layer(x_slice);
-            let gate = ((gate_logits * -1.0).exp() + 1.0).recip() * 3.0; // range (0, 3)
+            let gate = activation::sigmoid(gate_logits) * 3.0; // range (0, 3)
             let gate_unsqueezed = gate.reshape([b, t, self.n_kv_head, 1]);
             v = v + gate_unsqueezed * ve_reshaped;
         }
@@ -221,20 +255,16 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
     }
 
     fn compute_attention(&self, q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>,
-        mask: Tensor<B, 4>) -> Tensor<B, 3> {
+        mask: Tensor<B, 4, Bool>) -> Tensor<B, 3> {
         let [b, t, _, _] = q.shape().dims();
 
         let group_size = self.n_head / self.n_kv_head;
         let (k, v) = (repeat_kv(k, group_size), repeat_kv(v, group_size));
         let (q_trans, k_trans, v_trans) =
             (q.swap_dims(1, 2), k.swap_dims(1, 2), v.swap_dims(1, 2));
-        let mut scores =
-            q_trans.matmul(k_trans.swap_dims(2, 3)) * (1.0 / (self.head_dim as f32).sqrt());
-
-        scores = scores + mask;
-        let probs = activation::softmax(scores, 3);
-        let y =
-            probs.matmul(v_trans).swap_dims(1, 2).reshape([b, t, self.n_head * self.head_dim]);
+        let (mask, is_causal) = if self.is_causal { (None, true) } else { (Some(mask), false) };
+        let y = scaled_dot_product_attention_burn(q_trans, k_trans, v_trans, mask, is_causal)
+            .swap_dims(1, 2).reshape([b, t, self.n_head * self.head_dim]);
         self.c_proj.forward_layer(y)
     }
 
@@ -285,7 +315,7 @@ pub struct MLP<B: Backend, L = Linear<B>> {
 impl<B: Backend, L: ForwardLayer<B>> MLP<B, L> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let x = activation::relu(self.c_fc.forward_layer(x));
-        self.c_proj.forward_layer(if self.relu_squared { x.clone() * x } else { x })
+        self.c_proj.forward_layer(if self.relu_squared { x.square() } else { x })
     }
 }
 
@@ -331,6 +361,8 @@ pub struct Gpt<B: Backend, L = Linear<B>> {
     pub smear_lambda: Param<Tensor<B, 1>>,
     pub backout_lambda: Param<Tensor<B, 1>>,
     pub value_embeds: Vec<Embedding<B>>,
+    pub rope_cos: Tensor<B, 2>,
+    pub rope_sin: Tensor<B, 2>,
     pub config: GptConfig,
 }
 
@@ -341,6 +373,8 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let n_embd = config.n_embd;
         let head_dim = n_embd / config.n_head;
         let kv_dim = config.n_kv_head * head_dim;
+        let (rope_cos, rope_sin) =
+            precompute_rope_cache(config.sequence_len, head_dim, device);
 
         let wte = embedding(Tensor::random([padded_vocab_size, n_embd],
             Distribution::Normal(0.0, 0.8), device));
@@ -352,6 +386,10 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 embedding(Tensor::random([padded_vocab_size, kv_dim], init, device))).collect();
 
         let window_sizes = config.compute_window_sizes();
+        let causal_mask = precompute_window_mask::<B>(-1, config.sequence_len, device);
+        let short_window = window_sizes.iter().copied().find(|&window| window >= 0);
+        let short_mask = short_window.map(|window|
+            precompute_window_mask::<B>(window, config.sequence_len, device));
         let h: Vec<_> = (0..config.n_layer).map(|i| {
                 let c_q = random_linear(n_embd, config.n_head * head_dim, init, device);
                 let c_k = random_linear(n_embd, kv_dim, init, device);
@@ -363,11 +401,13 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                 } else { None };
 
                 let window_size = window_sizes[i];
-                let mask =
-                    precompute_window_mask::<B>(window_size, config.sequence_len, device);
+                let is_causal = window_size < 0;
+                let mask = if is_causal { causal_mask.clone() } else {
+                    short_mask.as_ref().expect("short attention mask").clone()
+                };
                 let attn = CausalSelfAttention { c_q, c_k, c_v, c_proj, ve_gate, layer_idx: i,
                     n_head: config.n_head, n_kv_head: config.n_kv_head, head_dim,
-                    qk_norm: config.features.qk_norm, mask,
+                    qk_norm: config.features.qk_norm, is_causal, mask,
                 };
 
                 let mlp_init = Distribution::Uniform((-s * 0.4) as f64, (s * 0.4) as f64);
@@ -396,50 +436,29 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         let backout_lambda = tensor_param(vec![0.2], device);
 
         Gpt { wte, h, lm_head, resid_lambdas, x0_lambdas, smear_gate,
-            smear_lambda, backout_lambda, value_embeds, config, }
+            smear_lambda, backout_lambda, value_embeds, rope_cos, rope_sin, config, }
     }
 }
 
 impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
-    fn precompute_rotary_embeddings(&self, start_pos: usize, len: usize, head_dim: usize,
-        device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let base = ROPE_BASE_FREQ;
-        let inv_freq: Vec<f32> = (0..head_dim).step_by(2)
-            .map(|i| 1.0 / base.powf(i as f32 / head_dim as f32)).collect();
-
-        let mut cos_data = Vec::with_capacity(len * (head_dim / 2));
-        let mut sin_data = Vec::with_capacity(len * (head_dim / 2));
-
-        for t in start_pos..(start_pos + len) {
-            let t_f32 = t as f32;
-            cos_data.extend(inv_freq.iter().map(|&freq| (t_f32 * freq).cos()));
-            sin_data.extend(inv_freq.iter().map(|&freq| (t_f32 * freq).sin()));
-        }
-
-        let cos = Tensor::<B, 4>::from_data(
-            TensorData::new(cos_data, Shape::new([1, len, 1, head_dim / 2])), device);
-        let sin = Tensor::<B, 4>::from_data(
-            TensorData::new(sin_data, Shape::new([1, len, 1, head_dim / 2])), device);
-        (cos, sin)
+    fn rotary_embeddings(&self, start: usize, len: usize) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let half_dim = self.config.n_embd / self.config.n_head / 2;
+        let range = [start..start + len, 0..half_dim];
+        (self.rope_cos.clone().slice(range.clone()).reshape([1, len, 1, half_dim]),
+            self.rope_sin.clone().slice(range).reshape([1, len, 1, half_dim]))
     }
 
-    fn precompute_rotary_embeddings_rows(&self, positions: &[usize], len: usize,
-        head_dim: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let inv_freq: Vec<f32> = (0..head_dim).step_by(2)
-            .map(|i| 1.0 / ROPE_BASE_FREQ.powf(i as f32 / head_dim as f32)).collect();
-        let mut cos_data = Vec::with_capacity(positions.len() * len * head_dim / 2);
-        let mut sin_data = Vec::with_capacity(positions.len() * len * head_dim / 2);
-        for &start in positions {
-            for position in start..start + len {
-                let position = position as f32;
-                cos_data.extend(inv_freq.iter().map(|&freq| (position * freq).cos()));
-                sin_data.extend(inv_freq.iter().map(|&freq| (position * freq).sin()));
-            }
-        }
-        let shape = Shape::new([positions.len(), len, 1, head_dim / 2]);
-        let cos = Tensor::from_data(TensorData::new(cos_data, shape.clone()), device);
-        let sin = Tensor::from_data(TensorData::new(sin_data, shape), device);
-        (cos, sin)
+    fn rotary_embeddings_rows(&self, positions: &[usize], len: usize)
+        -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let indices: Vec<i32> = positions.iter().flat_map(|&start|
+            (start..start + len).map(|position| position as i32)).collect();
+        let indices = Tensor::<B, 1, Int>::from_data(
+            TensorData::new(indices, Shape::new([positions.len() * len])),
+            &self.rope_cos.device());
+        let half_dim = self.config.n_embd / self.config.n_head / 2;
+        let shape = [positions.len(), len, 1, half_dim];
+        (self.rope_cos.clone().select(0, indices.clone()).reshape(shape),
+            self.rope_sin.clone().select(0, indices).reshape(shape))
     }
 
     fn smear_embeddings(&self, x: Tensor<B, 3>, previous: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
@@ -456,7 +475,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         } else {    x.clone().slice([0..batch_size, 0..seq_len - 1, 0..n_embd]) };
         let gate_input = current.clone().slice([
             0..batch_size, 0..seq_len - start, 0..n_embd.min(SMEAR_GATE_INPUT_DIM)]);
-        let gate = ((self.smear_gate.forward_layer(gate_input) * -1.0).exp() + 1.0).recip() *
+        let gate = activation::sigmoid(self.smear_gate.forward_layer(gate_input)) *
             self.smear_lambda.clone().val().reshape([1, 1, 1]);
         let smeared = current + gate * predecessors;
 
@@ -525,10 +544,8 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         let end = step.checked_add(seq_len).expect("sequence position overflow");
         assert!(end <= self.config.sequence_len, "input exceeds model sequence length");
 
-        let head_dim = self.config.n_embd / self.config.n_head;
         let start_pos = if cache_opt.is_some() { step } else { 0 };
-        let (cos, sin) =
-            self.precompute_rotary_embeddings(start_pos, seq_len, head_dim, &idx.device());
+        let (cos, sin) = self.rotary_embeddings(start_pos, seq_len);
 
         let x_normed = norm(self.wte.forward(idx.clone()));
 
@@ -587,9 +604,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             .is_some_and(|end| end <= self.config.sequence_len)),
             "input exceeds model sequence length");
 
-        let head_dim = self.config.n_embd / self.config.n_head;
-        let (cos, sin) = self.precompute_rotary_embeddings_rows(
-            steps, seq_len, head_dim, &idx.device());
+        let (cos, sin) = self.rotary_embeddings_rows(steps, seq_len);
         let x_normed = norm(self.wte.forward(idx.clone()));
         let mut x = if self.config.features.smear {
             self.smear_embeddings_with_cache_rows(
@@ -657,8 +672,8 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         let mask_valid = flat_targets.clone().not_equal_elem(-1);
         let clamped_targets = flat_targets.clamp(0, (v - 1) as i32);
 
-        let one_hot = clamped_targets.one_hot(v);
-        let selected_log_probs = (log_probs * one_hot.float()).sum_dim(1).reshape([b * t]);
+        let selected_log_probs = log_probs
+            .gather(1, clamped_targets.reshape([b * t, 1])).reshape([b * t]);
 
         let valid_float = mask_valid.float();
         selected_log_probs * valid_float * -1.0
@@ -682,6 +697,7 @@ impl<B: Backend> Gpt<B, Linear<B>> {
                     n_kv_head: attn.n_kv_head,
                     head_dim: attn.head_dim,
                     qk_norm: attn.qk_norm,
+                    is_causal: attn.is_causal,
                     mask: attn.mask,
                 };
 
@@ -702,6 +718,8 @@ impl<B: Backend> Gpt<B, Linear<B>> {
             smear_lambda: self.smear_lambda,
             backout_lambda: self.backout_lambda,
             value_embeds: self.value_embeds,
+            rope_cos: self.rope_cos,
+            rope_sin: self.rope_sin,
             config: self.config,
         }
     }

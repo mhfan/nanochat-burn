@@ -101,11 +101,13 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
     }
 
     pub fn step(&mut self, gpt: &mut Gpt<B>, grads: &GradientsParams, lr: f32,
-        step: usize, weight_decay: f32) {
+        step: usize, weight_decay: f32, muon_momentum: f32) {
         assert!(step > 0, "optimizer step must be one-based");
         assert!(lr.is_finite() && lr >= 0.0, "learning rate must be finite and non-negative");
         assert!(weight_decay.is_finite() && weight_decay >= 0.0,
             "weight decay must be finite and non-negative");
+        assert!(muon_momentum.is_finite() && (0.0..1.0).contains(&muon_momentum),
+            "Muon momentum must be finite and in [0, 1)");
         assert_eq!(self.h.len(), gpt.h.len(), "optimizer/model layer count mismatch");
         assert_eq!(self.value_embeds.len(), gpt.value_embeds.len(),
             "optimizer/model value embedding count mismatch");
@@ -153,7 +155,7 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
         }
 
         let muon_hyper =
-            MuonHyper { lr, weight_decay, momentum: 0.95, beta2: 0.9, ns_steps: 5 };
+            MuonHyper { lr, weight_decay, momentum: muon_momentum, beta2: 0.9, ns_steps: 5 };
 
         for i in 0..gpt.config.n_layer {
             let (block, state) = (&mut gpt.h[i], &mut self.h[i]);
@@ -455,7 +457,7 @@ fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
     s.exp_avg =
         s.exp_avg.clone().mul_scalar(hyper.beta1) + grad.clone().mul_scalar(1.0 - hyper.beta1);
     s.exp_avg_sq = s.exp_avg_sq.clone().mul_scalar(hyper.beta2) +
-        grad.powf_scalar(2.0).mul_scalar(1.0 - hyper.beta2);
+        grad.square().mul_scalar(1.0 - hyper.beta2);
 
     let bias1 = 1.0 - hyper.beta1.powi(hyper.step as i32);
     let bias2 = 1.0 - hyper.beta2.powi(hyper.step as i32);
@@ -486,7 +488,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     let g = grad.mul_scalar(1.0 - hyper.momentum) +
         s.momentum_buffer.clone().mul_scalar(hyper.momentum);
     let g_scaled = g.clone().mul_scalar(10000.0);
-    let norm = g_scaled.powf_scalar(2.0).sum().clamp(0.0, 1e10).sqrt().mul_scalar(0.0001);
+    let norm = g_scaled.square().sum().clamp(0.0, 1e10).sqrt().mul_scalar(0.0001);
     let mut x = g / norm.mul_scalar(1.01).add_scalar(1e-6).reshape([1, 1]);
 
     let polar_express_coeffs = [
@@ -512,7 +514,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     }
     let mut g_ortho = x;
 
-    let v_mean = g_ortho.clone().powf_scalar(2.0).mean_dim(red_dim).clamp(0.0, 1e10);
+    let v_mean = g_ortho.clone().square().mean_dim(red_dim).clamp(0.0, 1e10);
     let red_dim_size = shape[red_dim] as f32;
     let v_norm = (v_mean.clone().sum() * red_dim_size).clamp(0.0, 1e10).sqrt();
 
@@ -521,7 +523,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     let eps = optimizer_epsilon::<B>();
     let step_size = (s.second_momentum_buffer.clone().clamp(eps, 1e4)).recip().sqrt();
 
-    let scaled_sq_sum = (v_mean * red_dim_size) * step_size.clone().powf_scalar(2.0);
+    let scaled_sq_sum = (v_mean * red_dim_size) * step_size.clone().square();
     let v_norm_new = scaled_sq_sum.sum().clamp(0.0, 1e10).sqrt();
 
     let ratio = (v_norm / v_norm_new.clamp(eps, 1e4)).reshape([1, 1]);

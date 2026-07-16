@@ -16,6 +16,7 @@
 | Pretrain → SFT → RL artifact 衔接 | Experimental | 共享模型、配置和 tokenizer；Pretrain 与 RL 保存 optimizer/trainer，RL 额外恢复采样 RNG |
 | TOML 实验配置 | Experimental | 一个强类型配置统一模型、数据、三阶段超参数和 artifact 链路，并随产物保存 |
 | W8/W4 weight-only quantization | Experimental | WGPU 使用 Burn QFloat 快路径，NdArray 和特殊形状使用可移植回退 |
+| GPU attention | Experimental | 完整因果层和 SWA 层统一调用 Burn/CubeCL attention，由后端选择融合、Flash 或 fallback 路径 |
 | Paged KV cache | Experimental | free-list、请求 block table、逐页 online-softmax attention，以及按 request slot/position 合并的 iteration-level continuous batching |
 | Speculative decoding | Reference | greedy 模式数学无损，支持增量 draft rollback、acceptance 与真实加速比基准 |
 | REINFORCE / GRPO | Experimental | 支持组内优势、old-policy ratio clip、reference KL、rollout 记录和恢复 |
@@ -50,7 +51,7 @@ cargo run --features ndarray --example tokenizer
     *   **AdamW 优化器**：一维标量参数、Smear/Backout 门控及 Embedding 使用 AdamW 更新。
     *   **半精度稳定性 (f16)**：对 epsilon、clamp 和 `.sqrt()` 下界进行 half-precision 适配，并通过 WGPU 测试持续验证。
 *   **系统级优化**：
-    *   **静态 attention 掩码**：在模型初始化时预计算 Attention 掩码并在前向中 slice 访问。
+    *   **attention 掩码复用**：完整因果层使用后端原生 causal 语义；SWA 与缓存路径共享初始化时预计算的 bool 掩码。
     *   **广播式 GQA**：`repeat_kv` 使用 `.reshape()` 与 `.expand()` 表达分组广播，减少显式复制。
     *   **设备切换**：默认使用 WGPU，也可通过 `--features ndarray` 进行纯 CPU 快速验证。
 *   **低比特量化与生态对接 (Quantization & Serialization)**：
@@ -108,8 +109,9 @@ cargo run --features ndarray --example tokenizer
     │       ├── train.rs        # 训练入口 (支持 --pretrain, --sft, --rl 参数动态切换)
     │       ├── eval.rs         # 多任务评测入口
     │       ├── report.rs       # 训练、BPB、吞吐与质量汇总
-    │       ├── bench_infer.rs       # Prefill/decode 与量化基准
-    │       ├── bench_spec.rs        # 推测解码 acceptance/speedup 基准
+    │       ├── bench_infer.rs  # Prefill/decode 与量化基准
+    │       ├── bench_spec.rs   # 推测解码 acceptance/speedup 基准
+    │       ├── bench_ops.rs    # RMSNorm、RoPE、Softmax 与 attention 算子基准
     │       ├── chat.rs         # CLI 命令行多轮流式对话客户端
     │       └── chat_web.rs     # Axum SSE 多轮对话服务器
 ```
@@ -192,9 +194,10 @@ cargo run --bin report -- runs/pretrain runs/sft runs/rl
 cargo run --release --bin bench_infer -- --artifact runs/sft --batches 1,2,4
 cargo run --release --bin bench_infer -- --artifact runs/sft --quantization 4
 cargo run --release --bin bench_spec -- runs/sft runs/pretrain
+cargo run --release --bin bench_ops
 ```
 
-报告写入 `runs/report.json`，推理基准写入 `runs/benchmarks/`。训练报告记录各指标时刻观测到的
+报告写入 `runs/report.json`，推理及算子基准写入 `runs/benchmarks/`。训练报告记录各指标时刻观测到的
 进程 RSS 峰值；推理基准记录 prefill、首 token、decode tokens/s、batch scaling、理论 KV cache
 字节数，以及 CubeCL allocator 实测的设备 `bytes_in_use`/`bytes_reserved` 峰值。NdArray 没有设备
 allocator，相关字段为 `null`，不会用进程内存冒充显存。
@@ -311,3 +314,13 @@ NANOCHAT_ARTIFACT=runs/sft cargo run --bin chat --release
 ## 🗺️ 未来展望与路线图 (Future Roadmap / TODO)
 
 项目按“可信文档 → 可复现实验 → 数值 parity → 教学消融 → 推理性能 → 并发调度 → 对齐算法 → GPU 特化”的顺序推进。任务状态和发布标准统一维护在 [ROADMAP.md](ROADMAP.md)，不在 README 重复维护容易失真的功能清单。
+
+以下长期方向具有研究和教学价值，但会显著扩大模型、训练或采样系统的复杂度，暂不作为当前
+版本的交付承诺。待 GPU 算子基线、质量评测和端到端 benchmark 稳定后再重新评估：
+
+- **长上下文 RoPE scaling**：评估 NTK-aware 或 YaRN，同时验证短上下文质量、长上下文任务
+  表现和 artifact 配置兼容性。
+- **随机采样下严格无损的 speculative decoding**：实现基于 draft/target 概率比的接受拒绝
+  采样与残差分布，证明输出分布与独立 target sampling 一致。
+- **Medusa heads**：增加多 token 预测 heads 和候选树验证；需要额外训练流程、模型结构、
+  checkpoint 格式及与双模型 speculative decoding 的收益对比。

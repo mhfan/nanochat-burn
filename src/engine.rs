@@ -1,6 +1,6 @@
 
 use std::time::Instant;
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::{DType, Int, Tensor, TensorData, backend::{AutodiffBackend, Backend}};
 use serde::{Deserialize, Serialize};
 
 use crate::{common::{int_tensor_2d, scalar_to_f32},
@@ -124,10 +124,25 @@ pub fn get_token_bytes(tokenizer: &BpeTokenizer) -> Vec<usize> {
     token_bytes
 }
 
+fn bpb_totals<B: Backend>(losses: Tensor<B, 1>, targets: Tensor<B, 1, Int>,
+    token_bytes: Tensor<B, 1>) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let vocab_size = token_bytes.shape().dims::<1>()[0];
+    let in_range = targets.clone().greater_equal_elem(0).float().cast(DType::F32) *
+        targets.clone().lower_elem(vocab_size as i32).float().cast(DType::F32);
+    let bytes = token_bytes.gather(0, targets.clamp(0, vocab_size as i32 - 1));
+    let counted = in_range * bytes.clone().greater_elem(0.0).float().cast(DType::F32);
+    ((losses.cast(DType::F32) * counted.clone()).sum(), (bytes * counted).sum())
+}
+
 /// Evaluate validation Bits Per Byte (BPB) on a given DataLoader.
 pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDataLoader,
     steps: usize, token_bytes: &[usize], device: &B::Device) -> f32 {
-    let (mut total_nats, mut total_bytes) = (0.0f32, 0);
+    assert!(!token_bytes.is_empty(), "token byte table must not be empty");
+    let token_bytes = Tensor::<B, 1>::from_data(TensorData::new(
+        token_bytes.iter().map(|&bytes| bytes as f32).collect(), [token_bytes.len()]), device)
+        .cast(DType::F32);
+    let (mut total_nats, mut total_bytes) = (Tensor::<B, 1>::zeros([1], device)
+        .cast(DType::F32), Tensor::<B, 1>::zeros([1], device).cast(DType::F32));
 
     for _ in 0..steps {
         let Some(batch) = loader.next_batch().await else { break; };
@@ -139,24 +154,16 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
         let y_tensor = int_tensor_2d(batch.y, [b, t], device);
 
         let logits = model.forward(x_tensor, None);
-        let unreduced_losses = model.compute_unreduced_loss(logits, y_tensor.clone());
-
-        let targets_vec = y_tensor.into_data().to_vec::<i32>().unwrap();
-        let loss_vec = crate::common::tensor_data_to_f32_vec(unreduced_losses.into_data());
-
-        for (loss_val, target_tok) in loss_vec.into_iter().zip(targets_vec) {
-            if target_tok >= 0 {
-                let bytes_len = token_bytes.get(target_tok as usize).copied().unwrap_or(0);
-                if bytes_len > 0 {
-                    total_nats += loss_val;
-                    total_bytes += bytes_len;
-                }
-            }
-        }
+        let (nats, bytes) = bpb_totals(
+            model.compute_unreduced_loss(logits, y_tensor.clone()), y_tensor.reshape([-1]),
+            token_bytes.clone());
+        total_nats = total_nats + nats;
+        total_bytes = total_bytes + bytes;
     }
 
-    if total_bytes == 0 { f32::INFINITY } else {
-        total_nats / (2.0f32.ln() * total_bytes as f32)
+    let total_bytes = scalar_to_f32(total_bytes.into_scalar());
+    if total_bytes == 0.0 { f32::INFINITY } else {
+        scalar_to_f32(total_nats.into_scalar()) / (2.0f32.ln() * total_bytes)
     }
 }
 
@@ -261,7 +268,9 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let wd =
             get_weight_decay(self.step, self.config.num_iterations, self.config.weight_decay);
 
-        self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd);
+        let momentum = get_muon_momentum(
+            self.step, self.config.num_iterations, self.config.warmdown_ratio);
+        self.optimizer.step(&mut self.model, &g, lr, self.step + 1, wd, momentum);
 
         let elapsed = start_time.elapsed().as_secs_f64();
         self.last_tokens_per_second =
@@ -316,6 +325,19 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(token_bytes.len(), tokenizer.get_vocab_size());
         assert!(token_bytes[..256].iter().all(|&bytes| bytes == 1));
         assert_eq!(token_bytes[tokenizer.get_bos_token_id()], 0);
+    }
+
+    #[test] fn test_bpb_totals_ignore_non_text_targets() {
+        use burn::tensor::{Int, Tensor};
+        use crate::common::ModelBackend;
+        let device = crate::common::init_device();
+        let losses = Tensor::<ModelBackend, 1>::from_data([1.0, 2.0, 4.0, 8.0], &device);
+        let targets = Tensor::<ModelBackend, 1, Int>::from_data([0, 1, -1, 9], &device);
+        let token_bytes = Tensor::<ModelBackend, 1>::from_data([1.0, 0.0, 2.0], &device)
+            .cast(DType::F32);
+        let (nats, bytes) = bpb_totals(losses, targets, token_bytes);
+        assert_eq!(scalar_to_f32(nats.into_scalar()), 1.0);
+        assert_eq!(scalar_to_f32(bytes.into_scalar()), 1.0);
     }
 
     #[tokio::test] async fn test_training_resume_equivalence() {

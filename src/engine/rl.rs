@@ -7,7 +7,7 @@ use crate::{artifact::{MetricRecord, TrainingStage, append_metric, copy_metrics_
         load_artifact, load_resume_state, path_from_env, reset_metrics, save_artifact,
         save_experiment_config, save_resume_state, set_rollouts_file},
     common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
-    engine::{TrainerState,
+    engine::{TrainerState, get_muon_momentum,
         inference::{GenerationConfig, InferenceEngine, SamplingConfig, SamplingRng}},
     experiment::{ExperimentConfig, RlAlgorithm}, optim::MuonAdamW,
 };
@@ -314,7 +314,10 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
             let grads = loss.backward();
             let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
             let optimizer_step = (step - 1) * config.update_epochs + epoch + 1;
-            optimizer.step(&mut model, &grads_params, lr, optimizer_step, 0.0);
+            let total_optimizer_steps = num_steps * config.update_epochs;
+            let momentum = get_muon_momentum(
+                optimizer_step - 1, total_optimizer_steps, 1.0);
+            optimizer.step(&mut model, &grads_params, lr, optimizer_step, 0.0, momentum);
             loss_val = scalar_to_f32(loss.into_scalar());
         }
         let avg_reward = all_rewards.iter().sum::<f32>() / (all_rewards.len() as f32);

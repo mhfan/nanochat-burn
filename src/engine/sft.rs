@@ -5,7 +5,8 @@ use burn::tensor::backend::AutodiffBackend;
 use crate::{artifact::{MetricRecord, TrainingStage, append_metric, load_artifact, path_from_env,
         reset_metrics, save_artifact, save_experiment_config},
     common::{int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
-    engine::{get_lr_multiplier, get_weight_decay}, experiment::ExperimentConfig,
+    engine::{get_lr_multiplier, get_muon_momentum, get_weight_decay},
+    experiment::ExperimentConfig,
     optim::MuonAdamW, tokenizer::BpeTokenizer,
 };
 
@@ -153,9 +154,11 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
             training_config.warmdown_ratio, training_config.final_lr_frac);
         let wd = get_weight_decay(schedule_step, num_iterations, weight_decay);
         let lr = learning_rate * lrm;
+        let momentum = get_muon_momentum(
+            schedule_step, num_iterations, training_config.warmdown_ratio);
 
         let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
-        optimizer.step(&mut model, &grads_params, lr, step, wd);
+        optimizer.step(&mut model, &grads_params, lr, step, wd, momentum);
 
         let loss_val = scalar_to_f32(loss.into_scalar());
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };

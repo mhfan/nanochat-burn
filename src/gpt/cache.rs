@@ -1,4 +1,4 @@
-use burn::tensor::{Int, Shape, Tensor, backend::Backend};
+use burn::tensor::{Bool, Int, Shape, Tensor, backend::Backend};
 
 use super::repeat_kv;
 
@@ -225,7 +225,7 @@ impl<B: Backend> KVCache<B> {
         }
     }
 
-    pub(super) fn attend(&self, layer_idx: usize, q: Tensor<B, 4>, mask: Tensor<B, 4>,
+    pub(super) fn attend(&self, layer_idx: usize, q: Tensor<B, 4>, mask: Tensor<B, 4, Bool>,
         end: usize, n_head: usize, n_kv_head: usize, head_dim: usize) -> Tensor<B, 4> {
         let [batch_size, query_len, _, _] = q.shape().dims();
         let group_size = n_head / n_kv_head;
@@ -248,10 +248,10 @@ impl<B: Backend> KVCache<B> {
                     physical..physical + 1, 0..valid, 0..n_kv_head, 0..head_dim]);
                 let key = repeat_kv(key, group_size).swap_dims(1, 2);
                 let value = repeat_kv(value, group_size).swap_dims(1, 2);
-                let scores = query.clone().matmul(key.swap_dims(2, 3)) *
-                    (1.0 / (head_dim as f32).sqrt()) +
+                let scores = (query.clone().matmul(key.swap_dims(2, 3)) *
+                    (1.0 / (head_dim as f32).sqrt())).mask_fill(
                     mask.clone().slice([0..1, 0..1, 0..query_len,
-                        key_start..key_start + valid]);
+                        key_start..key_start + valid]), f32::NEG_INFINITY);
                 page_maxima.push(scores.clone().max_dim(3));
                 page_scores.push(scores);
                 page_values.push(value);
@@ -274,7 +274,8 @@ impl<B: Backend> KVCache<B> {
         Tensor::cat(outputs, 0)
     }
 
-    pub(super) fn attend_rows(&self, layer_idx: usize, q: Tensor<B, 4>, mask: Tensor<B, 4>,
+    pub(super) fn attend_rows(&self, layer_idx: usize, q: Tensor<B, 4>,
+        mask: Tensor<B, 4, Bool>,
         requests: &[usize], steps: &[usize], n_head: usize, n_kv_head: usize,
         head_dim: usize) -> Tensor<B, 4> {
         let [source_batch_size, query_len, _, _] = q.shape().dims();
@@ -302,10 +303,10 @@ impl<B: Backend> KVCache<B> {
                     physical..physical + 1, 0..valid, 0..n_kv_head, 0..head_dim]);
                 let key = repeat_kv(key, group_size).swap_dims(1, 2);
                 let value = repeat_kv(value, group_size).swap_dims(1, 2);
-                let scores = query.clone().matmul(key.swap_dims(2, 3)) *
-                    (1.0 / (head_dim as f32).sqrt()) +
+                let scores = (query.clone().matmul(key.swap_dims(2, 3)) *
+                    (1.0 / (head_dim as f32).sqrt())).mask_fill(
                     mask.clone().slice([0..1, 0..1, step..end,
-                        key_start..key_start + valid]);
+                        key_start..key_start + valid]), f32::NEG_INFINITY);
                 page_maxima.push(scores.clone().max_dim(3));
                 page_scores.push(scores);
                 page_values.push(value);

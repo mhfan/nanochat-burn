@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["MeiHui FAN <mhfan@ustc.edu>"]
 description = "A clean, idiomatic Rust port of nanochat using the Burn framework"
+license = "MIT"
 default-run = "chat"
 
 [features]
@@ -13,51 +14,21 @@ ndarray = ["burn/ndarray"]
 web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
 
 [[bin]]
-name = "chat"
-path = "src/bin/chat.rs"
-
-[[bin]]
 name = "chat_web"
 path = "src/bin/chat_web.rs"
 required-features = ["web"]
 
-[[bin]]
-name = "train"
-path = "src/bin/train.rs"
-
-[[bin]]
-name = "eval"
-path = "src/bin/eval.rs"
-
-[[bin]]
-name = "report"
-path = "src/bin/report.rs"
-
-[[bin]]
-name = "bench_infer"
-path = "src/bin/bench_infer.rs"
-
-[[bin]]
-name = "bench_spec"
-path = "src/bin/bench_spec.rs"
-
 [dependencies]
-# Burn 核心框架与自动微分支持
-burn = { version = "0.21", features = ["train", "wgpu", "dataset"] }
-
-# 使用全新的 burn-dispatch 简化后端管理
-#burn-dispatch = "0.21"
-
-# 使用全新的 burn-flex 代替旧的 ndarray，作为极轻量、无标准库依赖的 CPU 后端
-#burn-flex = "0.21"
+# Burn 核心、自动微分、WGPU 与参数存储
+burn = { version = "0.21", features = ["autodiff", "wgpu", "store"] }
 
 # 并行计算与异步运行时
-tokio = { version = "1.38", features = ["full"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "sync", "net"] }
 rayon = "1.10"
 
-# 高性能序列化/反序列化（对接 PyTorch 权重与本地 Checkpoint）
+# 配置、实验清单与 checkpoint/优化器状态序列化
 serde = { version = "1.0", features = ["derive"] }
-safetensors = "0.8"
+safetensors = "0.7"  # 与 Burn Store 对齐；用于动态优化器状态
 serde_json = "1.0"
 toml = "1.1"
 
@@ -65,19 +36,16 @@ toml = "1.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 
-# 命令行解析与实用工具
-#clap = { version = "4.5", features = ["derive"] }
-memmap2 = "0.9"                                   # 用于 Dataset 阶段高性能载入
+# 数据与系统工具
+memmap2 = "0.9"
 bytemuck = "1"
-rand = "0.10"
-sysinfo = "0.38"
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 cubecl-runtime = "0.10"
 
 # Web 服务框架（仅 chat_web 二进制需要，通过 'web' feature 按需编译）
 axum = { version = "0.8", optional = true }
 futures-core = { version = "0.3", optional = true }
-fancy-regex = "0.18"
-#regex = "1.12"
+fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode", "perf"] }
 
 [profile.release]
 opt-level = 3
