@@ -104,9 +104,10 @@ fn main() {
     }
     fs::write(&args.output, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
     for report in &reports {
-        println!("batch={} prefill={:.2}ms ttft={:.2}ms decode={:.2} tok/s cache={:.2}MiB device={}",
+        println!("batch={} prefill={:.2}ms ttft={:.2}ms tpot={:.2}ms decode={:.2} tok/s cache={:.2}MiB device={}",
             report.batch_size, report.prefill_latency_ms, report.time_to_first_token_ms,
-            report.decode_tokens_per_second, report.cache_bytes as f64 / 1_048_576.0,
+            report.median_decode_step_ms, report.decode_tokens_per_second,
+            report.cache_bytes as f64 / 1_048_576.0,
             report.peak_device_bytes_reserved.map_or_else(|| "n/a".into(),
                 |bytes| format!("{:.2}MiB", bytes as f64 / 1_048_576.0)));
     }

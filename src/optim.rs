@@ -328,8 +328,10 @@ fn load_tensor<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, name: &str
 
 fn load_adam<B: Backend, const D: usize>(tensors: &SafeTensors<'_>, prefix: &str,
     device: &B::Device) -> Result<Option<AdamWState<B, D>>, String> {
-    let exp_avg = load_tensor(tensors, &format!("{prefix}.exp_avg"), device)?;
-    let exp_avg_sq = load_tensor(tensors, &format!("{prefix}.exp_avg_sq"), device)?;
+    let exp_avg = load_tensor(tensors, &format!("{prefix}.exp_avg"), device)?
+        .map(|tensor| tensor.cast(DType::F32));
+    let exp_avg_sq = load_tensor(tensors, &format!("{prefix}.exp_avg_sq"), device)?
+        .map(|tensor| tensor.cast(DType::F32));
     match (exp_avg, exp_avg_sq) {
         (None, None) => Ok(None),
         (Some(exp_avg), Some(exp_avg_sq)) => Ok(Some(AdamWState { exp_avg, exp_avg_sq })),
@@ -449,23 +451,24 @@ fn update_matrix_param<B: AutodiffBackend>(param: &mut Param<Tensor<B, 2>>,
 
 fn adamw_step<B: Backend, const D: usize>(p: Tensor<B, D>, grad: Tensor<B, D>,
     state: &mut Option<AdamWState<B, D>>, hyper: AdamWHyper) -> Tensor<B, D> {
+    let param_dtype = B::FloatElem::dtype();
+    let (p, grad) = (p.cast(DType::F32), grad.cast(DType::F32));
     let s = state.get_or_insert_with(|| AdamWState {
-        exp_avg: Tensor::zeros(p.shape(), &p.device()),
-        exp_avg_sq: Tensor::zeros(p.shape(), &p.device()),
+        exp_avg: Tensor::<B, D>::zeros(p.shape(), &p.device()).cast(DType::F32),
+        exp_avg_sq: Tensor::<B, D>::zeros(p.shape(), &p.device()).cast(DType::F32),
     });
 
-    s.exp_avg =
-        s.exp_avg.clone().mul_scalar(hyper.beta1) + grad.clone().mul_scalar(1.0 - hyper.beta1);
-    s.exp_avg_sq = s.exp_avg_sq.clone().mul_scalar(hyper.beta2) +
+    s.exp_avg = s.exp_avg.clone().cast(DType::F32).mul_scalar(hyper.beta1) +
+        grad.clone().mul_scalar(1.0 - hyper.beta1);
+    s.exp_avg_sq = s.exp_avg_sq.clone().cast(DType::F32).mul_scalar(hyper.beta2) +
         grad.square().mul_scalar(1.0 - hyper.beta2);
 
     let bias1 = 1.0 - hyper.beta1.powi(hyper.step as i32);
     let bias2 = 1.0 - hyper.beta2.powi(hyper.step as i32);
-    let eps = hyper.eps.max(optimizer_epsilon::<B>());
-    let denom = (s.exp_avg_sq.clone() / bias2).clamp(0.0, 1e10).sqrt().add_scalar(eps);
+    let denom = (s.exp_avg_sq.clone() / bias2).clamp(0.0, 1e30).sqrt().add_scalar(hyper.eps);
 
-    p.mul_scalar(1.0 - hyper.lr * hyper.wd) -
-        (s.exp_avg.clone() / denom).mul_scalar(hyper.lr / bias1)
+    (p.mul_scalar(1.0 - hyper.lr * hyper.wd) -
+        (s.exp_avg.clone() / denom).mul_scalar(hyper.lr / bias1)).cast(param_dtype)
 }
 
 fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
@@ -487,9 +490,17 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 
     let g = grad.mul_scalar(1.0 - hyper.momentum) +
         s.momentum_buffer.clone().mul_scalar(hyper.momentum);
-    let g_scaled = g.clone().mul_scalar(10000.0);
-    let norm = g_scaled.square().sum().clamp(0.0, 1e10).sqrt().mul_scalar(0.0001);
-    let mut x = g / norm.mul_scalar(1.01).add_scalar(1e-6).reshape([1, 1]);
+    let g_dtype = B::FloatElem::dtype();
+    let x = g.cast(DType::F32);
+
+    // MuonEq: equalize row norms before the polar iteration to improve conditioning.
+    let target = x.clone().square().sum().clamp(0.0, 1e30).sqrt()
+        .div_scalar((rows as f32).sqrt()).reshape([1, 1]);
+    let row_norm = x.clone().square().sum_dim(1).clamp(1e-12, 1e30).sqrt()
+        .clamp(1e-6, 1e30);
+    let mut x = x * (target / row_norm);
+    let norm = x.clone().square().sum().clamp(0.0, 1e30).sqrt();
+    x = x / norm.mul_scalar(1.01).add_scalar(1e-6).reshape([1, 1]);
 
     let polar_express_coeffs = [
         (8.156554524902461, -22.48329292557795, 15.878769915207462),
@@ -512,22 +523,30 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         x = x.clone().mul_scalar(a) +
             if is_transposed { x.matmul(poly) } else { poly.matmul(x) };
     }
-    let mut g_ortho = x;
+    // Muon+: correct residual under-convergence by restoring the Frobenius norm of an exact
+    // semi-orthogonal matrix, then return to the parameter dtype for NorMuon and the update.
+    let target_norm = (rows.min(cols) as f32).sqrt();
+    let current_norm = x.clone().square().sum().clamp(0.0, 1e30).sqrt()
+        .clamp(1e-6, 1e30).reshape([1, 1]);
+    let mut g_ortho = (x * current_norm.recip().mul_scalar(target_norm)).cast(g_dtype);
 
-    let v_mean = g_ortho.clone().square().mean_dim(red_dim).clamp(0.0, 1e10);
+    let v_mean = g_ortho.clone().cast(DType::F32).square()
+        .mean_dim(red_dim).clamp(0.0, 1e30);
     let red_dim_size = shape[red_dim] as f32;
-    let v_norm = (v_mean.clone().sum() * red_dim_size).clamp(0.0, 1e10).sqrt();
+    let v_norm = (v_mean.clone().sum() * red_dim_size).clamp(0.0, 1e30).sqrt();
 
     s.second_momentum_buffer = s.second_momentum_buffer.clone().mul_scalar(hyper.beta2) +
-        v_mean.clone().mul_scalar(1.0 - hyper.beta2);
+        v_mean.clone().cast(g_dtype).mul_scalar(1.0 - hyper.beta2);
     let eps = optimizer_epsilon::<B>();
     let step_size = (s.second_momentum_buffer.clone().clamp(eps, 1e4)).recip().sqrt();
 
-    let scaled_sq_sum = (v_mean * red_dim_size) * step_size.clone().square();
-    let v_norm_new = scaled_sq_sum.sum().clamp(0.0, 1e10).sqrt();
+    let scaled_sq_sum = (v_mean * red_dim_size) *
+        step_size.clone().cast(DType::F32).square();
+    let v_norm_new = scaled_sq_sum.sum().clamp(0.0, 1e30).sqrt();
 
-    let ratio = (v_norm / v_norm_new.clamp(eps, 1e4)).reshape([1, 1]);
-    g_ortho = g_ortho * step_size * ratio;
+    let ratio = (v_norm / v_norm_new.clamp(1e-10, 1e30)).reshape([1, 1]);
+    let final_scale = (step_size.cast(DType::F32) * ratio).cast(g_dtype);
+    g_ortho = g_ortho * final_scale;
 
     let lr_scaled = hyper.lr * ((rows as f32 / cols as f32).max(1.0)).sqrt();
 
@@ -554,6 +573,23 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         let new_p = muon_step(p, grad, &mut state, hyper);
         let shape: [usize; 2] = new_p.shape().dims();
         assert_eq!(shape, [2, 2]);
+        assert!(crate::common::tensor_data_to_f32_vec(new_p.into_data())
+            .into_iter().all(f32::is_finite));
+    }
+
+    #[cfg(not(feature = "ndarray"))]
+    #[test] fn test_adamw_uses_f32_state_for_f16_parameters() {
+        use crate::common::ModelBackend;
+        let device = crate::common::init_device();
+        let parameter = Tensor::<ModelBackend, 1>::from_data([1.0, -2.0], &device);
+        let gradient = Tensor::from_data([0.25, -0.5], &device);
+        let mut state = None;
+        let updated = adamw_step(parameter, gradient, &mut state,
+            AdamWHyper::new(1e-3, 0.01, 0.9, 0.95, 1));
+        let state = state.unwrap();
+        assert_eq!(updated.into_data().dtype, DType::F16);
+        assert_eq!(state.exp_avg.into_data().dtype, DType::F32);
+        assert_eq!(state.exp_avg_sq.into_data().dtype, DType::F32);
     }
 
     #[test] fn test_optimizer_state_roundtrip() {
@@ -577,8 +613,10 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         let loaded = MuonAdamW::<ModelAutodiffBackend>::load_state(&path, 1, &device).unwrap();
 
         assert_eq!(loaded.kind, OptimizerKind::MuonAdamW);
-        assert_eq!(tensor_data_to_f32_vec(loaded.wte.unwrap().exp_avg.into_data()),
-            vec![1.0, 2.0]);
+        let loaded_wte = loaded.wte.unwrap();
+        assert_eq!(loaded_wte.exp_avg.clone().into_data().dtype, DType::F32);
+        assert_eq!(loaded_wte.exp_avg_sq.into_data().dtype, DType::F32);
+        assert_eq!(tensor_data_to_f32_vec(loaded_wte.exp_avg.into_data()), vec![1.0, 2.0]);
         let Some(MatrixOptimizerState::Muon(state)) = loaded.h[0].c_q.as_ref() else {
             panic!("expected Muon matrix state");
         };

@@ -253,6 +253,20 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
     assert_eq!(allocator.available(), 2);
 }
 
+#[test] fn test_copied_cache_requests_own_physical_pages() {
+    let device = crate::common::init_device();
+    let mut cache = KVCache::<ModelBackend>::new_paged(1, 2, 8, 1, 2, 2, &device);
+    let key = Tensor::from_data([[[[1.0, 2.0]]]], &device);
+    let value = Tensor::from_data([[[[3.0, 4.0]]]], &device);
+    cache.update_rows(0, key, value, &[0], &[0]);
+    cache.copy_request(0, 1);
+
+    assert_eq!(cache.request_lens, vec![1, 1]);
+    assert_ne!(cache.block_table(0)[0], cache.block_table(1)[0],
+        "copied prompts must not share a writable final page");
+    assert_eq!(cache.allocator.available(), cache.allocator.capacity() - 2);
+}
+
 #[test] fn test_attention_sink_eviction_preserves_logical_pages() {
     let device = crate::common::init_device();
     let mut cache = KVCache::<ModelBackend>::new_paged(1, 1, 16, 1, 8, 2, &device);

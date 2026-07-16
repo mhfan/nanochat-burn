@@ -23,13 +23,16 @@ v_t=\beta_2v_{t-1}+(1-\beta_2)g_t^2.
 -\eta\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}.
 ```
 
-通常 `epsilon=1e-10`；f16/Flex32 使用 `1e-4`，避免表示范围导致除零或非有限值。
+AdamW 的参数、梯度和一二阶矩在更新期间显式转换为 fp32，`epsilon=1e-10`，更新完成后才把
+parameter 转回模型 dtype。这样 f16 embedding 不会把 `1 - beta` 或小二阶矩提前舍入掉；optimizer
+state 也始终以 fp32 保存。Muon 的低精度回写路径仍使用适配后的 clamp/epsilon。
 
 ## Muon 路径
 
-Muon 先更新 momentum，并使用 Nesterov 风格组合得到方向。矩阵归一化后执行五次 Polar Express
-多项式迭代，逼近矩阵极分解中的正交方向。NorMuon 再沿矩阵较长维维护二阶统计，保留更新范数，
-并按形状缩放学习率：
+Muon 先更新 momentum，并使用 Nesterov 风格组合得到方向。MuonEq 把每行缩放到平均行范数，
+随后在 fp32 中执行五次 Polar Express 多项式迭代，逼近矩阵极分解中的正交方向。Muon+ 再把
+Frobenius norm 校正为 `sqrt(min(rows, cols))`。NorMuon 最后沿矩阵较长维维护二阶统计、保留更新
+范数，并按形状缩放学习率：
 
 ```math
 \eta_{matrix}=\eta\sqrt{\max(\text{rows}/\text{cols},1)}.
@@ -54,7 +57,7 @@ optimizer state 包含每个参数的 momentum/二阶统计和 optimizer kind，
 
 ## 源码入口
 
-- `src/optim.rs`：参数收集、AdamW、Muon、NorMuon、数值保护与状态序列化。
+- `src/optim.rs`：参数收集、fp32 AdamW、MuonEq/Polar Express/Muon+/NorMuon 与状态序列化。
 - `src/optim/parity.rs`：固定 Python fixture 的 AdamW/Muon 单步更新。
 - `src/engine.rs`：梯度累积后调用 optimizer，并提供学习率、momentum 和 weight decay 调度。
 - `src/artifact.rs`：optimizer 与 trainer resume state 的保存/加载。
@@ -94,7 +97,7 @@ optimizer = "adam_w" # 另一组使用 "muon_adam_w"
 - parity fixture 同时比较更新后的参数和 optimizer state，能发现“参数暂时接近但状态已漂移”。
 - 宽/高矩阵分别覆盖 NorMuon 归约维度选择。
 - resume equivalence 测试把 optimizer、trainer 和 dataloader 一起恢复并比较下一步 logits。
-- f16 数值保护由 WGPU 测试覆盖；NdArray f32 测试不能代替低精度验证。
+- WGPU 测试检查 f16 参数回写和 fp32 AdamW state；NdArray f32 测试不能代替低精度验证。
 
 ## 常见错误
 
@@ -102,7 +105,7 @@ optimizer = "adam_w" # 另一组使用 "muon_adam_w"
 - 用 AdamW 的 weight decay 公式解释 Muon。Muon 的 decay 还受同号 mask 控制。
 - 只保存模型权重后声称“精确续训”。缺少 momentum、二阶统计、step 和 dataloader 位置会改变轨迹。
 - 比较优化器时同时改学习率、seed 或 batch size，导致无法归因。
-- 在 f16 中照搬极小 epsilon。数值安全值是实现契约的一部分。
+- 把模型 dtype 误当 optimizer state dtype。f16 forward/backward 不意味着 AdamW moment 也应是 f16。
 - 假定正交化输出满足数学上的精确 `Q^TQ=I`。有限次多项式是高效近似，按 fixture 容差验证。
 
 ## 能力边界

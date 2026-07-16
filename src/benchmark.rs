@@ -17,6 +17,8 @@ pub struct InferenceBenchmark {
     pub prefill_latency_ms: f64,
     pub time_to_first_token_ms: f64,
     pub decode_tokens_per_second: f64,
+    #[serde(default)]
+    pub median_decode_step_ms: f64,
     pub cache_bytes: u64,
     #[serde(default)]
     pub peak_device_bytes_in_use: Option<u64>,
@@ -125,6 +127,24 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     }
     let decode_tokens_per_second = generated as f64 / start.elapsed().as_secs_f64();
 
+    // Throughput keeps the decode pipeline asynchronous; this second pass synchronizes every
+    // step to expose user-visible inter-token latency instead of reporting host submission time.
+    let mut decode_step_ms = Vec::with_capacity(iterations * decode_tokens);
+    for _ in 0..iterations {
+        let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
+        for _ in 0..decode_tokens {
+            let start = Instant::now();
+            let (_, _, next) = engine.step_generation(
+                &mut state, logits, SamplingConfig::greedy(), device);
+            let _ = next.clone().into_data();
+            decode_step_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            logits = next;
+        }
+    }
+    decode_step_ms.sort_by(f64::total_cmp);
+    let median_decode_step_ms = decode_step_ms.get(decode_step_ms.len() / 2).copied()
+        .unwrap_or(0.0);
+
     // Keep allocator synchronization outside timed sections.
     let mut peak_memory = memory_usage();
     let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
@@ -139,7 +159,8 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     InferenceBenchmark { batch_size, prompt_tokens: prompt.len(), decode_tokens, iterations,
         prefill_latency_ms: prefill_secs * 1000.0 / iterations as f64,
         time_to_first_token_ms: ttft_secs * 1000.0 / iterations as f64,
-        decode_tokens_per_second, cache_bytes: estimate_cache_bytes::<B>(
+        decode_tokens_per_second, median_decode_step_ms,
+        cache_bytes: estimate_cache_bytes::<B>(
         &engine.model.config, batch_size),
         peak_device_bytes_in_use: peak_memory.map(|usage| usage.bytes_in_use),
         peak_device_bytes_reserved: peak_memory.map(|usage| usage.bytes_reserved),

@@ -143,6 +143,44 @@ impl<B: Backend> KVCache<B> {
         self.truncate_request(request, 0);
     }
 
+    /// Copy a completed prompt cache into another request slot. Physical pages are duplicated,
+    /// rather than shared, because the next decoded token may append inside the prompt's final
+    /// page and each request must then diverge independently.
+    pub fn copy_request(&mut self, source: usize, target: usize) {
+        assert!(source < self.batch_size && target < self.batch_size,
+            "cache request index exceeds batch capacity");
+        if source == target { return; }
+        let source_len = self.request_lens[source];
+        self.truncate_request(target, 0);
+        if source_len == 0 { return; }
+        let num_pages = source_len.div_ceil(self.page_size);
+        self.ensure_request_pages(target, 0, num_pages - 1);
+        let [_, page_size, n_kv_head, head_dim] = self.k_page_pool[0].shape().dims();
+        for logical_page in 0..num_pages {
+            let source_page = self.block_tables[source][logical_page]
+                .expect("source request is missing an allocated cache page");
+            let target_page = self.block_tables[target][logical_page]
+                .expect("target request is missing an allocated cache page");
+            let source_range = [source_page..source_page + 1, 0..page_size,
+                0..n_kv_head, 0..head_dim];
+            let target_range = [target_page..target_page + 1, 0..page_size,
+                0..n_kv_head, 0..head_dim];
+            for layer in 0..self.k_page_pool.len() {
+                self.k_page_pool[layer] = self.k_page_pool[layer].clone().slice_assign(
+                    target_range.clone(), self.k_page_pool[layer].clone().slice(source_range.clone()));
+                self.v_page_pool[layer] = self.v_page_pool[layer].clone().slice_assign(
+                    target_range.clone(), self.v_page_pool[layer].clone().slice(source_range.clone()));
+            }
+        }
+        if let Some(history) = self.token_history.take() {
+            let source_tokens = history.clone().slice([source..source + 1, 0..source_len]);
+            self.token_history = Some(history.slice_assign(
+                [target..target + 1, 0..source_len], source_tokens));
+        }
+        self.request_lens[target] = source_len;
+        self.len = self.len.max(source_len);
+    }
+
     pub fn evict_for_attention_sinks(&mut self, request: usize, sink_tokens: usize,
         recent_tokens: usize) {
         assert!(request < self.batch_size, "request index exceeds cache batch size");

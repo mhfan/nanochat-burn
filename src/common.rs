@@ -13,7 +13,9 @@ use serde::de::DeserializeOwned;
 #[cfg(feature = "ndarray")]
 pub type ModelBackend = NdArray<f32, i32>;
 #[cfg(not(feature = "ndarray"))]
-pub type ModelBackend = Wgpu<f16, i32>;
+pub type ModelFloat = f16;
+#[cfg(not(feature = "ndarray"))]
+pub type ModelBackend = Wgpu<ModelFloat, i32>;
 pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
 pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
 

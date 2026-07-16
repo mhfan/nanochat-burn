@@ -6,7 +6,7 @@ use crate::{artifact::{MetricRecord, TrainingStage, append_metric,
         copy_metrics_through, load_artifact, load_resume_state, reset_metrics, save_artifact,
         save_experiment_config, save_resume_state},
     dataloader::{DistributedDataLoader, DistributedDataLoaderConfig},
-    dataset::pretokenize_text_to_bin,
+    dataset::pretokenize_documents_to_bin,
     engine::{TrainingEngine, evaluate_bpb},
     experiment::{ExperimentConfig, PretrainConfig, PretrainCorpus}, gpt::Gpt,
     tokenizer::BpeTokenizer,
@@ -36,11 +36,13 @@ const SYNTHETIC_PRETRAIN_CORPUS: &[&str] = &[
 ];
 
 fn load_pretrain_corpus(config: &PretrainConfig) -> Result<Vec<String>, String> {
-    let corpus = match &config.corpus {
+    let corpus: Vec<String> = match &config.corpus {
         PretrainCorpus::Synthetic { .. } =>
             SYNTHETIC_PRETRAIN_CORPUS.iter().map(|text| (*text).to_string()).collect(),
-        PretrainCorpus::Text { path, .. } => vec![std::fs::read_to_string(path)
-            .map_err(|error| format!("failed to read pretrain corpus {path:?}: {error}"))?],
+        PretrainCorpus::Text { path, .. } => std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read pretrain corpus {path:?}: {error}"))?
+            .split("\n\n").map(str::trim).filter(|document| !document.is_empty())
+            .map(str::to_string).collect(),
     };
     if corpus.iter().all(|document| document.trim().is_empty()) {
         Err("pretrain corpus must contain text".into())
@@ -52,7 +54,9 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConf
     let (txt_path, bin_path) = (&config.text_path, &config.token_path);
 
     tracing::info!("Creating pretraining text dataset...");
-    let full_text = format!("{}\n", corpus.join("\n")).repeat(config.corpus.repeats());
+    let documents: Vec<_> = (0..config.corpus.repeats())
+        .flat_map(|_| corpus.iter().cloned()).collect();
+    let full_text = format!("{}\n", documents.join("\n\n"));
 
     if let Some(parent) = txt_path.parent() && !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent).expect("Failed to create pretraining data directory");
@@ -61,7 +65,11 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConf
         std::fs::create_dir_all(parent).expect("Failed to create pretraining token directory");
     }
     std::fs::write(txt_path, &full_text).expect("Failed to write pretrain text");
-    pretokenize_text_to_bin(txt_path, bin_path, tokenizer).expect("Failed to pretokenize dataset");
+    let sequence_length = config.training.sequence_length.unwrap_or(config.model.sequence_len);
+    let rows = pretokenize_documents_to_bin(
+        &documents, bin_path, tokenizer, sequence_length + 1)
+        .expect("Failed to pretokenize dataset");
+    assert!(rows > 0, "pretraining corpus is too small to fill one training row");
     tracing::info!("Pretraining dataset pretokenized to: {:?}", bin_path);
 
     bin_path.to_path_buf()

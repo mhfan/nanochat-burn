@@ -1,15 +1,19 @@
+#!/usr/bin/env python3
+"""Download public source datasets and export nanochat-burn JSONL files.
+
+This is the single repository-owned dataset acquisition entry point. It uses
+only the Python standard library and never imports a sibling nanochat checkout.
+"""
+
 import os
 import json
 import gzip
-import zipfile
 import csv
 import random
 import urllib.request
 
-# Environment override to keep all tokenizer and cache files in workspace
 script_dir = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(script_dir)
-os.environ["NANOCHAT_BASE_DIR"] = os.path.join(PROJECT_ROOT, ".cache/nanochat")
 
 # Standard BPE special tokens and letters
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -38,7 +42,7 @@ def download_file(url, local_filename):
     urllib.request.urlretrieve(url, local_path)
     return local_path
 
-def parse_gsm8k_conversation(question, answer, is_train=True):
+def parse_gsm8k_conversation(question, answer):
     # Split tool calls in answer
     import re
     assistant_message_parts = []
@@ -155,7 +159,7 @@ def export_datasets():
         for line in f:
             if line.strip():
                 row = json.loads(line)
-                gsm_test_convs.append(parse_gsm8k_conversation(row["question"], row["answer"], is_train=False))
+                gsm_test_convs.append(parse_gsm8k_conversation(row["question"], row["answer"]))
 
     # 4. Download and parse HumanEval
     he_url = "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz"

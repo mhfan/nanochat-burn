@@ -5,7 +5,9 @@
 
 ## 数据契约
 
-预训练分片是无头的 little-endian `u32` token ID 流：
+预训练分片是无头的 little-endian `u32` token ID 流。训练 recipe 不再把整份文本直接视为一条
+连续文档：输入按空行分段，长文档按 `T` 个 payload token 切片，每个片段先加 BOS，再用
+best-fit 算法写成恰好 `T + 1` 个 token 的固定行：
 
 ```text
 token_0 | token_1 | ... | token_n
@@ -24,6 +26,10 @@ y = (t_1, t_2, \ldots, t_T).
 
 因此 batch 所需 token 数是 `batch_size * (sequence_len + 1)`。末尾不足一批的部分不会被拼成
 形状不完整的张量，而是切换到该 rank 的下一个分片。
+
+固定行让 mmap loader 仍能按偏移精确恢复，同时避免普通扁平 token 流在文档边界上制造“根据上一篇
+文档预测下一篇开头”的目标。`pretokenize_text_to_bin` 仍保留为原始连续流工具；正式 pretrain
+recipe 使用 `pretokenize_documents_to_bin`。
 
 SFT 输入是 conversation JSONL。conversation 先渲染为 token IDs 与 assistant mask，随后同样做一位
 右移；padding 使用 BOS token，padding 与非 assistant token 的训练 mask 都为 0。
@@ -57,6 +63,7 @@ i \bmod \text{world\_size} = \text{rank}.
 
 ```bash
 cargo test --features ndarray dataset::tests::test_bin_pretokenization_and_mmap_dataset -- --show-output
+cargo test --features ndarray dataset::tests::test_document_packing_starts_every_row_with_bos
 ```
 
 再验证两个 rank 只读取自己的分片、预取顺序稳定，并且保存位置后的下一批与恢复后完全一致：
@@ -74,6 +81,7 @@ cargo test --features ndarray engine::sft::tests::test_sft_packer
 ## 正确性证据与观察点
 
 - 二进制往返测试比较原 token IDs 与 mmap 读取结果，而不只检查文件存在。
+- 文档 packing 测试逐行检查 BOS；长文档会继续分片而不是静默丢弃剩余 token。
 - dataloader 测试检查 rank 对应的分片选择，并比较 uninterrupted/resumed 的下一批张量。
 - SFT packer 测试检查 `T + 1` 行形状、超长样本截断和 padding；tokenizer fixture 另行检查
   conversation assistant mask。
@@ -83,6 +91,7 @@ cargo test --features ndarray engine::sft::tests::test_sft_packer
 
 - 把 `.bin` 当成本机端序整数数组。格式固定为 little-endian，手工生成时也必须遵守。
 - 只为一行准备 `T` 个 token。目标右移需要 `T + 1`，否则最后一个目标不存在。
+- 把单换行当作稳定文档边界。Text corpus 以空行分段；需要保留段落关系时应在生成源文件时明确组织。
 - 修改 world size 后直接沿用旧 dataloader 位置。旧 `shard_idx` 可能不再属于该 rank。
 - 把 channel 容量理解为训练 batch 数。它只是生产者与消费者之间的预取深度。
 - 让 padding 或 user token 参与 SFT loss。只有右移后的 assistant mask 应产生有效 target。

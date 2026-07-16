@@ -202,9 +202,6 @@ impl SftConfig {
         validate_path(&self.dataset_path, "sft dataset_path")?;
         if self.log_interval == 0 { return Err("sft log_interval must be positive".into()); }
         self.training.validate().map_err(|error| format!("invalid sft training: {error}"))?;
-        if self.training.total_batch_size != self.training.device_batch_size {
-            return Err("SFT currently requires total_batch_size to equal device_batch_size".into());
-        }
         Ok(())
     }
 }
@@ -325,6 +322,9 @@ fn validate_path(path: &Path, name: &str) -> Result<(), String> {
         config.sft.training.sequence_length = Some(128);
         assert_eq!(config.sft.training.resolve(config.pretrain.model.sequence_len)
             .unwrap().sequence_length, 128);
+        config.sft.training.total_batch_size = config.sft.training.device_batch_size * 2;
+        assert_eq!(config.sft.training.resolve(config.pretrain.model.sequence_len)
+            .unwrap().gradient_accumulation_steps(), 2);
         config.artifacts.sft = PathBuf::new();
         assert_eq!(config.validate().unwrap_err(), "sft artifact path must not be empty");
     }

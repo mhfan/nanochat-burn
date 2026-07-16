@@ -91,8 +91,10 @@ cargo run --release --bin bench_infer -- --artifact runs/sft --batches 1,2,4
 cargo run --release --bin bench_spec -- runs/sft runs/pretrain
 ```
 
-结果写入 `runs/benchmarks/`，包含 prefill、TTFT、decode tokens/s、batch scaling、cache 字节数和设备
-allocator 峰值。NdArray 没有设备 allocator，对应字段为 `null`。
+结果写入 `runs/benchmarks/`，包含 prefill、TTFT、同步逐步测得的 median TPOT、异步流水的 decode
+tokens/s、batch scaling、cache 字节数和设备 allocator 峰值。同一 prompt 的多样本请求只运行一次
+prefill，随后复制到物理独立的 KV 页，避免重复 Transformer 计算且允许各样本安全分叉。NdArray
+没有设备 allocator，对应字段为 `null`。
 
 ## 常见错误
 

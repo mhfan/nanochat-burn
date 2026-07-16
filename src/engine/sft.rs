@@ -120,6 +120,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
         MuonAdamW::with_kind(model.config.n_layer, training_config.optimizer);
     let (batch_size, max_seq_len) =
         (training_config.device_batch_size, training_config.sequence_length);
+    let accumulation_steps = training_config.gradient_accumulation_steps();
     let bos_token = tokenizer.get_bos_token_id();
     let (warmup_steps, num_iterations, learning_rate, weight_decay) =
         (training_config.warmup_steps, training_config.num_iterations,
@@ -131,23 +132,27 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
 
     for step in 1..=num_iterations {
         let step_start = Instant::now();
-        if packer.conversations.is_empty() {
-            packer = SftPacker::new(&dataset, &tokenizer);
+        let mut accumulator = burn::optim::GradientsAccumulator::new();
+        let (mut loss_val, mut processed_tokens) = (0.0, 0usize);
+        for _ in 0..accumulation_steps {
+            if packer.conversations.is_empty() {
+                packer = SftPacker::new(&dataset, &tokenizer);
+            }
+            let (rows, mask_rows, row_lengths) =
+                packer.next_batch(batch_size, max_seq_len, bos_token);
+            let actual_batch_size = rows.len();
+            assert!(actual_batch_size > 0, "SFT dataset produced no trainable rows");
+            let (flat_inputs, flat_targets) =
+                flatten_sft_batch(&rows, &mask_rows, &row_lengths, max_seq_len);
+            let inputs = int_tensor_2d(flat_inputs, [actual_batch_size, max_seq_len], device);
+            let targets = int_tensor_2d(flat_targets, [actual_batch_size, max_seq_len], device);
+            let loss = model.compute_loss(model.forward(inputs, None), targets) /
+                accumulation_steps as f32;
+            loss_val += scalar_to_f32(loss.clone().into_scalar());
+            processed_tokens += actual_batch_size * max_seq_len;
+            let grads = burn::optim::GradientsParams::from_grads(loss.backward(), &model);
+            accumulator.accumulate(&model, grads);
         }
-        let (rows, mask_rows, row_lengths) =
-            packer.next_batch(batch_size, max_seq_len, bos_token);
-        let actual_batch_size = rows.len();
-        assert!(actual_batch_size > 0, "SFT dataset produced no trainable rows");
-
-        let (flat_inputs, flat_targets) =
-            flatten_sft_batch(&rows, &mask_rows, &row_lengths, max_seq_len);
-
-        let inputs_tensor = int_tensor_2d(flat_inputs, [actual_batch_size, max_seq_len], device);
-        let targets_tensor = int_tensor_2d(flat_targets, [actual_batch_size, max_seq_len], device);
-
-        let logits = model.forward(inputs_tensor, None);
-        let loss = model.compute_loss(logits, targets_tensor);
-        let grads = loss.backward();
 
         let schedule_step = step - 1;
         let lrm = get_lr_multiplier(schedule_step, num_iterations, warmup_steps,
@@ -157,10 +162,8 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
         let momentum = get_muon_momentum(
             schedule_step, num_iterations, training_config.warmdown_ratio);
 
-        let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
-        optimizer.step(&mut model, &grads_params, lr, step, wd, momentum);
+        optimizer.step(&mut model, &accumulator.grads(), lr, step, wd, momentum);
 
-        let loss_val = scalar_to_f32(loss.into_scalar());
         smooth_loss = if step == 1 { loss_val } else { 0.9 * smooth_loss + 0.1 * loss_val };
 
         if step % config.log_interval == 0 || step == num_iterations {
@@ -171,7 +174,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
             smoothed_loss: Some(smooth_loss), learning_rate: Some(lr), reward: None,
             elapsed_secs: start_time.elapsed().as_secs_f64(),
             bpb: None,
-            tokens_per_second: Some((actual_batch_size * max_seq_len) as f32 /
+            tokens_per_second: Some(processed_tokens as f32 /
                 step_start.elapsed().as_secs_f32().max(f32::EPSILON)),
             memory_bytes: crate::common::process_memory_bytes(),
             quality: None, kl: None, clip_fraction: None,

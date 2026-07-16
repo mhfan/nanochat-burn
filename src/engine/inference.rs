@@ -226,16 +226,19 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
             "cache sequence length differs from model capacity");
         cache.truncate(0);
 
-        let batch_idx_data: Vec<_> = std::iter::repeat_n(prompt_tokens, num_samples)
-            .flatten().map(|&t| t as i32).collect();
-        let idx = int_tensor_2d(batch_idx_data, [num_samples, prompt_len], device);
-        let logits_3d = self.model.forward_with_cache(idx, &mut cache, 0);
+        // The prompt is identical for every sample. Compute it once, then copy the populated KV
+        // pages into independent request slots so subsequent sampled tokens can diverge safely.
+        let idx = int_tensor_2d(
+            prompt_tokens.iter().map(|&token| token as i32).collect(), [1, prompt_len], device);
+        let logits_3d = self.model.forward_with_cache_rows(idx, &mut cache, &[0], &[0]);
+        for request in 1..num_samples { cache.copy_request(0, request); }
 
         // Extract the logits at the last token position
         let last_logits = logits_3d.slice([
-                0..num_samples, (prompt_len - 1)..prompt_len,
+                0..1, (prompt_len - 1)..prompt_len,
                 0..self.model.config.vocab_size,
-            ]).reshape([num_samples, self.model.config.vocab_size]);
+            ]).reshape([1, self.model.config.vocab_size])
+            .expand([num_samples, self.model.config.vocab_size]);
 
         let state = GeneratorState { cache,
             current_tokens: vec![prompt_tokens.to_vec(); num_samples],
