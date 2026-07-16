@@ -79,11 +79,7 @@ pub struct MuonAdamW<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> MuonAdamW<B> {
-    pub fn new(n_layer: usize) -> Self {
-        Self::with_kind(n_layer, OptimizerKind::MuonAdamW)
-    }
-
-    pub fn with_kind(n_layer: usize, kind: OptimizerKind) -> Self {
+    pub fn new(n_layer: usize, kind: OptimizerKind) -> Self {
         let value_embeds = (0..n_layer).filter(|&i| has_ve(i, n_layer)).map(|_| None).collect();
         let h = (0..n_layer).map(|_| BlockOptimizerState::default()).collect();
         Self {
@@ -215,7 +211,7 @@ impl<B: AutodiffBackend> MuonAdamW<B> {
             .map_err(|error| format!("failed to read optimizer state: {error}"))?;
         let tensors = SafeTensors::deserialize(&bytes)
             .map_err(|error| format!("failed to parse optimizer state: {error}"))?;
-        let mut optimizer = Self::with_kind(n_layer, load_optimizer_kind(&tensors)?);
+        let mut optimizer = Self::new(n_layer, load_optimizer_kind(&tensors)?);
 
         optimizer.wte = load_adam(&tensors, "wte", device)?;
         optimizer.lm_head = load_adam(&tensors, "lm_head", device)?;
@@ -596,7 +592,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         use crate::common::{ModelAutodiffBackend, init_device,
             tensor_data_to_f32_vec};
         let device = init_device();
-        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(1);
+        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(1, OptimizerKind::MuonAdamW);
         optimizer.wte = Some(AdamWState {
             exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
             exp_avg_sq: Tensor::from_data([[3.0, 4.0]], &device),
@@ -623,7 +619,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         assert_eq!(tensor_data_to_f32_vec(state.second_momentum_buffer.clone().into_data()),
             vec![9.0, 10.0]);
 
-        let adamw = MuonAdamW::<ModelAutodiffBackend>::with_kind(1, OptimizerKind::AdamW);
+        let adamw = MuonAdamW::<ModelAutodiffBackend>::new(1, OptimizerKind::AdamW);
         adamw.save_state(&path).unwrap();
         let adamw = MuonAdamW::<ModelAutodiffBackend>::load_state(&path, 1, &device).unwrap();
         assert_eq!(adamw.kind, OptimizerKind::AdamW);

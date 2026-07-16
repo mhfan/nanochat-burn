@@ -1,5 +1,5 @@
 
-use std::{fs, io::Write, path::Path, time::Instant};
+use std::{fs, env, io::Write, path::{Path, PathBuf}, time::Instant};
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use crate::{artifact::{MetricRecord, TrainingStage, append_metric, copy_metrics_
     common::{extract_answer, int_tensor_2d, scalar_to_f32}, dataset::SftDataset,
     engine::{TrainerState, get_muon_momentum,
         inference::{GenerationConfig, InferenceEngine, SamplingConfig, SamplingRng}},
-    experiment::{ExperimentConfig, RlAlgorithm}, optim::MuonAdamW,
+    experiment::{ExperimentConfig, RlAlgorithm}, optim::{MuonAdamW, OptimizerKind},
 };
 
 const ROLLOUTS_FILE: &str = "rollouts.jsonl";
@@ -46,8 +46,7 @@ fn append_rollouts(path: &Path, records: &[RolloutRecord]) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(test)]
-fn clipped_surrogate(ratio: f32, advantage: f32, epsilon: f32) -> f32 {
+#[cfg(test)] fn clipped_surrogate(ratio: f32, advantage: f32, epsilon: f32) -> f32 {
     (ratio * advantage).min(ratio.clamp(1.0 - epsilon, 1.0 + epsilon) * advantage)
 }
 
@@ -111,8 +110,8 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
         "RL reference model must come from an SFT artifact");
     tracing::info!("Loaded {:?} artifact from {:?}", base.manifest.stage, input);
     let reference_model = base.model.clone();
-    let resume = std::env::var_os("NANOCHAT_RESUME_ARTIFACT").map(std::path::PathBuf::from);
-    let output = std::env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(std::path::PathBuf::from)
+    let resume = env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
+    let output = env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
         .or_else(|| resume.clone()).unwrap_or_else(|| experiment.artifacts.rl.clone());
     let (mut model, tokenizer, mut optimizer, mut step, mut sampling_rng,
         elapsed_before_resume) =
@@ -144,7 +143,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => panic!("failed to reset rollout records: {error}"),
             }
-            let optimizer = MuonAdamW::new(base.model.config.n_layer);
+            let optimizer = MuonAdamW::new(base.model.config.n_layer, OptimizerKind::MuonAdamW);
             (base.model, base.tokenizer, optimizer, 0, SamplingRng::new(experiment.seed), 0.0)
         };
     let assistant_end = tokenizer.special_token_ids().assistant_end;
@@ -241,14 +240,14 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
         let num_valid_val = scalar_to_f32(valid_mask.clone().sum().into_scalar()).max(1.0);
 
         let old_log_probs = model.compute_unreduced_loss(
-            model.forward(inputs_tensor.clone(), None), targets_tensor.clone())
+            model.forward(inputs_tensor.clone()), targets_tensor.clone())
             .reshape([num_sequences, max_len - 1]) * -1.0;
         let old_values = crate::common::tensor_data_to_f32_vec(
             old_log_probs.clone().into_data());
         let old_log_probs = Tensor::from_data(old_log_probs.into_data(), device);
 
         let reference_log_probs = reference_model.compute_unreduced_loss(
-            reference_model.forward(inputs_tensor.clone(), None), targets_tensor.clone())
+            reference_model.forward(inputs_tensor.clone()), targets_tensor.clone())
             .reshape([num_sequences, max_len - 1]) * -1.0;
         let reference_values = crate::common::tensor_data_to_f32_vec(
             reference_log_probs.clone().into_data());
@@ -275,7 +274,7 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
             tracing::info!("  Running {:?} update epoch {}/{}...", config.algorithm,
                 epoch + 1, config.update_epochs);
             let current_log_probs = model.compute_unreduced_loss(
-                model.forward(inputs_tensor.clone(), None), targets_tensor.clone())
+                model.forward(inputs_tensor.clone()), targets_tensor.clone())
                 .reshape([num_sequences, max_len - 1]) * -1.0;
             let ratio = (current_log_probs.clone() - old_log_probs.clone()).exp();
             let policy_objective = match config.algorithm {
@@ -336,9 +335,10 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
             kl: Some(avg_kl), clip_fraction: Some(clip_fraction),
             response_length: Some(response_length), acceptance_rate: None,
         }).unwrap_or_else(|error| panic!("failed to append RL metric: {error}"));
-        save_rl_checkpoint(&output, &model, &tokenizer, &optimizer, step,
-            sampling_rng.state(), elapsed_before_resume + start_time.elapsed().as_secs_f64(),
-            experiment);
+        save_rl_checkpoint(&output, &model, &tokenizer, &optimizer, RlCheckpointProgress {
+            step, rng_state: sampling_rng.state(),
+            elapsed_secs: elapsed_before_resume + start_time.elapsed().as_secs_f64(),
+        }, experiment);
     }
 
     let elapsed = start_time.elapsed();
@@ -346,19 +346,24 @@ pub fn run_rl_training<B: AutodiffBackend>(device: &B::Device,
     tracing::info!("   RL Training Completed in {:.2?}!   ", elapsed);
     tracing::info!("=============================================");
 
-    save_rl_checkpoint(&output, &model, &tokenizer, &optimizer, step,
-        sampling_rng.state(), elapsed_before_resume + elapsed.as_secs_f64(), experiment);
+    save_rl_checkpoint(&output, &model, &tokenizer, &optimizer, RlCheckpointProgress {
+        step, rng_state: sampling_rng.state(),
+        elapsed_secs: elapsed_before_resume + elapsed.as_secs_f64(),
+    }, experiment);
     tracing::info!("RL artifact saved to {:?}", output);
 }
 
+#[derive(Clone, Copy)]
+struct RlCheckpointProgress { step: usize, rng_state: u64, elapsed_secs: f64 }
+
 fn save_rl_checkpoint<B: AutodiffBackend>(output: &Path, model: &crate::gpt::Gpt<B>,
-    tokenizer: &crate::tokenizer::BpeTokenizer, optimizer: &MuonAdamW<B>, step: usize,
-    rng_state: u64, elapsed_secs: f64, experiment: &ExperimentConfig) {
+    tokenizer: &crate::tokenizer::BpeTokenizer, optimizer: &MuonAdamW<B>,
+    progress: RlCheckpointProgress, experiment: &ExperimentConfig) {
     save_artifact(output, TrainingStage::ReinforcementLearning, model, tokenizer, None)
         .unwrap_or_else(|error| panic!("failed to save RL artifact: {error}"));
-    let state = TrainerState { step, smooth_train_loss: 0.0,
-        total_training_time_secs: elapsed_secs, dataloader_position: None,
-        rng_state: Some(rng_state) };
+    let state = TrainerState { step: progress.step, smooth_train_loss: 0.0,
+        total_training_time_secs: progress.elapsed_secs, dataloader_position: None,
+        rng_state: Some(progress.rng_state) };
     save_resume_state(output, optimizer, &state)
         .unwrap_or_else(|error| panic!("failed to save RL resume state: {error}"));
     set_rollouts_file(output, ROLLOUTS_FILE)

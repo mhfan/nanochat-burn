@@ -4,6 +4,7 @@ use std::{env, io::{self, Write}, time::Instant};
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
     common::{ModelBackend, init_device},
     engine::inference::{InferenceEngine, SamplingConfig},
+    experiment::ArtifactPaths,
     tokenizer::{Conversation, ConversationMessage, MessageContent},
 };
 
@@ -38,7 +39,7 @@ fn main() {
     }
 
     let device = init_device();
-    let artifact_path = inference_artifact_path();
+    let artifact_path = inference_artifact_path(&ArtifactPaths::default());
     let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     println!("Loaded {:?} artifact from {:?} (vocab {})", artifact.manifest.stage,
@@ -102,7 +103,7 @@ fn main() {
         io::stdout().flush().unwrap();
 
         let start_time = Instant::now();
-        let (mut state, mut cur_logits) = engine.prefill(&clean_prompt, 1, &device);
+        let (mut state, mut cur_logits) = engine.prefill(&clean_prompt, 1, 42, &device);
 
         let (mut first_token, mut token_count) = (true, 0);
         let mut tft = start_time.elapsed().as_secs_f64();

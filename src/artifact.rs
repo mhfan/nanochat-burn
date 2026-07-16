@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{fs, env, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,13 @@ const OPTIMIZER_FILE: &str = "optimizer.safetensors";
 const TRAINER_STATE_FILE: &str = "trainer-state.json";
 const EXPERIMENT_FILE: &str = "experiment.toml";
 const METRICS_FILE: &str = "metrics.jsonl";
+
+impl Default for ArtifactPaths {
+    fn default() -> Self {
+        Self { pretrain: PRETRAIN_ARTIFACT.into(), sft: SFT_ARTIFACT.into(),
+            rl: RL_ARTIFACT.into() }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -88,20 +95,15 @@ pub struct MetricRecord {
 fn default_metrics_file() -> String { METRICS_FILE.to_string() }
 
 pub fn path_from_env(variable: &str, default: impl Into<PathBuf>) -> PathBuf {
-    std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| default.into())
+    env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| default.into())
 }
 
-pub fn inference_artifact_path() -> PathBuf {
-    select_inference_artifact([
-        PathBuf::from(RL_ARTIFACT), PathBuf::from(SFT_ARTIFACT), PathBuf::from(PRETRAIN_ARTIFACT)])
-}
-
-pub fn configured_inference_artifact_path(paths: &ArtifactPaths) -> PathBuf {
+pub fn inference_artifact_path(paths: &ArtifactPaths) -> PathBuf {
     select_inference_artifact([paths.rl.clone(), paths.sft.clone(), paths.pretrain.clone()])
 }
 
 fn select_inference_artifact(paths: [PathBuf; 3]) -> PathBuf {
-    if let Some(path) = std::env::var_os("NANOCHAT_ARTIFACT") { return PathBuf::from(path); }
+    if let Some(path) = env::var_os("NANOCHAT_ARTIFACT") { return PathBuf::from(path); }
     let fallback = paths[0].clone();
     paths.into_iter().find(|path| path.join(MANIFEST_FILE).is_file()).unwrap_or(fallback)
 }
@@ -286,7 +288,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
         use burn::tensor::Tensor;
         use crate::{common::{ModelAutodiffBackend, ModelBackend, init_device,
                 tensor_data_to_f32_vec}, dataloader::DataLoaderPosition,
-            experiment::DEFAULT_EXPERIMENT_CONFIG, optim::AdamWState,
+            experiment::DEFAULT_EXPERIMENT_CONFIG, optim::{AdamWState, OptimizerKind},
         };
 
         let device = init_device();
@@ -296,7 +298,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
         let model = Gpt::<ModelBackend>::new(config.clone(), &device);
-        let root = std::env::temp_dir().join(format!(
+        let root = env::temp_dir().join(format!(
             "nanochat-artifact-test-{}", std::process::id()));
 
         reset_metrics(&root).unwrap();
@@ -307,7 +309,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             acceptance_rate: None,
         }).unwrap();
         save_artifact(&root, TrainingStage::Pretrain, &model, &tokenizer, None).unwrap();
-        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(config.n_layer);
+        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(
+            config.n_layer, OptimizerKind::MuonAdamW);
         optimizer.wte = Some(AdamWState {
             exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
             exp_avg_sq: Tensor::from_data([[3.0, 4.0]], &device),

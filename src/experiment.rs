@@ -295,7 +295,7 @@ fn validate_path(path: &Path, name: &str) -> Result<(), String> {
             "nanochat-experiment-test-{}.toml", std::process::id()));
         config.save(&path).unwrap();
         assert_eq!(ExperimentConfig::load(&path).unwrap(), config);
-        std::fs::remove_file(path).ok();
+        fs::remove_file(path).ok();
     }
 
     #[test] fn test_tiny_recipe_config() {

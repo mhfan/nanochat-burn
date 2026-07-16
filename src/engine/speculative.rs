@@ -74,18 +74,13 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         }
     }
 
-    /// Prefill prompt sequence for both models, initializing states
-    pub fn prefill(&self, prompt_tokens: &[usize], device: &B::Device)
-        -> (SpeculativeState<B>, Tensor<B, 2>) {
-        self.prefill_seeded(prompt_tokens, 42, device)
-    }
-
-    pub fn prefill_seeded(&self, prompt_tokens: &[usize], seed: u64, device: &B::Device)
+    /// Prefill prompt sequence for both models, initializing states.
+    pub fn prefill(&self, prompt_tokens: &[usize], seed: u64, device: &B::Device)
         -> (SpeculativeState<B>, Tensor<B, 2>) {
         let (draft_state, draft_logits) =
-            self.draft_engine.prefill_seeded(prompt_tokens, 1, seed, device);
+            self.draft_engine.prefill(prompt_tokens, 1, seed, device);
         let (target_state, target_logits) =
-            self.target_engine.prefill_seeded(prompt_tokens, 1, seed, device);
+            self.target_engine.prefill(prompt_tokens, 1, seed, device);
 
         let state = SpeculativeState {
             target_state, draft_state, draft_logits,
@@ -188,8 +183,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 target_logits_3d.clone().slice([0..1, (i - 1)..i]).reshape([1, vocab_size])
             };
 
-            let target_pred_toks = sample_next_token(
-                target_logits_for_verify, sampling, &state.target_state.current_tokens);
+            let target_pred_toks = sample_next_token(target_logits_for_verify, sampling,
+                &state.target_state.current_tokens, &mut state.target_state.rng);
             let target_pred_tok = target_pred_toks[0];
 
             if draft_tok == target_pred_tok {
@@ -219,8 +214,8 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                     let next_target_logits = target_logits_3d.clone()
                         .slice([0..1, i..(i + 1)]).reshape([1, vocab_size]);
 
-                    let last_pred_toks = sample_next_token(
-                        next_target_logits.clone(), sampling, &state.target_state.current_tokens);
+                    let last_pred_toks = sample_next_token(next_target_logits.clone(), sampling,
+                        &state.target_state.current_tokens, &mut state.target_state.rng);
                     let last_pred_tok = last_pred_toks[0];
 
                     accepted_tokens.push(last_pred_tok);
@@ -274,17 +269,12 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
         (accepted_tokens, final_next_logits, is_finished)
     }
 
-    /// High-level generation loop returning the fully generated token sequence
+    /// High-level generation loop returning the generated sequence and acceptance statistics.
     pub fn generate(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
-        device: &B::Device) -> Vec<usize> {
-        self.generate_with_stats(prompt_tokens, config, device).0
-    }
-
-    pub fn generate_with_stats(&self, prompt_tokens: &[usize], config: SpeculativeConfig,
         device: &B::Device) -> (Vec<usize>, SpeculativeStats) {
         config.generation.sampling.validate();
         let (mut state, mut cur_logits) =
-            self.prefill_seeded(prompt_tokens, config.generation.seed, device);
+            self.prefill(prompt_tokens, config.generation.seed, device);
         let max_total_len = prompt_tokens.len().saturating_add(config.generation.max_tokens)
             .min(self.target_engine.model.config.sequence_len)
             .min(self.draft_engine.model.config.sequence_len);
@@ -328,7 +318,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
         // 1. Generate with pure Target Model (deterministic greedy: temperature = 0.0)
         let (mut target_state, mut target_logits) =
-            target_engine.prefill(&prompt_tokens, 1, &device);
+            target_engine.prefill(&prompt_tokens, 1, 42, &device);
         let mut target_res = prompt_tokens.clone();
         for _ in 0..3 {
             let (toks, _, next_logits) = target_engine
@@ -347,13 +337,13 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
                 max_tokens: 3, sampling: SamplingConfig::greedy(), seed: 42,
             },
         };
-        let spec_res = spec_engine.generate(&prompt_tokens, config, &device);
+        let (spec_res, _) = spec_engine.generate(&prompt_tokens, config, &device);
 
         // 3. Verify Lossless Parity (outputs must be mathematically identical!)
         assert_eq!(spec_res, target_res,
             "Speculative decoding did not maintain lossless parity with target model!");
 
-        let (mut state, logits) = spec_engine.prefill(&prompt_tokens, &device);
+        let (mut state, logits) = spec_engine.prefill(&prompt_tokens, 42, &device);
         let sampling = SamplingConfig {
             temperature: 1.0, top_k: Some(1), repetition_penalty: 1.0,
         };

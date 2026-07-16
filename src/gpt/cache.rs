@@ -5,40 +5,46 @@ use super::repeat_kv;
 const DEFAULT_PAGE_SIZE: usize = 8;
 
 #[derive(Clone, Debug)]
-pub struct PageAllocator {
+pub(crate) struct PageAllocator {
     free: Vec<usize>,
     allocated: Vec<bool>,
 }
 
 impl PageAllocator {
-    pub fn new(num_pages: usize) -> Self {
+    fn new(num_pages: usize) -> Self {
         Self { free: (0..num_pages).rev().collect(), allocated: vec![false; num_pages] }
     }
 
-    pub fn allocate(&mut self) -> Option<usize> {
+    fn allocate(&mut self) -> Option<usize> {
         let page = self.free.pop()?;
         assert!(!self.allocated[page], "free list contains an allocated page");
         self.allocated[page] = true;
         Some(page)
     }
 
-    pub fn release(&mut self, page: usize) {
+    fn release(&mut self, page: usize) {
         assert!(self.allocated.get(page).copied().unwrap_or(false),
             "cannot release an unallocated page");
         self.allocated[page] = false;
         self.free.push(page);
     }
 
-    pub fn available(&self) -> usize { self.free.len() }
-    pub fn capacity(&self) -> usize { self.allocated.len() }
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> usize { self.free.len() }
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize { self.allocated.len() }
 }
 
-pub trait KvCacheControl {
-    fn len(&self) -> usize;
-    fn capacity(&self) -> usize;
-    fn truncate(&mut self, len: usize);
-    fn release_request(&mut self, request: usize);
-    fn block_table(&self, request: usize) -> &[Option<usize>];
+#[cfg(test)] mod tests { use super::*;
+    #[test] fn test_page_allocator_reuses_released_pages() {
+        let mut allocator = PageAllocator::new(3);
+        let (first, second) = (allocator.allocate().unwrap(), allocator.allocate().unwrap());
+        assert_eq!(allocator.available(), 1);
+        allocator.release(first);
+        assert_eq!(allocator.allocate(), Some(first));
+        allocator.release(second);
+        assert_eq!(allocator.available(), 2);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -54,7 +60,7 @@ pub struct KVCache<B: Backend> {
     pub token_history: Option<Tensor<B, 2, Int>>,
     pub len: usize,
     pub request_lens: Vec<usize>,
-    pub allocator: PageAllocator,
+    pub(crate) allocator: PageAllocator,
     pub block_tables: Vec<Vec<Option<usize>>>,
 }
 
@@ -194,7 +200,8 @@ impl<B: Backend> KVCache<B> {
         }
     }
 
-    pub fn block_table(&self, request: usize) -> &[Option<usize>] {
+    #[cfg(test)]
+    pub(super) fn block_table(&self, request: usize) -> &[Option<usize>] {
         self.block_tables.get(request).map(Vec::as_slice)
             .unwrap_or_else(|| panic!("request index exceeds cache batch size"))
     }
@@ -205,8 +212,7 @@ impl<B: Backend> KVCache<B> {
         self.validate_update(layer_idx, &v, [batch_size, seq_len, n_kv_head, head_dim]);
         assert_eq!(batch_size, self.batch_size, "cache batch size mismatch");
         for request in 0..batch_size {
-            self.update_request(layer_idx, &k, &v, request, request, step,
-                seq_len, n_kv_head, head_dim);
+            self.update_request(layer_idx, &k, &v, request, request, step);
         }
     }
 
@@ -222,8 +228,7 @@ impl<B: Backend> KVCache<B> {
 
         for (source_batch_idx, (&request, &step)) in
             requests.iter().zip(steps).enumerate() {
-            self.update_request(layer_idx, &k, &v, source_batch_idx, request, step,
-                seq_len, n_kv_head, head_dim);
+            self.update_request(layer_idx, &k, &v, source_batch_idx, request, step);
         }
     }
 
@@ -233,10 +238,9 @@ impl<B: Backend> KVCache<B> {
             "cache does not contain model layer {layer_idx}");
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn update_request(&mut self, layer_idx: usize, k: &Tensor<B, 4>, v: &Tensor<B, 4>,
-        source_batch_idx: usize, request: usize, step: usize, seq_len: usize,
-        n_kv_head: usize, head_dim: usize) {
+        source_batch_idx: usize, request: usize, step: usize) {
+        let [_, seq_len, n_kv_head, head_dim] = k.shape().dims();
         let end = step.checked_add(seq_len).expect("cache position overflow");
         assert!(end <= self.max_seq_len, "cached sequence exceeds cache capacity");
         self.request_lens[request] = self.request_lens[request].max(end);
@@ -264,7 +268,8 @@ impl<B: Backend> KVCache<B> {
     }
 
     pub(super) fn attend(&self, layer_idx: usize, q: Tensor<B, 4>, mask: Tensor<B, 4, Bool>,
-        end: usize, n_head: usize, n_kv_head: usize, head_dim: usize) -> Tensor<B, 4> {
+        end: usize, heads: (usize, usize, usize)) -> Tensor<B, 4> {
+        let (n_head, n_kv_head, head_dim) = heads;
         let [batch_size, query_len, _, _] = q.shape().dims();
         let group_size = n_head / n_kv_head;
         let num_pages = end.div_ceil(self.page_size);
@@ -313,9 +318,9 @@ impl<B: Backend> KVCache<B> {
     }
 
     pub(super) fn attend_rows(&self, layer_idx: usize, q: Tensor<B, 4>,
-        mask: Tensor<B, 4, Bool>,
-        requests: &[usize], steps: &[usize], n_head: usize, n_kv_head: usize,
-        head_dim: usize) -> Tensor<B, 4> {
+        mask: Tensor<B, 4, Bool>, requests: &[usize], steps: &[usize],
+        heads: (usize, usize, usize)) -> Tensor<B, 4> {
+        let (n_head, n_kv_head, head_dim) = heads;
         let [source_batch_size, query_len, _, _] = q.shape().dims();
         assert_eq!(requests.len(), source_batch_size, "cache request mapping size mismatch");
         assert_eq!(steps.len(), source_batch_size, "cache position mapping size mismatch");
@@ -365,15 +370,5 @@ impl<B: Backend> KVCache<B> {
                 .swap_dims(1, 2));
         }
         Tensor::cat(outputs, 0)
-    }
-}
-
-impl<B: Backend> KvCacheControl for KVCache<B> {
-    fn len(&self) -> usize { self.len }
-    fn capacity(&self) -> usize { self.max_seq_len }
-    fn truncate(&mut self, len: usize) { KVCache::truncate(self, len); }
-    fn release_request(&mut self, request: usize) { KVCache::release_request(self, request); }
-    fn block_table(&self, request: usize) -> &[Option<usize>] {
-        KVCache::block_table(self, request)
     }
 }

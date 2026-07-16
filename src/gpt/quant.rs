@@ -13,18 +13,12 @@ pub enum LinearOrQuantized<B: Backend> {
     Quantized(QuantizedLinear<B>),
 }
 
-impl<B: Backend> LinearOrQuantized<B> {
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
+impl<B: Backend> ForwardLayer<B> for LinearOrQuantized<B> {
+    fn forward_layer<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         match self {
             Self::Standard(lin) => lin.forward(input),
             Self::Quantized(quant) => quant.forward(input),
         }
-    }
-}
-
-impl<B: Backend> ForwardLayer<B> for LinearOrQuantized<B> {
-    fn forward_layer<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        self.forward(input)
     }
 }
 

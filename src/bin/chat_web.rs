@@ -9,6 +9,7 @@ use nanochat_burn::{
     common::{ModelBackend, init_device},
     engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
         scheduler::RequestId, serving::DynamicGenerationEngine},
+    experiment::ArtifactPaths,
     gpt::quant::LinearOrQuantized,
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage, MessageContent},
 };
@@ -104,19 +105,17 @@ type WebGenerationEngine =
         .and_then(|v| v.parse().ok()).unwrap_or(0);
 
     let args: Vec<_> = env::args().collect();
-    if let Some(pos) = args.iter().position(|arg| arg == "--quantize") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
-            quantize_bits = Some(val);
-        }
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize") &&
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
+        quantize_bits = Some(val);
     }
-    if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") {
-        if let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
-            quantize_block = val;
-        }
+    if let Some(pos) = args.iter().position(|arg| arg == "--quantize-block") &&
+        let Some(val) = args.get(pos + 1).and_then(|s| s.parse().ok()) {
+        quantize_block = val;
     }
 
     let device = init_device();
-    let artifact_path = inference_artifact_path();
+    let artifact_path = inference_artifact_path(&ArtifactPaths::default());
     let artifact = load_artifact(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     println!("Loaded {:?} artifact from {:?}", artifact.manifest.stage, artifact_path);
@@ -134,10 +133,11 @@ type WebGenerationEngine =
     let max_batch: usize = env::var("NANOCHAT_MAX_BATCH").ok()
         .and_then(|value| value.parse().ok()).filter(|&capacity| capacity > 0).unwrap_or(8);
     let (jobs, job_rx) = mpsc::channel(max_batch.saturating_mul(4));
-    let generation = DynamicGenerationEngine::new(engine, device.clone(), max_batch);
+    let device_name = format!("{device:?}");
+    let generation = DynamicGenerationEngine::new(engine, device, max_batch);
     tokio::spawn(generation_worker(generation, job_rx));
     let shared_state = Arc::new(AppState {
-        device: format!("{device:?}"), tokenizer, sequence_len, jobs,
+        device: device_name, tokenizer, sequence_len, jobs,
     });
 
     // 3. Build Axum Router

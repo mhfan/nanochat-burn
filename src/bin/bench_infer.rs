@@ -2,9 +2,9 @@ use std::{fs, path::PathBuf};
 
 use burn::tensor::{Int, Tensor, TensorData};
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
-    benchmark::{InferenceBenchmark, benchmark_inference},
+    benchmark::{InferenceBenchmark, InferenceBenchmarkConfig, benchmark_inference},
     common::{DeviceMemoryUsage, ModelBackend, device_memory_usage, init_device},
-    engine::inference::InferenceEngine, gpt::{ForwardLayer, Gpt},
+    engine::inference::InferenceEngine, experiment::ArtifactPaths, gpt::{ForwardLayer, Gpt},
 };
 
 struct Args {
@@ -23,7 +23,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
-    let mut parsed = Args { artifact: inference_artifact_path(),
+    let mut parsed = Args { artifact: inference_artifact_path(&ArtifactPaths::default()),
         output: PathBuf::from("runs/benchmarks/inference.json"), batches: vec![1, 2, 4],
         prompt_tokens: 32, decode_tokens: 32, warmup: 1, iterations: 3,
         quantization: None,
@@ -68,9 +68,11 @@ fn run<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
     let engine = InferenceEngine::new(model, tokenizer.clone());
     let bos = tokenizer.get_bos_token_id();
     let prompt = vec![bos; args.prompt_tokens];
-    args.batches.iter().map(|&batch| benchmark_inference(&engine, &prompt, batch,
-        args.decode_tokens, args.warmup, args.iterations, model_bytes, args.quantization,
-        quantization_error, device, memory_usage)).collect()
+    args.batches.iter().map(|&batch| benchmark_inference(&engine, &prompt,
+        InferenceBenchmarkConfig { batch_size: batch, decode_tokens: args.decode_tokens,
+            warmup: args.warmup, iterations: args.iterations, model_bytes,
+            quantization_bits: args.quantization, quantization_max_error: quantization_error,
+        }, device, memory_usage)).collect()
 }
 
 fn main() {
@@ -86,10 +88,10 @@ fn main() {
             vec![artifact.tokenizer.get_bos_token_id() as i32; args.prompt_tokens],
             [1, args.prompt_tokens]), &device);
         let baseline = nanochat_burn::common::tensor_data_to_f32_vec(
-            artifact.model.forward(prompt.clone(), None).into_data());
+            artifact.model.forward(prompt.clone()).into_data());
         let quantized = artifact.model.quantize(bits, 0);
         let quantized_logits = nanochat_burn::common::tensor_data_to_f32_vec(
-            quantized.forward(prompt, None).into_data());
+            quantized.forward(prompt).into_data());
         let error = baseline.into_iter().zip(quantized_logits)
             .map(|(left, right)| (left - right).abs()).fold(0.0, f32::max);
         run(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device,

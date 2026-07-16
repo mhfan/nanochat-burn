@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 mod cache;
 pub mod quant;
 
-pub use cache::{KVCache, KvCacheControl, PageAllocator};
+pub use cache::KVCache;
 
 use self::quant::LinearOrQuantized;
 
@@ -22,6 +22,16 @@ impl<B: Backend> ForwardLayer<B> for Linear<B> {
     fn forward_layer<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         self.forward(input)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct RotaryEmbeddings<B: Backend> {
+    cos: Tensor<B, 4>,
+    sin: Tensor<B, 4>,
+}
+
+impl<B: Backend> RotaryEmbeddings<B> {
+    pub fn new(cos: Tensor<B, 4>, sin: Tensor<B, 4>) -> Self { Self { cos, sin } }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -228,8 +238,8 @@ pub struct CausalSelfAttention<B: Backend, L = Linear<B>> {
 }
 
 impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
-    fn prepare_qkv(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>, cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
+    fn prepare_qkv(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        rope: RotaryEmbeddings<B>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
         let [b, t, channels] = x.shape().dims();
 
         let q = self.c_q.forward_layer(x.clone()).reshape([b, t, self.n_head, self.head_dim]);
@@ -247,8 +257,8 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
             v = v + gate_unsqueezed * ve_reshaped;
         }
 
-        let q = apply_rotary_emb(q, cos.clone(), sin.clone());
-        let k = apply_rotary_emb(k, cos, sin);
+        let q = apply_rotary_emb(q, rope.cos.clone(), rope.sin.clone());
+        let k = apply_rotary_emb(k, rope.cos, rope.sin);
         let (q, k) = if self.qk_norm { (norm(q) * 1.2, norm(k) * 1.2) } else { (q, k) };
 
         (q, k, v)
@@ -268,37 +278,37 @@ impl<B: Backend, L: ForwardLayer<B>> CausalSelfAttention<B, L> {
         self.c_proj.forward_layer(y)
     }
 
-    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>, cos: Tensor<B, 4>,
-        sin: Tensor<B, 4>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
+    pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
+        rope: RotaryEmbeddings<B>, cache: &mut KVCache<B>, step: usize) -> Tensor<B, 3> {
         let [_, t, _] = x.shape().dims();
-        let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
+        let (q, k, v) = self.prepare_qkv(x, ve, rope);
         cache.update(self.layer_idx, k, v, step);
         let mask = self.mask.clone().slice([0..1, 0..1, step..step + t, 0..step + t]);
         let [batch_size, _, _, _] = q.shape().dims();
         let y = cache.attend(self.layer_idx, q, mask, step + t,
-            self.n_head, self.n_kv_head, self.head_dim)
+            (self.n_head, self.n_kv_head, self.head_dim))
             .reshape([batch_size, t, self.n_head * self.head_dim]);
         self.c_proj.forward_layer(y)
     }
 
     pub fn forward_with_cache_rows(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, requests: &[usize],
-        steps: &[usize]) -> Tensor<B, 3> {
+        rope: RotaryEmbeddings<B>, cache: &mut KVCache<B>, requests: &[usize], steps: &[usize])
+        -> Tensor<B, 3> {
         let [batch_size, t, _] = x.shape().dims();
-        let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
+        let (q, k, v) = self.prepare_qkv(x, ve, rope);
         cache.update_rows(self.layer_idx, k, v, requests, steps);
         let y = cache.attend_rows(self.layer_idx, q, self.mask.clone(), requests, steps,
-            self.n_head, self.n_kv_head, self.head_dim)
+            (self.n_head, self.n_kv_head, self.head_dim))
             .reshape([batch_size, t, self.n_head * self.head_dim]);
         self.c_proj.forward_layer(y)
     }
 
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>,) -> Tensor<B, 3> {
+        rope: RotaryEmbeddings<B>) -> Tensor<B, 3> {
         let shape: [usize; 3] = x.shape().dims();
         let t = shape[1];
 
-        let (q, k, v) = self.prepare_qkv(x, ve, cos, sin);
+        let (q, k, v) = self.prepare_qkv(x, ve, rope);
         let mask = self.mask.clone().slice([0..1, 0..1, 0..t, 0..t]);
         self.compute_attention(q, k, v, mask)
     }
@@ -327,25 +337,25 @@ pub struct Block<B: Backend, L = Linear<B>> {
 
 impl<B: Backend, L: ForwardLayer<B>> Block<B, L> {
     pub fn forward_with_cache(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>,
+        rope: RotaryEmbeddings<B>, cache: &mut KVCache<B>,
         step: usize) -> Tensor<B, 3> {
         let x = x.clone() +
             self.attn.forward_with_cache(norm(x.clone()),
-                ve, cos, sin, cache, step);
+                ve, rope, cache, step);
         x.clone() + self.mlp.forward(norm(x))
     }
 
     pub fn forward(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>) -> Tensor<B, 3> {
-        let x = x.clone() + self.attn.forward(norm(x.clone()), ve, cos, sin);
+        rope: RotaryEmbeddings<B>) -> Tensor<B, 3> {
+        let x = x.clone() + self.attn.forward(norm(x.clone()), ve, rope);
         x.clone() + self.mlp.forward(norm(x))
     }
 
     pub fn forward_with_cache_rows(&self, x: Tensor<B, 3>, ve: Option<Tensor<B, 3>>,
-        cos: Tensor<B, 4>, sin: Tensor<B, 4>, cache: &mut KVCache<B>, requests: &[usize],
-        steps: &[usize]) -> Tensor<B, 3> {
+        rope: RotaryEmbeddings<B>, cache: &mut KVCache<B>, requests: &[usize], steps: &[usize])
+        -> Tensor<B, 3> {
         let x = x.clone() + self.attn.forward_with_cache_rows(
-            norm(x.clone()), ve, cos, sin, cache, requests, steps);
+            norm(x.clone()), ve, rope, cache, requests, steps);
         x.clone() + self.mlp.forward(norm(x))
     }
 }
@@ -546,6 +556,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
 
         let start_pos = if cache_opt.is_some() { step } else { 0 };
         let (cos, sin) = self.rotary_embeddings(start_pos, seq_len);
+        let rope = RotaryEmbeddings::new(cos, sin);
 
         let x_normed = norm(self.wte.forward(idx.clone()));
 
@@ -572,9 +583,9 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             } else { None };
 
             if let Some(ref mut cache) = cache_opt {
-                x = self.h[i].forward_with_cache(x, ve, cos.clone(), sin.clone(), cache, step);
+                x = self.h[i].forward_with_cache(x, ve, rope.clone(), cache, step);
             } else {
-                x = self.h[i].forward(x, ve, cos.clone(), sin.clone());
+                x = self.h[i].forward(x, ve, rope.clone());
             }
             if self.config.features.backout && i == backout_layer {
                 x_backout = Some(x.clone());
@@ -591,6 +602,8 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         (logits / LOGIT_CLIP_VAL).tanh() * LOGIT_CLIP_VAL
     }
 
+    // Burn's rank-1 Tensor::slice API intentionally uses a one-element range array.
+    #[allow(clippy::single_range_in_vec_init)]
     fn forward_inner_rows(&self, idx: Tensor<B, 2, Int>, cache: &mut KVCache<B>,
         requests: &[usize], steps: &[usize]) -> Tensor<B, 3> {
         let [batch_size, seq_len] = idx.shape().dims();
@@ -605,6 +618,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
             "input exceeds model sequence length");
 
         let (cos, sin) = self.rotary_embeddings_rows(steps, seq_len);
+        let rope = RotaryEmbeddings::new(cos, sin);
         let x_normed = norm(self.wte.forward(idx.clone()));
         let mut x = if self.config.features.smear {
             self.smear_embeddings_with_cache_rows(
@@ -626,7 +640,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
                 Some(ve_embed)
             } else { None };
             x = self.h[i].forward_with_cache_rows(
-                x, ve, cos.clone(), sin.clone(), cache, requests, steps);
+                x, ve, rope.clone(), cache, requests, steps);
             if self.config.features.backout && i == backout_layer {
                 x_backout = Some(x.clone());
             }
@@ -649,8 +663,7 @@ impl<B: Backend, L: ForwardLayer<B>> Gpt<B, L> {
         self.forward_inner_rows(idx, cache, requests, steps)
     }
 
-    pub fn forward(&self, idx: Tensor<B, 2, Int>, _targets: Option<Tensor<B, 2, Int>>)
-        -> Tensor<B, 3> {
+    pub fn forward(&self, idx: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.forward_inner(idx, None, 0)
     }
 

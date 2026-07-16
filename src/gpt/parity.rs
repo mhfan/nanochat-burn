@@ -166,9 +166,12 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         is_causal: true,
         mask: precompute_window_mask(-1, config.sequence_len, &device),
     };
+    let rope = RotaryEmbeddings::new(
+        fixture_tensor(&attention.cos, &device),
+        fixture_tensor(&attention.sin, &device),
+    );
     let actual = module.forward(fixture_tensor::<ModelBackend, 3>(&attention.input, &device),
-        Some(fixture_tensor(&attention.value_embedding, &device)),
-        fixture_tensor(&attention.cos, &device), fixture_tensor(&attention.sin, &device));
+        Some(fixture_tensor(&attention.value_embedding, &device)), rope);
     assert_fixture_close(actual, &attention.output, 2e-5, "attention");
 }
 
@@ -289,7 +292,7 @@ fn assert_linear_gradient(linear: &Linear<ModelAutodiffBackend>, gradients: &Par
     let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
     let targets = fixture_ids(&fixture.targets, &device);
-    let logits = model.forward(input, None);
+    let logits = model.forward(input);
     assert_fixture_close(logits.clone(), &fixture.logits, 5e-5, "full-model logits");
 
     let loss = model.compute_loss(logits, targets);
@@ -357,7 +360,7 @@ fn assert_logits_close(actual: Tensor<ModelAutodiffBackend, 3>,
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let model: Gpt<ModelAutodiffBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
-    let full = model.forward(input.clone(), None);
+    let full = model.forward(input.clone());
     let chunked = cached_forward(&model, input.clone(), &[2, 2], 2, &device);
     let uneven = cached_forward(&model, input.clone(), &[3, 1], 3, &device);
     let tokenwise = cached_forward(&model, input, &[1, 1, 1, 1], 1, &device);
@@ -379,10 +382,10 @@ fn quantized_logit_errors<B: Backend>(fixture: &ModelParityFixture, device: &B::
     input: Tensor<B, 2, Int>, reference: Tensor<B, 3>) -> (f32, f32) {
     let w8 = model_from_fixture(fixture, device).quantize(8, 0);
     let w8_error = crate::common::scalar_to_f32(
-        (w8.forward(input.clone(), None) - reference.clone()).abs().max().into_scalar());
+        (w8.forward(input.clone()) - reference.clone()).abs().max().into_scalar());
     let w4 = model_from_fixture(fixture, device).quantize(4, 8);
     let w4_error = crate::common::scalar_to_f32(
-        (w4.forward(input, None) - reference).abs().max().into_scalar());
+        (w4.forward(input) - reference).abs().max().into_scalar());
     (w8_error, w4_error)
 }
 
@@ -397,7 +400,7 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let input = fixture_ids(&fixture.input_ids, &device);
     let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
-    let f32_logits = model.forward(input.clone(), None);
+    let f32_logits = model.forward(input.clone());
     let f32_error = fixture_max_abs_error(f32_logits.clone(), &fixture.logits);
     let (w8_error, w4_error) =
         quantized_logit_errors(&fixture, &device, input, f32_logits);
@@ -415,7 +418,7 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
     let (fixture, device) = (model_fixture(), crate::common::init_device());
     let model: Gpt<ModelBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
-    let f16_logits = model.forward(input.clone(), None);
+    let f16_logits = model.forward(input.clone());
     let error = fixture_max_abs_error(f16_logits.clone(), &fixture.logits);
     let (w8_error, w4_error) =
         quantized_logit_errors(&fixture, &device, input, f16_logits);

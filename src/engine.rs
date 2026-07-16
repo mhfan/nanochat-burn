@@ -153,7 +153,7 @@ pub async fn evaluate_bpb<B: Backend>(model: &Gpt<B>, loader: &mut DistributedDa
         let x_tensor = int_tensor_2d(batch.x, [b, t], device);
         let y_tensor = int_tensor_2d(batch.y, [b, t], device);
 
-        let logits = model.forward(x_tensor, None);
+        let logits = model.forward(x_tensor);
         let (nats, bytes) = bpb_totals(
             model.compute_unreduced_loss(logits, y_tensor.clone()), y_tensor.reshape([-1]),
             token_bytes.clone());
@@ -195,7 +195,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         config.validate().unwrap_or_else(|message| panic!("invalid training config: {message}"));
         assert!(config.sequence_length <= model.config.sequence_len,
             "training sequence length exceeds model capacity");
-        let optimizer = MuonAdamW::with_kind(model.config.n_layer, config.optimizer);
+        let optimizer = MuonAdamW::new(model.config.n_layer, config.optimizer);
         let token_bytes = get_token_bytes(tokenizer);
         Self { model, optimizer, config, token_bytes, step: 0,
             smooth_train_loss: 0.0, total_training_time_secs: 0.0, dataloader_position: None,
@@ -250,7 +250,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             let x_tensor = int_tensor_2d(batch.x, shape, device);
             let y_tensor = int_tensor_2d(batch.y, shape, device);
 
-            let logits = self.model.forward(x_tensor, None);
+            let logits = self.model.forward(x_tensor);
             let loss = self.model.compute_loss(logits, y_tensor) / grad_accum_steps as f32;
             step_loss += scalar_to_f32(loss.clone().into_scalar());
 
@@ -291,6 +291,8 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 }
 
 #[cfg(test)] mod tests { use super::*;
+    use std::{fs, env, process};
+
     #[test] fn test_schedulers() {
         let lr_mult = get_lr_multiplier(0, 100, 10, 0.5, 0.1);
         assert!(lr_mult > 0.0 && lr_mult <= 0.1);
@@ -360,14 +362,14 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
             weight_decay: 0.1, device_batch_size: 1, sequence_length: 4,
             total_batch_size: 1,
         };
-        let root = std::env::temp_dir().join(format!(
-            "nanochat-resume-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "nanochat-resume-test-{}", process::id()));
         let data_txt = root.join("train.txt");
         let data_bin = root.join("train.bin");
         let initial = root.join("initial");
         let checkpoint = root.join("checkpoint");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&data_txt,
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&data_txt,
             "resume equivalence needs enough deterministic training tokens ".repeat(8)).unwrap();
         pretokenize_text_to_bin(&data_txt, &data_bin, &tokenizer).unwrap();
         let model = Gpt::<ModelAutodiffBackend>::new(model_config.clone(), &device);
@@ -404,9 +406,9 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
         let input = int_tensor_2d(vec![0; 4], [1, 4], &device);
         let expected = tensor_data_to_f32_vec(
-            uninterrupted.model.forward(input.clone(), None).into_data());
+            uninterrupted.model.forward(input.clone()).into_data());
         let actual =
-            tensor_data_to_f32_vec(resumed.model.forward(input, None).into_data());
+            tensor_data_to_f32_vec(resumed.model.forward(input).into_data());
         assert_eq!(resumed.step, uninterrupted.step);
         assert_eq!(resumed.dataloader_position, uninterrupted.dataloader_position);
         assert_eq!(actual.len(), expected.len());
@@ -418,7 +420,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let tolerance = if cfg!(feature = "ndarray") { 1e-6 } else { 1e-2 };
         assert!(max_error <= tolerance,
             "resumed logits max error {max_error} exceeds backend tolerance {tolerance}");
-        std::fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(root).ok();
     }
 
     #[cfg(feature = "ndarray")]
@@ -431,11 +433,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         ModelAutodiffBackend::seed(&device, 11);
         let text = "rust learns tiny repeated patterns ".repeat(32);
         let tokenizer = BpeTokenizer::train_from_iterator([text.as_str()], 280);
-        let root = std::env::temp_dir().join(format!(
-            "nanochat-overfit-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "nanochat-overfit-test-{}", process::id()));
         let (text_path, token_path) = (root.join("train.txt"), root.join("train.bin"));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&text_path, &text).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&text_path, &text).unwrap();
         pretokenize_text_to_bin(&text_path, &token_path, &tokenizer).unwrap();
 
         let model = Gpt::<ModelAutodiffBackend>::new(GptConfig {
@@ -453,7 +455,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         let mut eval_loader =
             DistributedDataLoader::new(vec![token_path.clone()], loader_config);
         let batch = eval_loader.next_batch().await.unwrap();
-        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device), None);
+        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device));
         let initial_loss = scalar_to_f32(engine.model.compute_loss(
             logits, int_tensor_2d(batch.y, [1, 4], &device)).into_scalar());
         let mut loader =
@@ -463,11 +465,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         }
         let mut eval_loader = DistributedDataLoader::new(vec![token_path], loader_config);
         let batch = eval_loader.next_batch().await.unwrap();
-        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device), None);
+        let logits = engine.model.forward(int_tensor_2d(batch.x, [1, 4], &device));
         let final_loss = scalar_to_f32(engine.model.compute_loss(
             logits, int_tensor_2d(batch.y, [1, 4], &device)).into_scalar());
         assert!(final_loss < initial_loss,
             "tiny overfit loss did not decrease: {initial_loss} -> {final_loss}");
-        std::fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(root).ok();
     }
 }

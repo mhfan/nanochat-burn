@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, channel};
 
-use crate::{tokenizer::BpeTokenizer, dataset::{PretrainingDataset, SftDataset}};
+use crate::dataset::PretrainingDataset;
 
 pub struct Batch {
     pub x: Vec<i32>,
@@ -144,59 +144,9 @@ impl DistributedDataLoader {
     pub async fn next_batch(&mut self) -> Option<Batch> { self.receiver.recv().await }
 }
 
-pub struct SftBatch {
-    pub x: Vec<i32>,
-    pub y: Vec<i32>,
-    pub mask: Vec<i32>,
-}
-
-pub struct SftDataLoader {
-    dataset: SftDataset,
-    tokenizer: BpeTokenizer,
-    batch_size: usize,
-    sequence_length: usize,
-    cur_idx: usize,
-}
-
-impl SftDataLoader {
-    pub fn new(dataset: SftDataset, tokenizer: BpeTokenizer, batch_size: usize,
-        sequence_length: usize) -> Self {
-        assert!(batch_size > 0, "batch size must be greater than zero");
-        assert!(sequence_length > 0, "sequence length must be greater than zero");
-        SftDataLoader { dataset, tokenizer, batch_size, sequence_length, cur_idx: 0 }
-    }
-
-    pub fn next_batch(&mut self) -> Option<SftBatch> {
-        if self.dataset.conversations.is_empty() { return None; }
-
-        let mut x = Vec::with_capacity(self.batch_size * self.sequence_length);
-        let mut y = Vec::with_capacity(self.batch_size * self.sequence_length);
-        let mut mask = Vec::with_capacity(self.batch_size * self.sequence_length);
-        let bos = self.tokenizer.get_bos_token_id();
-
-        for _ in 0..self.batch_size {
-            let conv = &self.dataset.conversations[self.cur_idx];
-            self.cur_idx = (self.cur_idx + 1) % self.dataset.conversations.len();
-
-            let (mut ids, mut m) =
-                self.tokenizer.render_conversation(conv, self.sequence_length + 1);
-            let pad_len = (self.sequence_length + 1).saturating_sub(ids.len());
-            if pad_len > 0 {
-                ids.extend(std::iter::repeat_n(bos, pad_len));
-                m.extend(std::iter::repeat_n(0, pad_len));
-            }
-
-            x.extend(ids[..self.sequence_length].iter().map(|&id| id as i32));
-            y.extend(ids[1..self.sequence_length + 1].iter().map(|&id| id as i32));
-            mask.extend(m[1..self.sequence_length + 1].iter().copied());
-        }
-        Some(SftBatch { x, y, mask })
-    }
-}
-
 #[cfg(test)] mod tests { use super::*;
     #[tokio::test] async fn test_distributed_dataloader_prefetch_and_sharding() {
-        use crate::dataset::pretokenize_text_to_bin;
+        use crate::{dataset::pretokenize_text_to_bin, tokenizer::BpeTokenizer};
         let temp_dir = std::env::temp_dir();
         let t1_txt = temp_dir.join("t1.txt");
         let t1_bin = temp_dir.join("t1.bin");

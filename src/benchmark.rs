@@ -30,6 +30,17 @@ pub struct InferenceBenchmark {
     pub estimated_quantized_linear_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InferenceBenchmarkConfig {
+    pub batch_size: usize,
+    pub decode_tokens: usize,
+    pub warmup: usize,
+    pub iterations: usize,
+    pub model_bytes: u64,
+    pub quantization_bits: Option<usize>,
+    pub quantization_max_error: Option<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpeculativeBenchmark {
     pub iterations: usize,
@@ -61,7 +72,7 @@ pub fn benchmark_speculative<B: Backend, LTarget: ForwardLayer<B>, LDraft: Forwa
     let mut proposed = 0;
     let mut accepted = 0;
     for expected in target_outputs {
-        let (actual, stats) = engine.generate_with_stats(prompt, SpeculativeConfig {
+        let (actual, stats) = engine.generate(prompt, SpeculativeConfig {
             generation, draft_tokens: draft_tokens_per_step,
         }, device);
         assert_eq!(actual, expected, "speculative benchmark requires lossless output parity");
@@ -80,11 +91,11 @@ pub fn benchmark_speculative<B: Backend, LTarget: ForwardLayer<B>, LDraft: Forwa
 }
 
 pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
-    engine: &InferenceEngine<B, L>, prompt: &[usize], batch_size: usize,
-    decode_tokens: usize, warmup: usize, iterations: usize, model_bytes: u64,
-    quantization_bits: Option<usize>, quantization_max_error: Option<f32>,
+    engine: &InferenceEngine<B, L>, prompt: &[usize], config: InferenceBenchmarkConfig,
     device: &B::Device, memory_usage: &impl Fn() -> Option<DeviceMemoryUsage>)
     -> InferenceBenchmark {
+    let InferenceBenchmarkConfig { batch_size, decode_tokens, warmup, iterations, model_bytes,
+        quantization_bits, quantization_max_error } = config;
     assert!(!prompt.is_empty(), "benchmark prompt must not be empty");
     assert!(batch_size > 0, "benchmark batch size must be positive");
     assert!(iterations > 0, "benchmark iterations must be positive");
@@ -93,7 +104,7 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     let history = vec![prompt.to_vec(); batch_size];
 
     for _ in 0..warmup {
-        let (_, logits) = engine.prefill(prompt, batch_size, device);
+        let (_, logits) = engine.prefill(prompt, batch_size, 42, device);
         let mut rng = SamplingRng::new(0);
         DeviceSampler.sample(logits, SamplingConfig::greedy(), &history, &mut rng);
     }
@@ -102,12 +113,12 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     let mut ttft_secs = 0.0;
     for _ in 0..iterations {
         let start = Instant::now();
-        let (_, logits) = engine.prefill(prompt, batch_size, device);
+        let (_, logits) = engine.prefill(prompt, batch_size, 42, device);
         let _ = logits.clone().into_data();
         prefill_secs += start.elapsed().as_secs_f64();
 
         let start = Instant::now();
-        let (_, logits) = engine.prefill(prompt, batch_size, device);
+        let (_, logits) = engine.prefill(prompt, batch_size, 42, device);
         let mut rng = SamplingRng::new(0);
         DeviceSampler.sample(logits, SamplingConfig::greedy(), &history, &mut rng);
         ttft_secs += start.elapsed().as_secs_f64();
@@ -116,7 +127,7 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     let start = Instant::now();
     let mut generated = 0;
     for _ in 0..iterations {
-        let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
+        let (mut state, mut logits) = engine.prefill(prompt, batch_size, 42, device);
         for _ in 0..decode_tokens {
             let (_, _, next) = engine.step_generation(
                 &mut state, logits, SamplingConfig::greedy(), device);
@@ -131,7 +142,7 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
     // step to expose user-visible inter-token latency instead of reporting host submission time.
     let mut decode_step_ms = Vec::with_capacity(iterations * decode_tokens);
     for _ in 0..iterations {
-        let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
+        let (mut state, mut logits) = engine.prefill(prompt, batch_size, 42, device);
         for _ in 0..decode_tokens {
             let start = Instant::now();
             let (_, _, next) = engine.step_generation(
@@ -147,7 +158,7 @@ pub fn benchmark_inference<B: Backend, L: ForwardLayer<B>>(
 
     // Keep allocator synchronization outside timed sections.
     let mut peak_memory = memory_usage();
-    let (mut state, mut logits) = engine.prefill(prompt, batch_size, device);
+    let (mut state, mut logits) = engine.prefill(prompt, batch_size, 42, device);
     update_peak_memory(&mut peak_memory, memory_usage());
     for _ in 0..decode_tokens {
         let (_, _, next) = engine.step_generation(

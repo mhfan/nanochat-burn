@@ -1,5 +1,5 @@
 
-use std::{path::{Path, PathBuf}, time::Instant};
+use std::{path::{Path, PathBuf}, time::Instant, fs, env};
 use burn::tensor::backend::AutodiffBackend;
 
 use crate::{artifact::{MetricRecord, TrainingStage, append_metric,
@@ -39,7 +39,7 @@ fn load_pretrain_corpus(config: &PretrainConfig) -> Result<Vec<String>, String> 
     let corpus: Vec<String> = match &config.corpus {
         PretrainCorpus::Synthetic { .. } =>
             SYNTHETIC_PRETRAIN_CORPUS.iter().map(|text| (*text).to_string()).collect(),
-        PretrainCorpus::Text { path, .. } => std::fs::read_to_string(path)
+        PretrainCorpus::Text { path, .. } => fs::read_to_string(path)
             .map_err(|error| format!("failed to read pretrain corpus {path:?}: {error}"))?
             .split("\n\n").map(str::trim).filter(|document| !document.is_empty())
             .map(str::to_string).collect(),
@@ -59,12 +59,12 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConf
     let full_text = format!("{}\n", documents.join("\n\n"));
 
     if let Some(parent) = txt_path.parent() && !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent).expect("Failed to create pretraining data directory");
+        fs::create_dir_all(parent).expect("Failed to create pretraining data directory");
     }
     if let Some(parent) = bin_path.parent() && !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent).expect("Failed to create pretraining token directory");
+        fs::create_dir_all(parent).expect("Failed to create pretraining token directory");
     }
-    std::fs::write(txt_path, &full_text).expect("Failed to write pretrain text");
+    fs::write(txt_path, &full_text).expect("Failed to write pretrain text");
     let sequence_length = config.training.sequence_length.unwrap_or(config.model.sequence_len);
     let rows = pretokenize_documents_to_bin(
         &documents, bin_path, tokenizer, sequence_length + 1)
@@ -77,8 +77,8 @@ pub fn generate_pretrain_dataset(tokenizer: &BpeTokenizer, config: &PretrainConf
 
 pub async fn run_pretraining<B: AutodiffBackend>(device: &B::Device,
     experiment: &ExperimentConfig) {
-    let resume = std::env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
-    let output = std::env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
+    let resume = env::var_os("NANOCHAT_RESUME_ARTIFACT").map(PathBuf::from);
+    let output = env::var_os("NANOCHAT_OUTPUT_ARTIFACT").map(PathBuf::from)
         .or_else(|| resume.clone()).unwrap_or_else(|| experiment.artifacts.pretrain.clone());
     run_pretraining_at::<B>(device, experiment, resume.as_deref(), &output).await;
 }
@@ -180,7 +180,7 @@ pub(crate) async fn run_pretraining_at<B: AutodiffBackend>(device: &B::Device,
 }
 
 fn checkpoint_interval(default: usize) -> usize {
-    std::env::var("NANOCHAT_CHECKPOINT_INTERVAL").map_or(default, |value| value.parse()
+    env::var("NANOCHAT_CHECKPOINT_INTERVAL").map_or(default, |value| value.parse()
         .unwrap_or_else(|_| panic!("NANOCHAT_CHECKPOINT_INTERVAL must be a non-negative integer")))
 }
 

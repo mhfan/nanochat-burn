@@ -77,7 +77,7 @@ pub struct ReferenceSampler;
 impl<B: Backend> TokenSampler<B> for ReferenceSampler {
     fn sample(&self, logits: Tensor<B, 2>, sampling: SamplingConfig,
         generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
-        sample_next_token_with_rng(logits, sampling, generated_tokens, rng)
+        sample_next_token(logits, sampling, generated_tokens, rng)
     }
 }
 
@@ -195,13 +195,8 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         }
     }
 
-    /// Run prefill phase over the prompt sequence across all batch items
-    pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize,
-        device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
-        self.prefill_seeded(prompt_tokens, num_samples, 42, device)
-    }
-
-    pub fn prefill_seeded(&self, prompt_tokens: &[usize], num_samples: usize, seed: u64,
+    /// Run prefill phase over the prompt sequence across all batch items.
+    pub fn prefill(&self, prompt_tokens: &[usize], num_samples: usize, seed: u64,
         device: &B::Device) -> (GeneratorState<B>, Tensor<B, 2>) {
         let head_dim = self.model.config.n_embd / self.model.config.n_head;
         let cache = KVCache::new_allocated(
@@ -310,7 +305,7 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
         config: GenerationConfig, device: &B::Device) -> (Vec<Vec<usize>>, Vec<Vec<u8>>) {
         config.sampling.validate();
         let (mut state, mut cur_logits) =
-            self.prefill_seeded(prompt_tokens, num_samples, config.seed, device);
+            self.prefill(prompt_tokens, num_samples, config.seed, device);
 
         let special_tokens = self.tokenizer.special_token_ids();
 
@@ -346,11 +341,6 @@ impl<B: Backend, L: ForwardLayer<B>> InferenceEngine<B, L> {
 
 /// Dynamic sample selection based on temperature, top_k, and repetition penalties
 pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
-    generated_tokens: &[Vec<usize>]) -> Vec<usize> {
-    sample_next_token_with_rng(logits, sampling, generated_tokens, &mut SamplingRng::new(42))
-}
-
-pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingConfig,
     generated_tokens: &[Vec<usize>], rng: &mut SamplingRng) -> Vec<usize> {
     sampling.validate();
     let [batch_size, vocab_size] = logits.shape().dims();
@@ -445,7 +435,7 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
         let engine = test_engine("Interactive chat agent with Tool-Use integration.", 8, &device);
 
         let prompt_tokens = vec![1, 2, 3];
-        let (state, logits) = engine.prefill(&prompt_tokens, 2, &device);
+        let (state, logits) = engine.prefill(&prompt_tokens, 2, 42, &device);
 
         assert_eq!(state.current_tokens[0], prompt_tokens);
         let dims: [usize; 2] = logits.shape().dims();
@@ -473,7 +463,7 @@ pub fn sample_next_token_with_rng<B: Backend>(logits: Tensor<B, 2>, sampling: Sa
     #[test] fn test_tool_state_queues_calculator_output() {
         let device = crate::common::init_device();
         let engine = test_engine("2 + 2", 16, &device);
-        let (mut state, _) = engine.prefill(&[1], 1, &device);
+        let (mut state, _) = engine.prefill(&[1], 1, 42, &device);
         let special = engine.tokenizer.special_token_ids();
 
         engine.record_generated_token(&mut state, 0, special.python_start);

@@ -13,7 +13,7 @@ use super::*;
     let idx = Tensor::zeros([2, 16], &device);
     let targets = Tensor::zeros([2, 16], &device);
 
-    let logits = gpt.forward(idx, None);
+    let logits = gpt.forward(idx);
     assert_eq!(logits.shape().dims(), [2, 16, 280]);
 
     let loss = gpt.compute_loss(logits, targets);
@@ -107,7 +107,7 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
         1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
 
     let full_logits = gpt.forward(
-            Int2DModelTensor::from_data([[12, 45, 67, 68, 69]], &device), None)
+            Int2DModelTensor::from_data([[12, 45, 67, 68, 69]], &device))
         .slice([0..1, 3..5, 0..gpt.config.vocab_size]);
     let prompt = Int2DModelTensor::from_data([[12, 45, 67]], &device);
     gpt.forward_with_cache(prompt.clone(), &mut chunk_cache, 0);
@@ -153,10 +153,10 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
         &mut cache, &[0, 1], &[3, 2]);
 
     let expected_first = gpt.forward(
-        Int2DModelTensor::from_data([[12, 45, 67, 68]], &device), None)
+        Int2DModelTensor::from_data([[12, 45, 67, 68]], &device))
         .slice([0..1, 3..4, 0..gpt.config.vocab_size]);
     let expected_second = gpt.forward(
-        Int2DModelTensor::from_data([[12, 45, 67]], &device), None)
+        Int2DModelTensor::from_data([[12, 45, 67]], &device))
         .slice([0..1, 2..3, 0..gpt.config.vocab_size]);
     let expected = Tensor::cat(vec![expected_first, expected_second], 0);
     let diff = crate::common::scalar_to_f32((batched - expected).abs().max().into_scalar());
@@ -175,7 +175,7 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
     assert!(matches!(gpt.h[0].attn.ve_gate.as_ref(), Some(LinearOrQuantized::Standard(_))));
     assert!(matches!(&gpt.smear_gate, LinearOrQuantized::Standard(_)));
 
-    let logits = gpt.forward(Int2DModelTensor::zeros([1, 4], &device), None);
+    let logits = gpt.forward(Int2DModelTensor::zeros([1, 4], &device));
     assert_eq!(logits.shape().dims(), [1, 4, 280]);
 }
 
@@ -241,16 +241,6 @@ type Int2DModelTensor = Tensor<ModelBackend, 2, Int>;
         assert!(max_error <= 5e-5,
             "page_size=2/4 logits differ by {max_error} at step {step}");
     }
-}
-
-#[test] fn test_page_allocator_reuses_released_pages() {
-    let mut allocator = PageAllocator::new(3);
-    let (first, second) = (allocator.allocate().unwrap(), allocator.allocate().unwrap());
-    assert_eq!(allocator.available(), 1);
-    allocator.release(first);
-    assert_eq!(allocator.allocate(), Some(first));
-    allocator.release(second);
-    assert_eq!(allocator.available(), 2);
 }
 
 #[test] fn test_copied_cache_requests_own_physical_pages() {

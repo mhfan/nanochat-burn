@@ -57,6 +57,18 @@ pub struct ExecutionResult {
     pub memory_exceeded: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionConfig {
+    pub timeout_secs: u64,
+    pub maximum_memory_bytes: Option<u64>,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self { timeout_secs: 5, maximum_memory_bytes: Some(DEFAULT_MAX_MEMORY_BYTES) }
+    }
+}
+
 impl ExecutionResult {
     fn failure(error: impl Into<String>) -> Self {
         Self { success: false, stdout: String::new(), stderr: String::new(),
@@ -138,12 +150,8 @@ fn configure_clean_environment(command: &mut Command) {
     }
 }
 
-pub fn execute_code(code: &str, timeout_secs: u64) -> ExecutionResult {
-    execute_code_with_limits(code, timeout_secs, Some(DEFAULT_MAX_MEMORY_BYTES))
-}
-
-pub fn execute_code_with_limits(code: &str, timeout_secs: u64,
-    maximum_memory_bytes: Option<u64>) -> ExecutionResult {
+pub fn execute_code(code: &str, config: ExecutionConfig) -> ExecutionResult {
+    let ExecutionConfig { timeout_secs, maximum_memory_bytes } = config;
     let tmp_dir = match TempDir::create() {
         Ok(directory) => directory,
         Err(error) => return ExecutionResult::failure(
@@ -208,7 +216,7 @@ pub fn execute_code_with_limits(code: &str, timeout_secs: u64,
 
 #[cfg(test)] mod tests { use super::*;
     #[test] fn test_sandbox_success() {
-        let result = execute_code("print('hello from sandbox')", 5);
+        let result = execute_code("print('hello from sandbox')", ExecutionConfig::default());
         assert!(result.success);
         assert_eq!(result.stdout.trim(), "hello from sandbox");
         assert!(result.error.is_none());
@@ -216,41 +224,47 @@ pub fn execute_code_with_limits(code: &str, timeout_secs: u64,
     }
 
     #[test] fn test_sandbox_timeout() {
-        let result = execute_code("import time\ntime.sleep(10)", 0);
+        let result = execute_code("import time\ntime.sleep(10)", ExecutionConfig {
+            timeout_secs: 0, ..ExecutionConfig::default()
+        });
         assert!(!result.success);
         assert!(result.timeout);
         assert!(result.error.unwrap().contains("timed out"));
     }
 
     #[test] fn test_sandbox_error_reports_exception() {
-        let result = execute_code("raise ValueError('Oops')", 5);
+        let result = execute_code("raise ValueError('Oops')", ExecutionConfig::default());
         assert!(!result.success);
         assert_eq!(result.error.as_deref(), Some("ValueError: Oops"));
     }
 
     #[test] fn test_sandbox_drains_large_output() {
-        let result = execute_code("print('x' * 200000)", 5);
+        let result = execute_code("print('x' * 200000)", ExecutionConfig::default());
         assert!(result.success);
         assert_eq!(result.stdout.trim().len(), 200000);
     }
 
     #[test] fn test_sandbox_scrubs_environment_and_stdin() {
         let result = execute_code(
-            "import os, sys\nprint(os.getenv('HOME'))\nprint(repr(sys.stdin.read()))", 5);
+            "import os, sys\nprint(os.getenv('HOME'))\nprint(repr(sys.stdin.read()))",
+            ExecutionConfig::default());
         assert!(result.success, "{}", result.stderr);
         assert_eq!(result.stdout.lines().collect::<Vec<_>>(), ["None", "''"]);
     }
 
     #[test] fn test_sandbox_disables_common_destructive_calls() {
         let result = execute_code(
-            "import os, shutil, subprocess\nprint(os.remove, shutil.rmtree, subprocess.Popen)", 5);
+            "import os, shutil, subprocess\nprint(os.remove, shutil.rmtree, subprocess.Popen)",
+            ExecutionConfig::default());
         assert!(result.success, "{}", result.stderr);
         assert_eq!(result.stdout.trim(), "None None None");
     }
 
     #[cfg(target_os = "linux")]
     #[test] fn test_sandbox_enforces_memory_limit() {
-        let result = execute_code_with_limits("bytearray(64 * 1024 * 1024)", 5, Some(32 << 20));
+        let result = execute_code("bytearray(64 * 1024 * 1024)", ExecutionConfig {
+            maximum_memory_bytes: Some(32 << 20), ..ExecutionConfig::default()
+        });
         assert!(!result.success);
         assert!(result.memory_exceeded, "{}", result.stderr);
     }

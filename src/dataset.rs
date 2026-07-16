@@ -3,7 +3,7 @@ use std::{fs::{self, File}, io::{self, BufWriter, Write}, path::{Path, PathBuf}}
 
 use memmap2::Mmap;
 
-use crate::{common::read_jsonl, tokenizer::{BpeTokenizer, Conversation, MessageContent}};
+use crate::{common::read_jsonl, tokenizer::{BpeTokenizer, Conversation}};
 
 pub struct Shard {
     pub path: PathBuf,
@@ -30,13 +30,6 @@ impl PretrainingDataset {
         Ok(Self { shards })
     }
 
-    pub fn get_token(&self, shard_idx: usize, token_offset: usize) -> u32 {
-        let shard = &self.shards[shard_idx];
-        let byte_offset = token_offset * 4;
-        let bytes = &shard.mmap[byte_offset..byte_offset + 4];
-        u32::from_le_bytes(bytes.try_into().unwrap())
-    }
-
     pub fn get_tokens(&self, shard_idx: usize, token_offset: usize, len: usize) -> Vec<u32> {
         let shard = &self.shards[shard_idx];
         let byte_start = token_offset * 4;
@@ -57,17 +50,6 @@ impl SftDataset {
         Ok(Self { conversations: read_jsonl(jsonl_path)? })
     }
 
-    pub fn get_corpus(&self) -> Vec<String> {
-        let mut corpus = Vec::new();
-        for message in self.conversations.iter().flat_map(|conv| &conv.messages) {
-            match &message.content {
-                MessageContent::Simple(text) => corpus.push(text.clone()),
-                MessageContent::Parts(parts) =>
-                    corpus.extend(parts.iter().map(|part| part.text.clone())),
-            }
-        }
-        corpus
-    }
 }
 
 pub fn pretokenize_text_to_bin<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -150,8 +132,10 @@ pub fn pretokenize_documents_to_bin<P: AsRef<Path>>(documents: &[String], bin_pa
 }
 
 #[cfg(test)] mod tests { use super::*;
+    use std::{env::temp_dir, process, slice::from_ref};
+
     #[test] fn test_bin_pretokenization_and_mmap_dataset() {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = temp_dir();
         let text_path = temp_dir.join("test_pretrain.txt");
         let bin_path = temp_dir.join("test_pretrain.bin");
 
@@ -163,7 +147,7 @@ pub fn pretokenize_documents_to_bin<P: AsRef<Path>>(documents: &[String], bin_pa
 
         pretokenize_text_to_bin(&text_path, &bin_path, &tokenizer).unwrap();
 
-        let dataset = PretrainingDataset::new(std::slice::from_ref(&bin_path)).unwrap();
+        let dataset = PretrainingDataset::new(from_ref(&bin_path)).unwrap();
         assert_eq!(dataset.shards.len(), 1);
 
         let num_tokens = dataset.shards[0].num_tokens;
@@ -179,9 +163,9 @@ pub fn pretokenize_documents_to_bin<P: AsRef<Path>>(documents: &[String], bin_pa
     }
 
     #[test] fn test_document_packing_starts_every_row_with_bos() {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = temp_dir();
         let bin_path = temp_dir.join(format!(
-            "nanochat-packed-documents-{}.bin", std::process::id()));
+            "nanochat-packed-documents-{}.bin", process::id()));
         let documents = vec![
             "alpha beta gamma delta epsilon".to_string(),
             "small document".to_string(),
@@ -193,7 +177,7 @@ pub fn pretokenize_documents_to_bin<P: AsRef<Path>>(documents: &[String], bin_pa
             &documents, &bin_path, &tokenizer, row_capacity).unwrap();
         assert!(rows > 0);
 
-        let dataset = PretrainingDataset::new(std::slice::from_ref(&bin_path)).unwrap();
+        let dataset = PretrainingDataset::new(from_ref(&bin_path)).unwrap();
         let tokens = dataset.get_tokens(0, 0, rows * row_capacity);
         let bos = tokenizer.get_bos_token_id() as u32;
         assert!(tokens.chunks_exact(row_capacity).all(|row| row[0] == bos));

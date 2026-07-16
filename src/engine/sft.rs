@@ -117,7 +117,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
     let training_config = config.training.resolve(model.config.sequence_len)
         .unwrap_or_else(|error| panic!("invalid SFT training config: {error}"));
     let mut optimizer =
-        MuonAdamW::with_kind(model.config.n_layer, training_config.optimizer);
+        MuonAdamW::new(model.config.n_layer, training_config.optimizer);
     let (batch_size, max_seq_len) =
         (training_config.device_batch_size, training_config.sequence_length);
     let accumulation_steps = training_config.gradient_accumulation_steps();
@@ -146,7 +146,7 @@ pub fn run_sft_training<B: AutodiffBackend>(device: &B::Device,
                 flatten_sft_batch(&rows, &mask_rows, &row_lengths, max_seq_len);
             let inputs = int_tensor_2d(flat_inputs, [actual_batch_size, max_seq_len], device);
             let targets = int_tensor_2d(flat_targets, [actual_batch_size, max_seq_len], device);
-            let loss = model.compute_loss(model.forward(inputs, None), targets) /
+            let loss = model.compute_loss(model.forward(inputs), targets) /
                 accumulation_steps as f32;
             loss_val += scalar_to_f32(loss.clone().into_scalar());
             processed_tokens += actual_batch_size * max_seq_len;

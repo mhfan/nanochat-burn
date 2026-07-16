@@ -106,7 +106,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
                 restored.value_embeds[0].weight.val().into_data()));
         let tokens = Tensor::<ModelBackend, 2, Int>::from_data([[1, 2, 3, 4]], &device);
         let error = crate::common::scalar_to_f32(
-            (source.forward(tokens.clone(), None) - restored.forward(tokens, None))
+            (source.forward(tokens.clone()) - restored.forward(tokens))
                 .abs().max().into_scalar());
         assert!(error <= 5e-5, "checkpoint roundtrip max logit error: {error}");
         std::fs::remove_file(path).ok();

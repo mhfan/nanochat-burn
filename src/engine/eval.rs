@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{common::{extract_answer, int_tensor_2d, read_jsonl}, gpt::Gpt,
     engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
-        sandbox::execute_code},
+        sandbox::{ExecutionConfig, execute_code}},
     experiment::{EvalConfig, EvalTaskKind},
     tokenizer::{BpeTokenizer, Conversation, ConversationMessage},
 };
@@ -60,7 +60,7 @@ pub fn evaluate_categorical<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer
         let inputs = int_tensor_2d(
             prompt_tokens.iter().map(|&token| token as i32).collect(), [1, prompt_len], device);
 
-        let (logits, vocab_size) = (model.forward(inputs, None), model.config.vocab_size);
+        let (logits, vocab_size) = (model.forward(inputs), model.config.vocab_size);
         let last_logits = logits
             .slice([0..1, (prompt_len - 1)..prompt_len, 0..vocab_size]).reshape([vocab_size]);
         let ground_truth =
@@ -122,7 +122,7 @@ pub fn evaluate_humaneval<B: Backend>(model: &Gpt<B>, tokenizer: &BpeTokenizer,
 
         if let (Some(entry_point), Some(test)) = (&item.entry_point, &item.test) {
             let runnable_code = format!("{}\n\n{}\n\ncheck({})", full_code, test, entry_point);
-            if execute_code(&runnable_code, 5).success { correct += 1; }
+            if execute_code(&runnable_code, ExecutionConfig::default()).success { correct += 1; }
         }
         total += 1;
     }
