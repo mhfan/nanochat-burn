@@ -76,14 +76,11 @@ For specialized evaluation tasks (like `spellingbee` or `humaneval`), additional
 To re-export or regenerate all training and evaluation datasets:
 
 ```bash
-# Ensure you have the required python dependencies installed:
-#uv pip install datasets tqdm fancy-regex
-
 # Use the upstream Python task implementations explicitly:
-python3 data/export_datasets.py --nanochat-root /path/to/python-nanochat
+uv run data/export_datasets.py --nanochat-root /path/to/python-nanochat
 
 # Or use the environment for repeated commands:
-NANOCHAT_ROOT=/path/to/python-nanochat python3 data/export_datasets.py
+NANOCHAT_ROOT=/path/to/python-nanochat uv run data/export_datasets.py
 ```
 This updates `sft_train.jsonl` and the benchmarks in `eval/`. For a repository-local synthetic
-dataset with no Python nanochat checkout, run `python3 data/generate_synthetic_datasets.py`.
+dataset with no Python nanochat checkout, run `uv run data/generate_synthetic_datasets.py`.
