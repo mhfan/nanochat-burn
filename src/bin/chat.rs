@@ -2,7 +2,7 @@
 use std::{env, io::{self, Write}, time::Instant};
 
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
-    common::{ModelBackend, init_device},
+    common::{InferBackend, init_device},
     engine::inference::{InferenceEngine, SamplingConfig},
     experiment::ArtifactPaths,
     tokenizer::{Conversation, ConversationMessage, MessageContent},
@@ -40,7 +40,7 @@ fn main() {
 
     let device = init_device();
     let artifact_path = inference_artifact_path(&ArtifactPaths::default());
-    let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
+    let artifact = load_artifact::<InferBackend>(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     println!("Loaded {:?} artifact from {:?} (vocab {})", artifact.manifest.stage,
         artifact_path, artifact.tokenizer.get_vocab_size());

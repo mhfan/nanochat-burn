@@ -74,8 +74,8 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
     use burn::tensor::{Int, Tensor};
 
     #[test] fn test_safetensors_roundtrip() {
-        let device = crate::common::init_device();
-        use crate::common::ModelBackend;
+        let device = Default::default();
+        use crate::common::TestBackend;
 
         let config = crate::gpt::GptConfig { sequence_len: 16, vocab_size: 32, n_layer: 2,
             n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".to_string(),
@@ -104,7 +104,7 @@ pub fn save_gpt_to_safetensors<B: Backend>(gpt: &Gpt<B>, path: &Path) -> Result<
                 source.value_embeds[0].weight.val().into_data()),
             crate::common::tensor_data_to_f32_vec(
                 restored.value_embeds[0].weight.val().into_data()));
-        let tokens = Tensor::<ModelBackend, 2, Int>::from_data([[1, 2, 3, 4]], &device);
+        let tokens = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3, 4]], &device);
         let error = crate::common::scalar_to_f32(
             (source.forward(tokens.clone()) - restored.forward(tokens))
                 .abs().max().into_scalar());

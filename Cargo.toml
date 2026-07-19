@@ -9,8 +9,9 @@ license = "MIT"
 default-run = "chat"
 
 [features]
-default = []
+default = ["wgpu"]
 ndarray = ["burn/ndarray"]
+wgpu = ["burn/wgpu", "burn/fusion", "burn/autotune", "dep:cubecl-runtime"]
 web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
 
 [[bin]]
@@ -19,11 +20,11 @@ path = "src/bin/chat_web.rs"
 required-features = ["web"]
 
 [dependencies]
-# Burn 核心、自动微分、WGPU 与参数存储
-burn = { version = "0.21", features = ["autodiff", "wgpu", "store"] }
+# Burn 核心、自动微分与参数存储；具体执行后端由 crate feature 选择
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "store"] }
 
 # 并行计算与异步运行时
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "sync", "net"] }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "net"] }
 rayon = "1.10"
 
 # 配置、实验清单与 checkpoint/优化器状态序列化
@@ -40,12 +41,16 @@ tracing = "0.1"
 memmap2 = "0.9"
 bytemuck = "1.25"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-cubecl-runtime = "0.10"
+cubecl-runtime = { version = "0.10", optional = true }
 
 # Web 服务框架（仅 chat_web 二进制需要，通过 'web' feature 按需编译）
 axum = { version = "0.8", optional = true }
 futures-core = { version = "0.3", optional = true }
 fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode", "perf"] }
+
+[dev-dependencies]
+# 单元测试与 Python parity 默认使用确定性的 F32 CPU 后端。
+burn = { version = "0.21", default-features = false, features = ["ndarray"] }
 
 [profile.release]
 opt-level = 3

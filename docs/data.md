@@ -62,20 +62,20 @@ i \bmod \text{world\_size} = \text{rank}.
 先验证文本到 mmap token 的往返和格式校验：
 
 ```bash
-cargo test --features ndarray dataset::tests::test_bin_pretokenization_and_mmap_dataset -- --show-output
-cargo test --features ndarray dataset::tests::test_document_packing_starts_every_row_with_bos
+cargo test dataset::tests::test_bin_pretokenization_and_mmap_dataset -- --show-output
+cargo test dataset::tests::test_document_packing_starts_every_row_with_bos
 ```
 
 再验证两个 rank 只读取自己的分片、预取顺序稳定，并且保存位置后的下一批与恢复后完全一致：
 
 ```bash
-cargo test --features ndarray dataloader::tests::test_distributed_dataloader_prefetch_and_sharding -- --show-output
+cargo test dataloader::tests::test_distributed_dataloader_prefetch_and_sharding -- --show-output
 ```
 
 SFT packing 的最小边界测试：
 
 ```bash
-cargo test --features ndarray engine::sft::tests::test_sft_packer
+cargo test engine::sft::tests::test_sft_packer
 ```
 
 ## 正确性证据与观察点

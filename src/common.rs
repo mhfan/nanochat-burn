@@ -1,43 +1,42 @@
 
 use std::{fs::File, io::{self, BufRead, BufReader}, path::Path};
-
-#[cfg(feature = "ndarray")] use burn::backend::ndarray::NdArray;
-#[cfg(not(feature = "ndarray"))] use burn::backend::wgpu::Wgpu;
 use burn::{prelude::ToElement, backend::autodiff::Autodiff,
     tensor::{DType, Int, Tensor, TensorData, backend::{Backend, BackendTypes}, f16},
 };
 use serde::de::DeserializeOwned;
 
-/// 定义默认的 GPU 后端与自动微分包装
-//pub type ModelBackend = Wgpu;
-#[cfg(feature = "ndarray")]
-pub type ModelBackend = NdArray<f32, i32>;
-#[cfg(not(feature = "ndarray"))]
-pub type ModelFloat = f16;
-#[cfg(not(feature = "ndarray"))]
-pub type ModelBackend = Wgpu<ModelFloat, i32>;
-pub type ModelDevice = <ModelBackend as BackendTypes>::Device;
-pub type ModelAutodiffBackend = Autodiff<ModelBackend>;
+/// Production inference and training backends. WGPU takes precedence when enabled; ndarray is
+/// the explicit CPU-only fallback.
+//#[cfg(feature = "wgpu")] pub type InferBackend = burn::backend::wgpu::Wgpu;
+#[cfg(feature = "wgpu")] pub type InferBackend = burn::backend::wgpu::Wgpu<f16, i32>;
+#[cfg(all(not(feature = "wgpu"), feature = "ndarray"))]
+pub type InferBackend = burn::backend::ndarray::NdArray<f32, i32>;
+#[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
+compile_error!("enable either the `wgpu` or `ndarray` feature");
+
+pub type ModelDevice = <InferBackend as BackendTypes>::Device;
+pub type TrainBackend = Autodiff<InferBackend>;
+
+#[cfg(test)] pub(crate) type TestBackend = burn::backend::ndarray::NdArray<f32, i32>;
+#[cfg(test)] pub(crate) type TestADBackend = Autodiff<TestBackend>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceMemoryUsage {
-    pub bytes_in_use: u64,
     pub bytes_reserved: u64,
+    pub bytes_in_use: u64,
 }
 
 /// 初始化系统计算设备：优先使用 WGPU GPU；
 /// 如果环境变量 BURN_DEVICE=cpu，则强行使用 CPU 运行以规避 GPU JIT 编译开销
 pub fn init_device() -> ModelDevice {
-    #[cfg(feature = "ndarray")] { Default::default() }
-
-    #[cfg(not(feature = "ndarray"))] {
-        let use_cpu =
-            std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu"));
-        if use_cpu { burn::backend::wgpu::WgpuDevice::Cpu } else { Default::default() }
+    #[cfg(feature = "wgpu")]
+    if std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu")) {
+        return burn::backend::wgpu::WgpuDevice::Cpu;
     }
+    Default::default()
 }
 
-#[cfg(not(feature = "ndarray"))]
+#[cfg(feature = "wgpu")]
 pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
     use cubecl_runtime::runtime::Runtime;
     let usage = burn::backend::wgpu::WgpuRuntime::client(device).memory_usage().ok()?;
@@ -46,7 +45,7 @@ pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
     })
 }
 
-#[cfg(feature = "ndarray")]
+#[cfg(all(not(feature = "wgpu"), feature = "ndarray"))]
 pub fn device_memory_usage(_device: &ModelDevice) -> Option<DeviceMemoryUsage> { None }
 
 pub fn process_memory_bytes() -> Option<u64> {
@@ -103,10 +102,10 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
 }
 
 #[cfg(test)] mod tests { use super::*;
-    #[cfg(not(feature = "ndarray"))]
+    #[cfg(feature = "wgpu")]
     #[test] fn verify_device_memory_usage() {
-        let device = init_device();
-        let tensor = Tensor::<ModelBackend, 1>::zeros([1024], &device);
+        let device = Default::default();
+        let tensor = Tensor::<InferBackend, 1>::zeros([1024], &device);
         let _ = tensor.clone().into_data();
         let usage = device_memory_usage(&device).expect("WGPU allocator memory report");
         assert!(usage.bytes_in_use > 0);
@@ -117,11 +116,11 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
         // 初始化测试日志，以便在测试失败时观察底层驱动输出
         //tracing_subscriber::fmt().with_env_filter("info").init();
 
-        let device = init_device();
+        let device = Default::default();
 
-        // 1. 创建前向张量（使用 Autodiff 包装 of Wgpu 后端）
+        // 1. 创建前向张量（使用测试后端的 Autodiff 包装）
         // 注意：Burn 中可以直接使用 Tensor::from_data 传入多维数组
-        let x: Tensor<ModelAutodiffBackend, 2> =
+        let x: Tensor<TestADBackend, 2> =
             Tensor::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
         let w = Tensor::from_data([[2.0, 0.0], [0.0, 2.0]], &device);
 

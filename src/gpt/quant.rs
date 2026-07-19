@@ -7,6 +7,26 @@ use burn::{module::{Module, Param}, nn::Linear,
 
 use super::ForwardLayer;
 
+/// Backend capability used to select Burn's native quantized tensors when available.
+pub trait QuantizationBackend: Backend {
+    const SUPPORTS_NATIVE_QUANTIZATION: bool;
+}
+
+#[cfg(feature = "wgpu")]
+impl<F, I> QuantizationBackend for burn::backend::wgpu::Wgpu<F, I>
+where
+    F: burn::backend::wgpu::FloatElement,
+    I: burn::backend::wgpu::IntElement,
+    burn::backend::wgpu::Wgpu<F, I>: Backend,
+{
+    const SUPPORTS_NATIVE_QUANTIZATION: bool = true;
+}
+
+#[cfg(any(test, feature = "ndarray"))]
+impl QuantizationBackend for burn::backend::ndarray::NdArray<f32, i32> {
+    const SUPPORTS_NATIVE_QUANTIZATION: bool = false;
+}
+
 #[derive(Module, Debug)]
 pub enum LinearOrQuantized<B: Backend> {
     Standard(Linear<B>),
@@ -113,7 +133,7 @@ impl<B: Backend> PackedWeights<B> {
 
 /// Dynamically quantize a standard floating-point Linear layer
 /// into a QuantizedLinear layer in-place
-pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: usize)
+pub fn quantize_linear<B: QuantizationBackend>(linear: Linear<B>, bits: usize, block_size: usize)
     -> QuantizedLinear<B> {
     assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
 
@@ -130,7 +150,7 @@ pub fn quantize_linear<B: Backend>(linear: Linear<B>, bits: usize, block_size: u
             "input dimension {} must be divisible by quantization block size {}", i, block_size);
     }
 
-    let weights = if native_quantization_supported(i, block_size) {
+    let weights = if native_quantization_supported::<B>(i, block_size) {
         QuantizedWeights::Native(quantize_native(weight, bits, block_size))
     } else {
         QuantizedWeights::Packed(quantize_packed(weight, bits, block_size))
@@ -188,7 +208,7 @@ fn quantize_packed<B: Backend>(weight: Tensor<B, 2>, bits: usize,
     PackedWeights { values, scales }
 }
 
-pub fn quantize_linear_or_standard<B: Backend>(linear: Linear<B>, bits: usize,
+pub fn quantize_linear_or_standard<B: QuantizationBackend>(linear: Linear<B>, bits: usize,
     block_size: usize) -> LinearOrQuantized<B> {
     let input_dim = linear.weight.val().shape().dims::<2>()[0];
     let (pack_factor, ..) = quant_layout(bits);
@@ -213,9 +233,10 @@ fn quant_layout(bits: usize) -> (usize, i32, f32) {
     }
 }
 
-fn native_quantization_supported(input_dim: usize, block_size: usize) -> bool {
+fn native_quantization_supported<B: QuantizationBackend>(input_dim: usize,
+    block_size: usize) -> bool {
     let native_block_size = if block_size == 0 { input_dim } else { block_size };
-    cfg!(not(feature = "ndarray")) && native_block_size <= u8::MAX as usize
+    B::SUPPORTS_NATIVE_QUANTIZATION && native_block_size <= u8::MAX as usize
 }
 
 fn effective_block_size(bits: usize, block_size: usize) -> usize {
@@ -224,13 +245,13 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
 #[cfg(test)] mod tests { use super::*;
     use burn::tensor::Distribution;
-    use crate::common::ModelBackend;
+    use crate::common::TestBackend;
 
     #[test] fn test_quantization_w8_rowwise() {
-        let device = crate::common::init_device();
+        let device = Default::default();
 
         // Shape [64, 128] is divisible by 4 and 8
-        let weight = Tensor::<ModelBackend, 2>::random([64, 128],
+        let weight = Tensor::<TestBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 
@@ -239,7 +260,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
         assert_eq!(q_linear.bits, 8);
         assert_eq!(q_linear.block_size, 0);
-        assert_eq!(q_linear.uses_native_weights(), cfg!(not(feature = "ndarray")));
+        assert!(!q_linear.uses_native_weights());
 
         // Dequantize and check difference
         let dequantized = q_linear.dequantize();
@@ -253,10 +274,10 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
     }
 
     #[test] fn test_quantization_w4_blockwise() {
-        let device = crate::common::init_device();
+        let device = Default::default();
 
         // Shape [64, 128]
-        let weight = Tensor::<ModelBackend, 2>::random([64, 128],
+        let weight = Tensor::<TestBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 
@@ -265,7 +286,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
         assert_eq!(q_linear.bits, 4);
         assert_eq!(q_linear.block_size, 32);
-        assert_eq!(q_linear.uses_native_weights(), cfg!(not(feature = "ndarray")));
+        assert!(!q_linear.uses_native_weights());
 
         // Dequantize and check difference
         let dequantized = q_linear.dequantize();
@@ -279,9 +300,9 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
     }
 
     #[test] fn test_quantized_linear_forward() {
-        let device = crate::common::init_device();
+        let device = Default::default();
 
-        let weight = Tensor::<ModelBackend, 2>::random([64, 128],
+        let weight = Tensor::<TestBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 0.5), &device);
         let bias = Tensor::random([128], Distribution::Normal(0.0, 0.1), &device);
         let linear = Linear {
@@ -290,7 +311,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
         };
 
         // Input shape [2, 8, 64]
-        let input = Tensor::<ModelBackend, 3>::random([2, 8, 64],
+        let input = Tensor::<TestBackend, 3>::random([2, 8, 64],
             Distribution::Normal(0.0, 1.0), &device);
         let out_std = linear.forward(input.clone());
 
@@ -304,8 +325,8 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
     }
 
     #[test] fn test_large_rowwise_quantization_uses_portable_fallback() {
-        let device = crate::common::init_device();
-        let weight = Tensor::<ModelBackend, 2>::random([256, 32],
+        let device = Default::default();
+        let weight = Tensor::<TestBackend, 2>::random([256, 32],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 

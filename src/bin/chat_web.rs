@@ -6,7 +6,7 @@ use axum::{Json, Router, http::StatusCode, routing::{get, post},
 };
 use nanochat_burn::{
     artifact::{inference_artifact_path, load_artifact},
-    common::{ModelBackend, init_device},
+    common::{InferBackend, init_device},
     engine::{inference::{GenerationConfig, InferenceEngine, SamplingConfig},
         scheduler::RequestId, serving::DynamicGenerationEngine},
     experiment::ArtifactPaths,
@@ -89,7 +89,7 @@ struct GenerationJob {
 }
 
 type WebGenerationEngine =
-    DynamicGenerationEngine<ModelBackend, LinearOrQuantized<ModelBackend>>;
+    DynamicGenerationEngine<InferBackend, LinearOrQuantized<InferBackend>>;
 
 #[tokio::main] async fn main() {
     // Initialize logging

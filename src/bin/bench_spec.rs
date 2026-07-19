@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use nanochat_burn::{artifact::load_artifact, benchmark::benchmark_speculative,
-    common::{ModelBackend, init_device}, engine::speculative::SpeculativeInferenceEngine};
+    common::{InferBackend, init_device}, engine::speculative::SpeculativeInferenceEngine};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -13,7 +13,7 @@ fn main() {
         panic!("usage: bench_spec [target-artifact] [draft-artifact] [output]");
     }
     let device = init_device();
-    let target_artifact = load_artifact::<ModelBackend>(&target, &device)
+    let target_artifact = load_artifact::<InferBackend>(&target, &device)
         .unwrap_or_else(|error| panic!("failed to load target {target:?}: {error}"));
     let draft_artifact = load_artifact(&draft, &device)
         .unwrap_or_else(|error| panic!("failed to load draft {draft:?}: {error}"));

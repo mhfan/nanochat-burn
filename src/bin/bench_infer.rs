@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use burn::tensor::{Int, Tensor, TensorData};
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
     benchmark::{InferenceBenchmark, InferenceBenchmarkConfig, benchmark_inference},
-    common::{DeviceMemoryUsage, ModelBackend, device_memory_usage, init_device},
+    common::{DeviceMemoryUsage, InferBackend, device_memory_usage, init_device},
     engine::inference::InferenceEngine, experiment::ArtifactPaths, gpt::{ForwardLayer, Gpt},
 };
 
@@ -84,7 +84,7 @@ fn main() {
         .unwrap_or_else(|error| panic!("failed to stat model: {error}")).len();
 
     let reports = if let Some(bits) = args.quantization {
-        let prompt = Tensor::<ModelBackend, 2, Int>::from_data(TensorData::new(
+        let prompt = Tensor::<InferBackend, 2, Int>::from_data(TensorData::new(
             vec![artifact.tokenizer.get_bos_token_id() as i32; args.prompt_tokens],
             [1, args.prompt_tokens]), &device);
         let baseline = nanochat_burn::common::tensor_data_to_f32_vec(

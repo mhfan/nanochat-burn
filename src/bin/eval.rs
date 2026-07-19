@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
-    common::{ModelBackend, init_device}, engine::eval::run_evaluations,
+    common::{InferBackend, init_device}, engine::eval::run_evaluations,
     experiment::{DEFAULT_EXPERIMENT_CONFIG, ExperimentConfig},
 };
 
@@ -31,7 +31,7 @@ fn main() {
         .unwrap_or_else(|error| panic!("{error}"));
     let device = init_device();
     let artifact_path = inference_artifact_path(&config.artifacts);
-    let artifact = load_artifact::<ModelBackend>(&artifact_path, &device)
+    let artifact = load_artifact::<InferBackend>(&artifact_path, &device)
         .unwrap_or_else(|error| panic!("failed to load artifact {artifact_path:?}: {error}"));
     tracing::info!("Evaluating {:?} artifact from {:?}", artifact.manifest.stage, artifact_path);
     let report = run_evaluations(&artifact.model, &artifact.tokenizer, &config.eval, &device);

@@ -66,22 +66,22 @@ target token，并 truncate/rollback cache。接受率为：
 验证同一 seed 的随机 decode 可重复，以及设备/参考 greedy sampler 一致：
 
 ```bash
-cargo test --features ndarray engine::inference::tests::test_seeded_decode_is_deterministic
-cargo test --features ndarray engine::inference::tests::test_device_and_reference_greedy_samplers_match
+cargo test engine::inference::tests::test_seeded_decode_is_deterministic
+cargo test engine::inference::tests::test_device_and_reference_greedy_samplers_match
 ```
 
 验证 full/cached forward、分页 attention 和页面复用：
 
 ```bash
-cargo test --features ndarray gpt::tests::test_cached_forward_matches_full_and_incremental_forward
-cargo test --features ndarray gpt::tests::test_paged_attention_roundtrip
-cargo test --features ndarray gpt::tests::test_page_allocator_reuses_released_pages
+cargo test gpt::tests::test_cached_forward_matches_full_and_incremental_forward
+cargo test gpt::tests::test_paged_attention_roundtrip
+cargo test gpt::tests::test_page_allocator_reuses_released_pages
 ```
 
 验证 greedy speculative 输出与 target-only 相同：
 
 ```bash
-cargo test --features ndarray engine::speculative::tests::test_speculative_decoding_lossless
+cargo test engine::speculative::tests::test_speculative_decoding_lossless
 ```
 
 对真实 artifact 测吞吐而不是从单元测试计时：

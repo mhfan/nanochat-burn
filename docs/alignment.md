@@ -71,13 +71,13 @@ RL checkpoint 保存 model、optimizer、trainer step、采样 RNG、耗时和 r
 验证组内优势均值、ratio clip 和两种 objective：
 
 ```bash
-cargo test --features ndarray engine::rl::tests::test_group_advantages_and_clipped_objective
+cargo test engine::rl::tests::test_group_advantages_and_clipped_objective
 ```
 
 验证执行器成功、异常、大输出和超时路径：
 
 ```bash
-cargo test --features ndarray engine::sandbox::tests
+cargo test engine::sandbox::tests
 ```
 
 在同一 SFT artifact 上做控制变量对照：

@@ -69,26 +69,26 @@ trainer、采样 RNG 与 rollout 日志。SFT 当前输出可供 RL 加载，但
 确认一个极小语料能被模型记住，loss 确实下降：
 
 ```bash
-cargo test --features ndarray engine::tests::test_tiny_corpus_overfit
+cargo test engine::tests::test_tiny_corpus_overfit
 ```
 
 确认中断后恢复与不中断训练的 step、数据位置和 logits 一致：
 
 ```bash
-cargo test --features ndarray engine::tests::test_training_resume_equivalence
+cargo test engine::tests::test_training_resume_equivalence
 ```
 
 一条命令运行完整离线链路：
 
 ```bash
-cargo run --features ndarray --bin train -- --recipe --config configs/tiny.toml
+cargo run --no-default-features --features ndarray --bin train -- --recipe --config configs/tiny.toml
 ```
 
 输入位于 `data/fixtures/tiny/`，产物写入 `runs/tiny/`。一层模型和少量 step 只验证链路，评测分数
 不代表能力。查看实验指标：
 
 ```bash
-cargo run --features ndarray --bin report -- runs/tiny/pretrain runs/tiny/sft
+cargo run --bin report -- runs/tiny/pretrain runs/tiny/sft
 ```
 
 ## 正确性证据与观察点

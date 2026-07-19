@@ -741,7 +741,8 @@ impl<B: Backend> Gpt<B, Linear<B>> {
         self.convert_blocks(LinearOrQuantized::Standard)
     }
 
-    pub fn quantize(self, bits: usize, block_size: usize) -> Gpt<B, LinearOrQuantized<B>> {
+    pub fn quantize(self, bits: usize, block_size: usize) -> Gpt<B, LinearOrQuantized<B>>
+        where B: quant::QuantizationBackend {
         use self::quant::quantize_linear_or_standard;
         assert!(matches!(bits, 4 | 8), "quantization bits must be 4 or 8");
         self.convert_blocks(|linear| quantize_linear_or_standard(linear, bits, block_size))

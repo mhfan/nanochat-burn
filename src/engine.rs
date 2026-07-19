@@ -331,11 +331,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
     #[test] fn test_bpb_totals_ignore_non_text_targets() {
         use burn::tensor::Tensor;
-        use crate::common::ModelBackend;
-        let device = crate::common::init_device();
-        let losses = Tensor::<ModelBackend, 1>::from_data([1.0, 2.0, 4.0, 8.0], &device);
+        use crate::common::TestBackend;
+        let device = Default::default();
+        let losses = Tensor::<TestBackend, 1>::from_data([1.0, 2.0, 4.0, 8.0], &device);
         let targets = Tensor::from_data([0, 1, -1, 9], &device);
-        let token_bytes = Tensor::<ModelBackend, 1>::from_data([1.0, 0.0, 2.0], &device)
+        let token_bytes = Tensor::<TestBackend, 1>::from_data([1.0, 0.0, 2.0], &device)
             .cast(DType::F32);
         let (nats, bytes) = bpb_totals(losses, targets, token_bytes);
         assert_eq!(scalar_to_f32(nats.into_scalar()), 1.0);
@@ -344,11 +344,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
 
     #[tokio::test] async fn test_training_resume_equivalence() {
         use crate::{artifact::{TrainingStage, load_artifact, load_resume_state, save_artifact,
-                save_resume_state}, common::{ModelAutodiffBackend, init_device,
+                save_resume_state}, common::{TestADBackend,
                 tensor_data_to_f32_vec}, dataloader::DistributedDataLoaderConfig,
             dataset::pretokenize_text_to_bin, gpt::GptConfig,
         };
-        let device = init_device();
+        let device = Default::default();
         let tokenizer = BpeTokenizer::train_from_iterator(
             ["resume equivalence needs enough deterministic training tokens"], 280);
         let model_config = GptConfig { sequence_len: 4, n_layer: 1, n_head: 2,
@@ -372,11 +372,11 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         fs::write(&data_txt,
             "resume equivalence needs enough deterministic training tokens ".repeat(8)).unwrap();
         pretokenize_text_to_bin(&data_txt, &data_bin, &tokenizer).unwrap();
-        let model = Gpt::<ModelAutodiffBackend>::new(model_config.clone(), &device);
+        let model = Gpt::<TestADBackend>::new(model_config.clone(), &device);
         save_artifact(&initial, TrainingStage::Pretrain, &model, &tokenizer,
             Some(&training_config)).unwrap();
 
-        let uninterrupted = load_artifact::<ModelAutodiffBackend>(&initial, &device).unwrap();
+        let uninterrupted = load_artifact::<TestADBackend>(&initial, &device).unwrap();
         let mut uninterrupted =
             TrainingEngine::new(uninterrupted.model, training_config.clone(), &tokenizer);
         let loader_config = DistributedDataLoaderConfig::single_process(1, 4);
@@ -384,7 +384,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         uninterrupted.train_step(&mut loader, &device).await;
         uninterrupted.train_step(&mut loader, &device).await;
 
-        let interrupted = load_artifact::<ModelAutodiffBackend>(&initial, &device).unwrap();
+        let interrupted = load_artifact::<TestADBackend>(&initial, &device).unwrap();
         let mut interrupted =
             TrainingEngine::new(interrupted.model, training_config.clone(), &tokenizer);
         let mut loader =
@@ -414,23 +414,21 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(actual.len(), expected.len());
         let max_error = actual.into_iter().zip(expected)
             .map(|(actual, expected)| (actual - expected).abs()).fold(0.0, f32::max);
-        // Parallel WGPU tests share the backend RNG and exercise non-deterministic f16 kernels,
-        // so compare resumed training within a small numerical budget. The optimizer roundtrip
-        // test separately asserts that Adam moments remain F32 across the checkpoint boundary.
-        let tolerance = if cfg!(feature = "ndarray") { 1e-6 } else { 1e-2 };
+        // Unit tests use the deterministic F32 ndarray backend. The optimizer roundtrip test
+        // separately asserts that Adam moments remain F32 across the checkpoint boundary.
+        let tolerance = 1e-6;
         assert!(max_error <= tolerance,
             "resumed logits max error {max_error} exceeds backend tolerance {tolerance}");
         fs::remove_dir_all(root).ok();
     }
 
-    #[cfg(feature = "ndarray")]
     #[tokio::test] async fn test_tiny_corpus_overfit() {
-        use crate::{common::{ModelAutodiffBackend, init_device},
+        use crate::{common::TestADBackend,
             dataloader::DistributedDataLoaderConfig, dataset::pretokenize_text_to_bin,
             gpt::{GptConfig, ModelFeatures},
         };
-        let device = init_device();
-        ModelAutodiffBackend::seed(&device, 11);
+        let device = Default::default();
+        TestADBackend::seed(&device, 11);
         let text = "rust learns tiny repeated patterns ".repeat(32);
         let tokenizer = BpeTokenizer::train_from_iterator([text.as_str()], 280);
         let root = env::temp_dir().join(format!(
@@ -440,7 +438,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         fs::write(&text_path, &text).unwrap();
         pretokenize_text_to_bin(&text_path, &token_path, &tokenizer).unwrap();
 
-        let model = Gpt::<ModelAutodiffBackend>::new(GptConfig {
+        let model = Gpt::<TestADBackend>::new(GptConfig {
             sequence_len: 4, vocab_size: tokenizer.get_vocab_size(), n_layer: 1,
             n_head: 2, n_kv_head: 1, n_embd: 16, window_pattern: "L".into(),
             features: ModelFeatures::default(), quantization: None,

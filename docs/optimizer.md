@@ -68,19 +68,19 @@ optimizer state 包含每个参数的 momentum/二阶统计和 optimizer kind，
 验证矩阵正交化的形状和有限值：
 
 ```bash
-cargo test --features ndarray optim::tests::test_muon_orthogonalization
+cargo test optim::tests::test_muon_orthogonalization
 ```
 
 验证 Rust 与 Python 的 AdamW、宽矩阵 Muon 和高矩阵 Muon 单步结果：
 
 ```bash
-cargo test --features ndarray optim::parity -- --show-output
+cargo test optim::parity -- --show-output
 ```
 
 验证 safetensors 状态往返：
 
 ```bash
-cargo test --features ndarray optim::tests::test_optimizer_state_roundtrip
+cargo test optim::tests::test_optimizer_state_roundtrip
 ```
 
 对照实验应复制同一 TOML，只改变：

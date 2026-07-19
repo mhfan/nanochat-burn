@@ -419,10 +419,12 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 }
 
 #[cfg(test)] mod tests { use super::*;
-    use crate::{common::{ModelBackend, ModelDevice}, gpt::GptConfig};
+    use crate::{common::TestBackend, gpt::GptConfig};
 
-    fn test_engine(corpus: &str, sequence_len: usize, device: &ModelDevice)
-        -> InferenceEngine<ModelBackend> {
+    type TestDevice = <TestBackend as burn::tensor::backend::BackendTypes>::Device;
+
+    fn test_engine(corpus: &str, sequence_len: usize, device: &TestDevice)
+        -> InferenceEngine<TestBackend> {
         let tokenizer = BpeTokenizer::train_from_iterator([corpus], 280);
         let config = GptConfig { sequence_len, n_layer: 1, n_head: 2, n_kv_head: 1,
             n_embd: 16, quantization: None, window_pattern: "L".into(),
@@ -431,7 +433,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_inference_prefill() {
-        let device = crate::common::init_device();
+        let device = Default::default();
         let engine = test_engine("Interactive chat agent with Tool-Use integration.", 8, &device);
 
         let prompt_tokens = vec![1, 2, 3];
@@ -443,7 +445,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_inference_step_generation() {
-        let device = crate::common::init_device();
+        let device = Default::default();
         let engine = test_engine("Interactive chat agent with Tool-Use integration.", 16, &device);
 
         let prompt_tokens = vec![1, 2, 3];
@@ -461,7 +463,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_tool_state_queues_calculator_output() {
-        let device = crate::common::init_device();
+        let device = Default::default();
         let engine = test_engine("2 + 2", 16, &device);
         let (mut state, _) = engine.prefill(&[1], 1, 42, &device);
         let special = engine.tokenizer.special_token_ids();
@@ -477,7 +479,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_seeded_decode_is_deterministic() {
-        let device = crate::common::init_device();
+        let device = Default::default();
         let engine = test_engine("seeded stochastic decoding must resume exactly", 16, &device);
         let generation = GenerationConfig { max_tokens: 4, seed: 7,
             sampling: SamplingConfig {
@@ -497,8 +499,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_device_and_reference_greedy_samplers_match() {
-        let device = crate::common::init_device();
-        let logits = Tensor::<crate::common::ModelBackend, 2>::from_data(
+        let device = Default::default();
+        let logits = Tensor::<crate::common::TestBackend, 2>::from_data(
             [[-1.0, 3.0, 2.0], [4.0, 4.0, 1.0]], &device);
         let history = vec![vec![], vec![]];
         let mut reference_rng = SamplingRng::new(1);
@@ -511,8 +513,8 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
     }
 
     #[test] fn test_device_sampler_applies_repetition_penalty() {
-        let device = crate::common::init_device();
-        let logits = Tensor::<crate::common::ModelBackend, 2>::from_data(
+        let device = Default::default();
+        let logits = Tensor::<crate::common::TestBackend, 2>::from_data(
             [[3.0, 2.0, 1.0]], &device);
         let history = vec![vec![0, 0]];
         let sampling = SamplingConfig {

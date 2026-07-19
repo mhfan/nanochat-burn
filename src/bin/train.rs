@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use nanochat_burn::{common::{ModelAutodiffBackend, init_device},
+use nanochat_burn::{common::{TrainBackend, init_device},
     engine::{pretrain::run_pretraining, recipe::run_recipe, rl::run_rl_training,
         sft::run_sft_training},
     experiment::{DEFAULT_EXPERIMENT_CONFIG, ExperimentConfig, RlAlgorithm},
@@ -87,19 +87,19 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_config: Option<PathBuf
     match args.mode {
         TrainingMode::Pretrain => {
             tracing::info!("Starting Foundational Pretraining...");
-            run_pretraining::<ModelAutodiffBackend>(&device, &config).await;
+            run_pretraining::<TrainBackend>(&device, &config).await;
         }
         TrainingMode::Sft => {
             tracing::info!("Starting Supervised Fine-Tuning (SFT)...");
-            run_sft_training::<ModelAutodiffBackend>(&device, &config);
+            run_sft_training::<TrainBackend>(&device, &config);
         }
         TrainingMode::Rl => {
             tracing::info!("Starting Reinforcement Learning (RL)...");
-            run_rl_training::<ModelAutodiffBackend>(&device, &config);
+            run_rl_training::<TrainBackend>(&device, &config);
         }
         TrainingMode::Recipe => {
             tracing::info!("Starting end-to-end training recipe...");
-            run_recipe::<ModelAutodiffBackend>(&device, &config).await;
+            run_recipe::<TrainBackend>(&device, &config).await;
         }
     }
 }

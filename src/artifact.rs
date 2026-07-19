@@ -286,18 +286,18 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
 #[cfg(test)] mod tests { use super::*;
     #[test] fn test_artifact_roundtrip() {
         use burn::tensor::Tensor;
-        use crate::{common::{ModelAutodiffBackend, ModelBackend, init_device,
+        use crate::{common::{TestADBackend, TestBackend,
                 tensor_data_to_f32_vec}, dataloader::DataLoaderPosition,
             experiment::DEFAULT_EXPERIMENT_CONFIG, optim::{AdamWState, OptimizerKind},
         };
 
-        let device = init_device();
+        let device = Default::default();
         let tokenizer = BpeTokenizer::train_from_iterator(["artifact roundtrip"], 280);
         let config = GptConfig { sequence_len: 8, vocab_size: tokenizer.get_vocab_size(),
             n_layer: 1, n_head: 2, n_kv_head: 1, n_embd: 16,
             window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
-        let model = Gpt::<ModelBackend>::new(config.clone(), &device);
+        let model = Gpt::<TestBackend>::new(config.clone(), &device);
         let root = env::temp_dir().join(format!(
             "nanochat-artifact-test-{}", std::process::id()));
 
@@ -309,7 +309,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             acceptance_rate: None,
         }).unwrap();
         save_artifact(&root, TrainingStage::Pretrain, &model, &tokenizer, None).unwrap();
-        let mut optimizer = MuonAdamW::<ModelAutodiffBackend>::new(
+        let mut optimizer = MuonAdamW::<TestADBackend>::new(
             config.n_layer, OptimizerKind::MuonAdamW);
         optimizer.wte = Some(AdamWState {
             exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
@@ -332,9 +332,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {
             response_length: None, acceptance_rate: None,
         }).unwrap();
         copy_metrics_through(&root, &root, trainer.step).unwrap();
-        let loaded = load_artifact::<ModelBackend>(&root, &device).unwrap();
+        let loaded = load_artifact::<TestBackend>(&root, &device).unwrap();
         let (optimizer, restored_trainer) =
-            load_resume_state::<ModelAutodiffBackend>(&root, config.n_layer, &device).unwrap();
+            load_resume_state::<TestADBackend>(&root, config.n_layer, &device).unwrap();
         let restored_experiment = load_experiment_config(&root).unwrap();
 
         assert_eq!(loaded.manifest.stage, TrainingStage::Pretrain);

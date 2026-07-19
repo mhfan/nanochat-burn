@@ -2,7 +2,7 @@ use std::{fs, hint::black_box, path::PathBuf, time::Instant};
 
 use burn::tensor::{Bool, Distribution, Element, Shape, Tensor, TensorData, activation,
     backend::Backend};
-use nanochat_burn::{common::{ModelBackend, init_device, scalar_to_f32},
+use nanochat_burn::{common::{InferBackend, init_device, scalar_to_f32},
     gpt::{apply_rotary_emb, rms_norm, scaled_dot_product_attention_burn,
         scaled_dot_product_attention_reference},
 };
@@ -164,7 +164,7 @@ fn benchmark<B: Backend>(args: &Args, device: &B::Device) -> OperatorBenchmark {
 fn main() {
     let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|error| panic!("{error}"));
     let device = init_device();
-    let report = benchmark::<ModelBackend>(&args, &device);
+    let report = benchmark::<InferBackend>(&args, &device);
     if let Some(parent) = args.output.parent() && !parent.as_os_str().is_empty() {
         fs::create_dir_all(parent).unwrap();
     }

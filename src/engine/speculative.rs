@@ -296,7 +296,7 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
 
 #[cfg(test)] mod tests { use super::*;
     #[test] fn test_speculative_decoding_lossless() {
-        let device = crate::common::init_device();
+        let device = Default::default();
         let corpus =
             vec!["Rust is extremely elegant, ultra-fast, and lossless speculative decoding works!"];
         let tokenizer = BpeTokenizer::train_from_iterator(corpus, 280);
@@ -306,9 +306,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
 
-        use crate::common::ModelBackend;
-        let target_model: Gpt<ModelBackend> = Gpt::new(config.clone(), &device);
-        let draft_model: Gpt<ModelBackend> = Gpt::new(config, &device);
+        use crate::common::TestBackend;
+        let target_model: Gpt<TestBackend> = Gpt::new(config.clone(), &device);
+        let draft_model: Gpt<TestBackend> = Gpt::new(config, &device);
 
         let spec_engine = SpeculativeInferenceEngine::new(target_model.clone(),
             draft_model.clone(), tokenizer.clone());

@@ -87,19 +87,19 @@ g=\frac{n_{head}}{n_{kv\_head}}.
 观察只切换 ReLU² 是否改变 MLP 输出：
 
 ```bash
-cargo test --features ndarray gpt::tests::test_relu_squared_ablation_changes_mlp_output
+cargo test gpt::tests::test_relu_squared_ablation_changes_mlp_output
 ```
 
 验证固定 Python fixture 的模块、logits、loss 和梯度：
 
 ```bash
-cargo test --features ndarray gpt::parity -- --show-output
+cargo test gpt::parity -- --show-output
 ```
 
 验证 full forward、分块 cache 与逐 token decode：
 
 ```bash
-cargo test --features ndarray gpt::tests::test_cached_forward_matches_full_and_incremental_forward
+cargo test gpt::tests::test_cached_forward_matches_full_and_incremental_forward
 ```
 
 真实训练消融可复制 `configs/mini.toml`，一次只修改

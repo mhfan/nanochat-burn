@@ -69,7 +69,7 @@ user/assistant 交替；multipart content 只允许出现在 assistant，其中 
 运行可移植示例：
 
 ```bash
-cargo run --features ndarray --example tokenizer
+cargo run --example tokenizer
 ```
 
 示例训练一个 tiny tokenizer，然后验证三个不变量：普通文本 encode/decode roundtrip、conversation
@@ -79,7 +79,7 @@ token 数以及被监督的 target 数。
 运行 Rust/Python fixture parity：
 
 ```bash
-cargo test --features ndarray tokenizer::tests::test_python_tokenizer -- --show-output
+cargo test tokenizer::tests::test_python_tokenizer -- --show-output
 ```
 
 它验证固定语料的 merge table、普通编码、conversation rendering、截断和 completion prompt 与
