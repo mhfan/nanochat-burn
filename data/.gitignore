@@ -2,5 +2,5 @@
 *.jsonl
 # Keep deterministic, repository-owned smoke-test fixtures under version control.
 !fixtures/tiny/*.jsonl
-eval/
 downloads/
+eval/

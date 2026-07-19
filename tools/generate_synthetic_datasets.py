@@ -2,8 +2,9 @@ import os
 import json
 import random
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-os.makedirs(os.path.join(script_dir, "eval"), exist_ok=True)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+os.makedirs(os.path.join(DATA_DIR, "eval"), exist_ok=True)
 
 WORDS = ["strawberry", "apple", "banana", "programming", "rust", "framework", "intelligence", "computer", "system", "hardware"]
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -192,7 +193,7 @@ def main():
     
     random.Random(42).shuffle(sft_train)
     
-    sft_path = os.path.join(script_dir, "sft_train.jsonl")
+    sft_path = os.path.join(DATA_DIR, "sft_train.jsonl")
     with open(sft_path, "w", encoding="utf-8") as f:
         for conv in sft_train:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
@@ -209,7 +210,7 @@ def main():
     }
     
     for name, data in evals.items():
-        eval_path = os.path.join(script_dir, f"eval/{name}.jsonl")
+        eval_path = os.path.join(DATA_DIR, f"eval/{name}.jsonl")
         with open(eval_path, "w", encoding="utf-8") as f:
             for conv in data:
                 f.write(json.dumps(conv, ensure_ascii=False) + "\n")

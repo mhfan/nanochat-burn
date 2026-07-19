@@ -12,8 +12,9 @@ import csv
 import random
 import urllib.request
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(script_dir)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 
 # Standard BPE special tokens and letters
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
@@ -31,11 +32,11 @@ USER_MSG_TEMPLATES = [
 ]
 
 def ensure_dirs():
-    os.makedirs(os.path.join(script_dir, "eval"), exist_ok=True)
-    os.makedirs(os.path.join(PROJECT_ROOT, ".cache/downloads"), exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR, "eval"), exist_ok=True)
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def download_file(url, local_filename):
-    local_path = os.path.join(PROJECT_ROOT, ".cache/downloads", local_filename)
+    local_path = os.path.join(DOWNLOAD_DIR, local_filename)
     if os.path.exists(local_path):
         return local_path
     print(f"Downloading {url} -> {local_path}...")
@@ -255,7 +256,7 @@ def export_datasets():
                         "letters": letters
                     })
         output_name = "arc_easy" if arc_set == "ARC-Easy" else "arc_challenge"
-        with open(os.path.join(script_dir, f"eval/{output_name}.jsonl"), "w", encoding="utf-8") as out:
+        with open(os.path.join(DATA_DIR, f"eval/{output_name}.jsonl"), "w", encoding="utf-8") as out:
             for conv in arc_convs[:300]:
                 out.write(json.dumps(conv, ensure_ascii=False) + "\n")
         print(f"Exported {output_name} evaluation dataset.")
@@ -291,26 +292,26 @@ def export_datasets():
     rng.shuffle(sft_train_tasks)
     
     # Write SFT Train
-    sft_path = os.path.join(script_dir, "sft_train.jsonl")
+    sft_path = os.path.join(DATA_DIR, "sft_train.jsonl")
     with open(sft_path, "w", encoding="utf-8") as f:
         for conv in sft_train_tasks:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
     print(f"Exported SFT training mixture to {sft_path} ({len(sft_train_tasks)} rows).")
 
     # 10. Write Evaluation Datasets
-    with open(os.path.join(script_dir, "eval/mmlu.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "eval/mmlu.jsonl"), "w", encoding="utf-8") as f:
         for conv in mmlu_test_convs[:300]:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
             
-    with open(os.path.join(script_dir, "eval/gsm8k.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "eval/gsm8k.jsonl"), "w", encoding="utf-8") as f:
         for conv in gsm_test_convs[:200]:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
             
-    with open(os.path.join(script_dir, "eval/spellingbee.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "eval/spellingbee.jsonl"), "w", encoding="utf-8") as f:
         for conv in sb_test_convs:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
             
-    with open(os.path.join(script_dir, "eval/humaneval.jsonl"), "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "eval/humaneval.jsonl"), "w", encoding="utf-8") as f:
         for conv in he_convs:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
             
