@@ -573,8 +573,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
             .into_iter().all(f32::is_finite));
     }
 
-    #[cfg(feature = "wgpu")]
-    #[test] fn test_adamw_uses_f32_state_for_f16_parameters() {
+    #[cfg(feature = "wgpu")] #[test] fn test_adamw_uses_f32_state_for_f16_parameters() {
         use crate::common::WgpuBackend;
         let device = Default::default();
         let parameter = Tensor::<WgpuBackend, 1>::from_data([1.0, -2.0], &device);

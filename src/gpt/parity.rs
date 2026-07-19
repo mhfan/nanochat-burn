@@ -3,8 +3,7 @@ use burn::tensor::backend::AutodiffBackend;
 use std::collections::HashMap;
 
 use crate::common::{InferBackend, ModelDevice, TrainBackend};
-#[cfg(feature = "wgpu")]
-use crate::common::WgpuBackend;
+#[cfg(feature = "wgpu")] use crate::common::WgpuBackend;
 
 type ParityGradients = <TrainBackend as AutodiffBackend>::Gradients;
 
@@ -382,16 +381,15 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
     let (w8_error, w4_error) =
         quantized_logit_errors(&fixture, &device, input, f32_logits);
 
-    assert_error_budget("NdArray f32", "Python f32", f32_error,
+    assert_error_budget("Flex f32", "Python f32", f32_error,
         F32_LOGIT_MAX_ABS_ERROR);
-    assert_error_budget("NdArray portable W8", "NdArray f32", w8_error,
+    assert_error_budget("Flex portable W8", "Flex f32", w8_error,
         W8_LOGIT_MAX_ABS_ERROR);
-    assert_error_budget("NdArray portable W4 (block 8)", "NdArray f32", w4_error,
+    assert_error_budget("Flex portable W4 (block 8)", "Flex f32", w4_error,
         W4_LOGIT_MAX_ABS_ERROR);
 }
 
-#[cfg(feature = "wgpu")]
-#[test] fn test_f16_w8_w4_logit_error_budgets() {
+#[cfg(feature = "wgpu")] #[test] fn test_f16_w8_w4_logit_error_budgets() {
     let (fixture, device) = (model_fixture(), Default::default());
     let model: Gpt<WgpuBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);

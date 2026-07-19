@@ -9,8 +9,8 @@ license = "MIT"
 default-run = "chat"
 
 [features]
-default = ["ndarray"]
-ndarray = ["burn/ndarray"]
+default = ["flex"]
+flex = ["burn/flex"]
 wgpu = ["burn/wgpu", "burn/fusion", "burn/autotune", "dep:cubecl-runtime"]
 web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
 

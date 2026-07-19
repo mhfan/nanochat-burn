@@ -14,16 +14,14 @@ pub trait QuantizationBackend: Backend {
 
 #[cfg(feature = "wgpu")]
 impl<F, I> QuantizationBackend for burn::backend::wgpu::Wgpu<F, I>
-where
-    F: burn::backend::wgpu::FloatElement,
-    I: burn::backend::wgpu::IntElement,
-    burn::backend::wgpu::Wgpu<F, I>: Backend,
-{
+    where F: burn::backend::wgpu::FloatElement,
+          I: burn::backend::wgpu::IntElement,
+             burn::backend::wgpu::Wgpu<F, I>: Backend, {
     const SUPPORTS_NATIVE_QUANTIZATION: bool = true;
 }
 
-#[cfg(feature = "ndarray")]
-impl QuantizationBackend for burn::backend::ndarray::NdArray<f32, i32> {
+#[cfg(feature = "flex")]
+impl QuantizationBackend for burn::backend::Flex {
     const SUPPORTS_NATIVE_QUANTIZATION: bool = false;
 }
 

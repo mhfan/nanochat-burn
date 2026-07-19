@@ -5,16 +5,16 @@ use burn::{prelude::ToElement, backend::autodiff::Autodiff,
 };
 use serde::de::DeserializeOwned;
 
-/// Selected inference and training backends. NdArray is the portable default; WGPU is selected
+/// Selected inference and training backends. Flex is the portable default; WGPU is selected
 /// explicitly with `--no-default-features --features wgpu`.
 #[cfg(feature = "wgpu")]
 pub type WgpuBackend = burn::backend::wgpu::Wgpu<f16, i32>;
-#[cfg(feature = "ndarray")]
-pub type InferBackend = burn::backend::ndarray::NdArray<f32, i32>;
-#[cfg(all(not(feature = "ndarray"), feature = "wgpu"))]
+#[cfg(feature = "flex")]
+pub type InferBackend = burn::backend::Flex;
+#[cfg(all(not(feature = "flex"), feature = "wgpu"))]
 pub type InferBackend = WgpuBackend;
-#[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
-compile_error!("enable either the `wgpu` or `ndarray` feature");
+#[cfg(not(any(feature = "wgpu", feature = "flex")))]
+compile_error!("enable either the `wgpu` or `flex` feature");
 
 pub type ModelDevice = <InferBackend as BackendTypes>::Device;
 pub type TrainBackend = Autodiff<InferBackend>;
@@ -27,14 +27,14 @@ pub struct DeviceMemoryUsage {
 
 /// 初始化当前 feature 选择的计算设备；WGPU-only 构建可用 `BURN_DEVICE=cpu` 强制选择 CPU。
 pub fn init_device() -> ModelDevice {
-    #[cfg(all(feature = "wgpu", not(feature = "ndarray")))]
+    #[cfg(all(feature = "wgpu", not(feature = "flex")))]
     if std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu")) {
         return burn::backend::wgpu::WgpuDevice::Cpu;
     }
     Default::default()
 }
 
-#[cfg(all(feature = "wgpu", any(test, not(feature = "ndarray"))))]
+#[cfg(all(feature = "wgpu", any(test, not(feature = "flex"))))]
 fn wgpu_memory_usage(device: &burn::backend::wgpu::WgpuDevice) -> Option<DeviceMemoryUsage> {
     use cubecl_runtime::runtime::Runtime;
     let usage = burn::backend::wgpu::WgpuRuntime::client(device).memory_usage().ok()?;
@@ -43,12 +43,12 @@ fn wgpu_memory_usage(device: &burn::backend::wgpu::WgpuDevice) -> Option<DeviceM
     })
 }
 
-#[cfg(all(feature = "wgpu", not(feature = "ndarray")))]
+#[cfg(all(feature = "wgpu", not(feature = "flex")))]
 pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
     wgpu_memory_usage(device)
 }
 
-#[cfg(feature = "ndarray")]
+#[cfg(feature = "flex")]
 pub fn device_memory_usage(_device: &ModelDevice) -> Option<DeviceMemoryUsage> { None }
 
 pub fn process_memory_bytes() -> Option<u64> {

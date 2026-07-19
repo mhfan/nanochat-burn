@@ -69,9 +69,9 @@ class Result:
 def suites() -> dict[str, Suite]:
     test_args = ("--", "--show-output", "--test-threads=1")
     return {
-        "ndarray": Suite("NdArray", ("cargo", "test", "parity") +
-            test_args, 10, frozenset({"NdArray f32", "NdArray portable W8",
-                "NdArray portable W4 (block 8)"})),
+        "flex": Suite("Flex", ("cargo", "test", "parity") +
+            test_args, 10, frozenset({"Flex f32", "Flex portable W8",
+                "Flex portable W4 (block 8)"})),
         "wgpu": Suite("WGPU", ("cargo", "test", "--features", "wgpu",
             "gpt::parity::test_f16_w8_w4_logit_error_budgets") + test_args,
             1, frozenset({"WGPU f16", "WGPU native W8", "WGPU native W4 (block 8)"})),
@@ -168,7 +168,7 @@ def report(results: list[Result], root: Path) -> str:
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("all", "ndarray", "wgpu"), default="all",
+    parser.add_argument("--backend", choices=("all", "flex", "wgpu"), default="all",
         help="parity suite to run (default: all)")
     parser.add_argument("--output", type=Path, default=root / "target/parity-report.md",
         help="Markdown output path, or '-' for stdout")

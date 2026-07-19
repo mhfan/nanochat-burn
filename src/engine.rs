@@ -414,7 +414,7 @@ impl<B: AutodiffBackend> TrainingEngine<B> {
         assert_eq!(actual.len(), expected.len());
         let max_error = actual.into_iter().zip(expected)
             .map(|(actual, expected)| (actual - expected).abs()).fold(0.0, f32::max);
-        // Unit tests use the deterministic F32 ndarray backend. The optimizer roundtrip test
+        // Unit tests use the deterministic F32 Flex backend. The optimizer roundtrip test
         // separately asserts that Adam moments remain F32 across the checkpoint boundary.
         let tolerance = 1e-6;
         assert!(max_error <= tolerance,

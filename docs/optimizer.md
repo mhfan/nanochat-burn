@@ -97,7 +97,7 @@ optimizer = "adam_w" # 另一组使用 "muon_adam_w"
 - parity fixture 同时比较更新后的参数和 optimizer state，能发现“参数暂时接近但状态已漂移”。
 - 宽/高矩阵分别覆盖 NorMuon 归约维度选择。
 - resume equivalence 测试把 optimizer、trainer 和 dataloader 一起恢复并比较下一步 logits。
-- WGPU 测试检查 f16 参数回写和 fp32 AdamW state；NdArray f32 测试不能代替低精度验证。
+- WGPU 测试检查 f16 参数回写和 fp32 AdamW state；Flex f32 测试不能代替低精度验证。
 
 ## 常见错误
 
