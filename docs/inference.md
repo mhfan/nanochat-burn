@@ -59,7 +59,7 @@ target token，并 truncate/rollback cache。接受率为：
 - `src/engine/serving.rs`：动态 batch、request slot、位置映射与页面回收。
 - `src/engine/speculative.rs`：draft/target 验证、cache rollback 与统计。
 - `src/gpt/quant.rs`：W8/W4 weight-only 推理。
-- `src/benchmark.rs`、`src/bin/bench_infer.rs`、`src/bin/bench_spec.rs`：可复现基准。
+- `src/benchmark.rs`、`src/bin/bench/`：可复现推理、推测解码与算子基准。
 
 ## 最小实验
 
@@ -87,8 +87,8 @@ cargo test engine::speculative::tests::test_speculative_decoding_lossless
 对真实 artifact 测吞吐而不是从单元测试计时：
 
 ```bash
-cargo run --release --no-default-features --features wgpu --bin bench_infer -- --artifact runs/sft --batches 1,2,4
-cargo run --release --no-default-features --features wgpu --bin bench_spec -- runs/sft runs/pretrain
+cargo run --release --no-default-features --features wgpu --bin bench -- infer --artifact runs/sft --batches 1,2,4
+cargo run --release --no-default-features --features wgpu --bin bench -- speculative --target runs/sft --draft runs/pretrain
 ```
 
 结果写入 `runs/benchmarks/`，包含 prefill、TTFT、同步逐步测得的 median TPOT、异步流水的 decode

@@ -123,5 +123,5 @@ cargo run --bin report -- runs/baseline runs/ablation
 ## 能力边界
 
 参考和后端路径由 parity 测试约束“数值足够一致”，不是逐 bit 相同。f16、W8 和 W4 使用 README
-中公开的误差预算。吞吐结论也必须由目标设备上的 `bench_ops`/`bench_infer` 支持，不能从算子名称
+中公开的误差预算。吞吐结论也必须由目标设备上的 `bench ops`/`bench infer` 支持，不能从算子名称
 推断。

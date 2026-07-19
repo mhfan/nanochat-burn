@@ -7,6 +7,8 @@ use nanochat_burn::{artifact::{inference_artifact_path, load_artifact},
     engine::inference::InferenceEngine, experiment::ArtifactPaths, gpt::{ForwardLayer, Gpt},
 };
 
+use super::{CliResult, next_value, write_report};
+
 struct Args {
     artifact: PathBuf,
     output: PathBuf,
@@ -18,15 +20,12 @@ struct Args {
     quantization: Option<usize>,
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
-    args.next().ok_or_else(|| format!("{option} requires a value"))
-}
-
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
-    let mut parsed = Args { artifact: inference_artifact_path(&ArtifactPaths::default()),
-        output: PathBuf::from("runs/benchmarks/inference.json"), batches: vec![1, 2, 4],
-        prompt_tokens: 32, decode_tokens: 32, warmup: 1, iterations: 3,
-        quantization: None,
+    let mut parsed = Args {
+        artifact: inference_artifact_path(&ArtifactPaths::default()),
+        output: PathBuf::from("runs/benchmarks/inference.json"),
+        batches: vec![1, 2, 4], prompt_tokens: 32, decode_tokens: 32, warmup: 1,
+        iterations: 3, quantization: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -46,7 +45,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                 .map_err(|_| "invalid iteration count".to_string())?,
             "--quantization" => parsed.quantization = Some(next_value(&mut args, &arg)?.parse()
                 .map_err(|_| "invalid quantization bits".to_string())?),
-            _ => return Err(format!("unknown benchmark argument: {arg}")),
+            _ => return Err(format!("unknown inference benchmark argument: {arg}")),
         }
     }
     if parsed.batches.is_empty() || parsed.batches.contains(&0) {
@@ -61,7 +60,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
-fn run<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
+fn benchmark_model<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
     tokenizer: nanochat_burn::tokenizer::BpeTokenizer, args: &Args, model_bytes: u64,
     quantization_error: Option<f32>, device: &B::Device,
     memory_usage: &impl Fn() -> Option<DeviceMemoryUsage>) -> Vec<InferenceBenchmark> {
@@ -69,19 +68,20 @@ fn run<B: burn::tensor::backend::Backend, L: ForwardLayer<B>>(model: Gpt<B, L>,
     let bos = tokenizer.get_bos_token_id();
     let prompt = vec![bos; args.prompt_tokens];
     args.batches.iter().map(|&batch| benchmark_inference(&engine, &prompt,
-        InferenceBenchmarkConfig { batch_size: batch, decode_tokens: args.decode_tokens,
+        InferenceBenchmarkConfig {
+            batch_size: batch, decode_tokens: args.decode_tokens,
             warmup: args.warmup, iterations: args.iterations, model_bytes,
-            quantization_bits: args.quantization, quantization_max_error: quantization_error,
+            quantization_bits: args.quantization,
+            quantization_max_error: quantization_error,
         }, device, memory_usage)).collect()
 }
 
-fn main() {
-    let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|error| panic!("{error}"));
-    let device = init_device();
+pub(super) fn run(args: impl IntoIterator<Item = String>) -> CliResult {
+    let (args, device) = (parse_args(args)?, init_device());
     let artifact = load_artifact(&args.artifact, &device)
-        .unwrap_or_else(|error| panic!("failed to load {:?}: {error}", args.artifact));
+        .map_err(|error| format!("failed to load {:?}: {error}", args.artifact))?;
     let model_bytes = fs::metadata(args.artifact.join(&artifact.manifest.model_file))
-        .unwrap_or_else(|error| panic!("failed to stat model: {error}")).len();
+        .map_err(|error| format!("failed to stat model: {error}"))?.len();
 
     let reports = if let Some(bits) = args.quantization {
         let prompt = Tensor::<InferBackend, 2, Int>::from_data(TensorData::new(
@@ -94,17 +94,14 @@ fn main() {
             quantized.forward(prompt).into_data());
         let error = baseline.into_iter().zip(quantized_logits)
             .map(|(left, right)| (left - right).abs()).fold(0.0, f32::max);
-        run(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device,
+        benchmark_model(quantized, artifact.tokenizer, &args, model_bytes, Some(error), &device,
             &|| device_memory_usage(&device))
     } else {
-        run(artifact.model, artifact.tokenizer, &args, model_bytes, None, &device,
+        benchmark_model(artifact.model, artifact.tokenizer, &args, model_bytes, None, &device,
             &|| device_memory_usage(&device))
     };
 
-    if let Some(parent) = args.output.parent() && !parent.as_os_str().is_empty() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&args.output, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
+    write_report(&args.output, &reports)?;
     for report in &reports {
         println!("batch={} prefill={:.2}ms ttft={:.2}ms tpot={:.2}ms decode={:.2} tok/s cache={:.2}MiB device={}",
             report.batch_size, report.prefill_latency_ms, report.time_to_first_token_ms,
@@ -114,6 +111,7 @@ fn main() {
                 |bytes| format!("{:.2}MiB", bytes as f64 / 1_048_576.0)));
     }
     println!("Benchmark saved to {}", args.output.display());
+    Ok(())
 }
 
 #[cfg(test)] mod tests { use super::*;

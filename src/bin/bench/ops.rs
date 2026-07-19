@@ -1,4 +1,4 @@
-use std::{fs, hint::black_box, path::PathBuf, time::Instant};
+use std::{hint::black_box, path::PathBuf, time::Instant};
 
 use burn::tensor::{Bool, Distribution, Element, Shape, Tensor, TensorData, activation,
     backend::Backend};
@@ -7,6 +7,8 @@ use nanochat_burn::{common::{InferBackend, init_device, scalar_to_f32},
         scaled_dot_product_attention_reference},
 };
 use serde::Serialize;
+
+use super::{CliResult, next_value, write_report};
 
 #[derive(Debug)]
 struct Args {
@@ -20,10 +22,10 @@ struct Args {
 }
 
 impl Default for Args {
-    fn default() -> Self {
-        Self { output: "runs/benchmarks/operators.json".into(), batch_size: 2,
-            sequence_len: 256, n_head: 2, head_dim: 8, warmup: 3, iterations: 20 }
-    }
+    fn default() -> Self { Self {
+            output: "runs/benchmarks/operators.json".into(), batch_size: 2,
+            sequence_len: 256, n_head: 2, head_dim: 8, warmup: 3, iterations: 20
+    } }
 }
 
 #[derive(Debug, Serialize)]
@@ -47,13 +49,8 @@ struct OperatorBenchmark {
     attention_causal_max_error: f32,
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
-    args.next().ok_or_else(|| format!("{option} requires a value"))
-}
-
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
-    let mut parsed = Args::default();
-    let mut args = args.into_iter();
+    let (mut parsed, mut args) = (Args::default(), args.into_iter());
     while let Some(arg) = args.next() {
         let value = match arg.as_str() {
             "--output" => {
@@ -68,8 +65,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             .map_err(|_| format!("{arg} requires a non-negative integer"))?;
         match arg.as_str() {
             "--batch" => parsed.batch_size = value,
-            "--sequence" => parsed.sequence_len = value,
             "--heads" => parsed.n_head = value,
+            "--sequence" => parsed.sequence_len = value,
             "--head-dim" => parsed.head_dim = value,
             "--warmup" => parsed.warmup = value,
             "--iterations" => parsed.iterations = value,
@@ -151,24 +148,23 @@ fn benchmark<B: Backend>(args: &Args, device: &B::Device) -> OperatorBenchmark {
     let attention_causal_max_error = scalar_to_f32(
         (reference - causal).abs().max().into_scalar());
 
-    OperatorBenchmark { backend: B::name(device), batch_size: args.batch_size,
+    OperatorBenchmark {
+        backend: B::name(device), batch_size: args.batch_size,
         sequence_len: args.sequence_len, n_head: args.n_head, head_dim: args.head_dim,
         warmup: args.warmup, iterations: args.iterations, rms_norm_latency_ms,
         rope_latency_ms, softmax_latency_ms, attention_reference_latency_ms,
         attention_masked_latency_ms, attention_causal_latency_ms,
         attention_masked_speedup: attention_reference_latency_ms / attention_masked_latency_ms,
         attention_causal_speedup: attention_reference_latency_ms / attention_causal_latency_ms,
-        attention_masked_max_error, attention_causal_max_error }
+        attention_masked_max_error, attention_causal_max_error
+    }
 }
 
-fn main() {
-    let args = parse_args(std::env::args().skip(1)).unwrap_or_else(|error| panic!("{error}"));
+pub(super) fn run(args: impl IntoIterator<Item = String>) -> CliResult {
+    let args = parse_args(args)?;
     let device = init_device();
     let report = benchmark::<InferBackend>(&args, &device);
-    if let Some(parent) = args.output.parent() && !parent.as_os_str().is_empty() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&args.output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    write_report(&args.output, &report)?;
     println!("backend={} shape=[{}, {}, {}, {}]", report.backend, report.batch_size,
         report.sequence_len, report.n_head, report.head_dim);
     println!("RMSNorm={:.4}ms RoPE={:.4}ms Softmax={:.4}ms",
@@ -180,6 +176,7 @@ fn main() {
     println!("Attention max error: masked={:.6} causal={:.6}",
         report.attention_masked_max_error, report.attention_causal_max_error);
     println!("Benchmark saved to {}", args.output.display());
+    Ok(())
 }
 
 #[cfg(test)] mod tests { use super::*;

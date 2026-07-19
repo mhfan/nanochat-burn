@@ -7,14 +7,14 @@ reduction 或 materialization 边界、并有显著收益的算子。
 ## 可复现基准
 
 ```bash
-cargo run --release --no-default-features --features wgpu --bin bench_ops
-cargo run --release --no-default-features --features wgpu --bin bench_ops -- \
+cargo run --release --no-default-features --features wgpu --bin bench -- ops
+cargo run --release --no-default-features --features wgpu --bin bench -- ops \
   --batch 4 --sequence 256 --heads 8 --head-dim 64
-cargo run --release --no-default-features --features wgpu --bin bench_ops -- \
+cargo run --release --no-default-features --features wgpu --bin bench -- ops \
   --batch 1 --sequence 1024 --heads 8 --head-dim 64
 ```
 
-`bench_ops` 每轮都同步设备，分别记录 RMSNorm、RoPE、standalone Softmax、参考 attention、
+`bench ops` 每轮都同步设备，分别记录 RMSNorm、RoPE、standalone Softmax、参考 attention、
 显式 mask 的 Burn attention 和使用 `is_causal` 的 Burn attention。JSON 默认写入
 `runs/benchmarks/operators.json`。
 
