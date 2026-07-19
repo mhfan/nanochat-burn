@@ -81,7 +81,7 @@ cargo test engine::tests::test_training_resume_equivalence
 一条命令运行完整离线链路：
 
 ```bash
-cargo run --no-default-features --features ndarray --bin train -- --recipe --config configs/tiny.toml
+cargo run --bin train -- --recipe --config configs/tiny.toml
 ```
 
 输入位于 `data/fixtures/tiny/`，产物写入 `runs/tiny/`。一层模型和少量 step 只验证链路，评测分数

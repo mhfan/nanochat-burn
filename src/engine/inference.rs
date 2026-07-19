@@ -419,12 +419,10 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 }
 
 #[cfg(test)] mod tests { use super::*;
-    use crate::{common::TestBackend, gpt::GptConfig};
+    use crate::{common::{InferBackend, ModelDevice}, gpt::GptConfig};
 
-    type TestDevice = <TestBackend as burn::tensor::backend::BackendTypes>::Device;
-
-    fn test_engine(corpus: &str, sequence_len: usize, device: &TestDevice)
-        -> InferenceEngine<TestBackend> {
+    fn test_engine(corpus: &str, sequence_len: usize, device: &ModelDevice)
+        -> InferenceEngine<InferBackend> {
         let tokenizer = BpeTokenizer::train_from_iterator([corpus], 280);
         let config = GptConfig { sequence_len, n_layer: 1, n_head: 2, n_kv_head: 1,
             n_embd: 16, quantization: None, window_pattern: "L".into(),
@@ -500,7 +498,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 
     #[test] fn test_device_and_reference_greedy_samplers_match() {
         let device = Default::default();
-        let logits = Tensor::<crate::common::TestBackend, 2>::from_data(
+        let logits = Tensor::<crate::common::InferBackend, 2>::from_data(
             [[-1.0, 3.0, 2.0], [4.0, 4.0, 1.0]], &device);
         let history = vec![vec![], vec![]];
         let mut reference_rng = SamplingRng::new(1);
@@ -514,7 +512,7 @@ pub fn sample_next_token<B: Backend>(logits: Tensor<B, 2>, sampling: SamplingCon
 
     #[test] fn test_device_sampler_applies_repetition_penalty() {
         let device = Default::default();
-        let logits = Tensor::<crate::common::TestBackend, 2>::from_data(
+        let logits = Tensor::<crate::common::InferBackend, 2>::from_data(
             [[3.0, 2.0, 1.0]], &device);
         let history = vec![vec![0, 0]];
         let sampling = SamplingConfig {

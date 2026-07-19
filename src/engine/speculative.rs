@@ -306,9 +306,9 @@ impl<B: Backend, LTarget: ForwardLayer<B>, LDraft: ForwardLayer<B>>
             window_pattern: "L".to_string(), features: Default::default(), quantization: None,
         };
 
-        use crate::common::TestBackend;
-        let target_model: Gpt<TestBackend> = Gpt::new(config.clone(), &device);
-        let draft_model: Gpt<TestBackend> = Gpt::new(config, &device);
+        use crate::common::InferBackend;
+        let target_model: Gpt<InferBackend> = Gpt::new(config.clone(), &device);
+        let draft_model: Gpt<InferBackend> = Gpt::new(config, &device);
 
         let spec_engine = SpeculativeInferenceEngine::new(target_model.clone(),
             draft_model.clone(), tokenizer.clone());

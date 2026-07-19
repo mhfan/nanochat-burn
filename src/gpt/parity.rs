@@ -2,12 +2,11 @@ use super::*;
 use burn::tensor::backend::AutodiffBackend;
 use std::collections::HashMap;
 
-use crate::common::{TestBackend, TestADBackend};
+use crate::common::{InferBackend, ModelDevice, TrainBackend};
 #[cfg(feature = "wgpu")]
-use crate::common::{InferBackend, init_device};
+use crate::common::WgpuBackend;
 
-type ParityGradients = <TestADBackend as AutodiffBackend>::Gradients;
-type TestDevice = <TestBackend as burn::tensor::backend::BackendTypes>::Device;
+type ParityGradients = <TrainBackend as AutodiffBackend>::Gradients;
 
 const F32_LOGIT_MAX_ABS_ERROR: f32 = 5e-5;
 #[cfg(feature = "wgpu")] const F16_LOGIT_MAX_ABS_ERROR: f32 = 5e-3;
@@ -114,11 +113,11 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
 
 #[test] fn test_python_rms_norm_and_rope_parity() {
     let (fixture, device) = (python_module_fixture(), Default::default());
-    let actual = norm(fixture_tensor::<TestBackend, 3>(&fixture.rms_norm.input, &device));
+    let actual = norm(fixture_tensor::<InferBackend, 3>(&fixture.rms_norm.input, &device));
     assert_fixture_close(actual, &fixture.rms_norm.output, 2e-6, "RMSNorm");
 
     let rope = &fixture.rope;
-    let actual = apply_rotary_emb(fixture_tensor::<TestBackend, 4>(&rope.input, &device),
+    let actual = apply_rotary_emb(fixture_tensor::<InferBackend, 4>(&rope.input, &device),
         fixture_tensor(&rope.cos, &device), fixture_tensor(&rope.sin, &device));
     assert_fixture_close(actual, &rope.output, 2e-6, "RoPE");
 }
@@ -132,7 +131,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         relu_squared: true,
         _phantom: PhantomData,
     };
-    assert_fixture_close(module.forward(fixture_tensor::<TestBackend, 3>(&mlp.input, &device)),
+    assert_fixture_close(module.forward(fixture_tensor::<InferBackend, 3>(&mlp.input, &device)),
         &mlp.output, 2e-5, "MLP");
 }
 
@@ -157,7 +156,7 @@ fn assert_fixture_close<B: Backend, const D: usize>(actual: Tensor<B, D>,
         fixture_tensor(&attention.cos, &device),
         fixture_tensor(&attention.sin, &device),
     );
-    let actual = module.forward(fixture_tensor::<TestBackend, 3>(&attention.input, &device),
+    let actual = module.forward(fixture_tensor::<InferBackend, 3>(&attention.input, &device),
         Some(fixture_tensor(&attention.value_embedding, &device)), rope);
     assert_fixture_close(actual, &attention.output, 2e-5, "attention");
 }
@@ -255,13 +254,13 @@ fn model_from_fixture<B: Backend>(fixture: &ModelParityFixture, device: &B::Devi
     model
 }
 
-fn assert_gradient<const D: usize>(tensor: Tensor<TestADBackend, D>,
+fn assert_gradient<const D: usize>(tensor: Tensor<TrainBackend, D>,
     gradients: &ParityGradients, expected: &TensorFixture, label: &str) {
     let actual = tensor.grad(gradients).unwrap_or_else(|| panic!("missing gradient for {label}"));
     assert_fixture_close(actual, expected, 5e-5, label);
 }
 
-fn assert_linear_gradient(linear: &Linear<TestADBackend>, gradients: &ParityGradients,
+fn assert_linear_gradient(linear: &Linear<TrainBackend>, gradients: &ParityGradients,
     expected: &TensorFixture, label: &str) {
     let actual = linear.weight.val().grad(gradients)
         .unwrap_or_else(|| panic!("missing gradient for {label}")).swap_dims(0, 1);
@@ -270,7 +269,7 @@ fn assert_linear_gradient(linear: &Linear<TestADBackend>, gradients: &ParityGrad
 
 #[test] fn test_python_full_model_logits_loss_and_gradients_parity() {
     let (fixture, device) = (model_fixture(), Default::default());
-    let model: Gpt<TestADBackend> = model_from_fixture(&fixture, &device);
+    let model: Gpt<TrainBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
     let targets = fixture_ids(&fixture.targets, &device);
     let logits = model.forward(input);
@@ -309,8 +308,8 @@ fn assert_linear_gradient(linear: &Linear<TestADBackend>, gradients: &ParityGrad
         named(expected, "value_embeds.1.weight"), "value embedding gradient");
 }
 
-fn cached_forward(model: &Gpt<TestADBackend>, input: Tensor<TestADBackend, 2, Int>,
-    chunks: &[usize], page_size: usize, device: &TestDevice) -> Tensor<TestADBackend, 3> {
+fn cached_forward(model: &Gpt<TrainBackend>, input: Tensor<TrainBackend, 2, Int>,
+    chunks: &[usize], page_size: usize, device: &ModelDevice) -> Tensor<TrainBackend, 3> {
     let [batch_size, sequence_len] = input.shape().dims();
     assert!(chunks.iter().all(|&len| len > 0));
     assert_eq!(chunks.iter().sum::<usize>(), sequence_len);
@@ -327,8 +326,8 @@ fn cached_forward(model: &Gpt<TestADBackend>, input: Tensor<TestADBackend, 2, In
     Tensor::cat(outputs, 1)
 }
 
-fn assert_logits_close(actual: Tensor<TestADBackend, 3>,
-    expected: Tensor<TestADBackend, 3>, label: &str) {
+fn assert_logits_close(actual: Tensor<TrainBackend, 3>,
+    expected: Tensor<TrainBackend, 3>, label: &str) {
     assert_eq!(actual.shape(), expected.shape(), "{label} shape mismatch");
     let max_error = crate::common::scalar_to_f32((actual - expected).abs().max().into_scalar());
     assert!(max_error <= 5e-5, "{label} max error {max_error} exceeds 0.00005");
@@ -336,7 +335,7 @@ fn assert_logits_close(actual: Tensor<TestADBackend, 3>,
 
 #[test] fn test_full_chunked_and_token_cache_parity() {
     let (fixture, device) = (model_fixture(), Default::default());
-    let model: Gpt<TestADBackend> = model_from_fixture(&fixture, &device);
+    let model: Gpt<TrainBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
     let full = model.forward(input.clone());
     let chunked = cached_forward(&model, input.clone(), &[2, 2], 2, &device);
@@ -377,7 +376,7 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
 #[test] fn test_f32_w8_w4_logit_error_budgets() {
     let (fixture, device) = (model_fixture(), Default::default());
     let input = fixture_ids(&fixture.input_ids, &device);
-    let model: Gpt<TestBackend> = model_from_fixture(&fixture, &device);
+    let model: Gpt<InferBackend> = model_from_fixture(&fixture, &device);
     let f32_logits = model.forward(input.clone());
     let f32_error = fixture_max_abs_error(f32_logits.clone(), &fixture.logits);
     let (w8_error, w4_error) =
@@ -393,8 +392,8 @@ fn assert_error_budget(path: &str, reference: &str, error: f32, budget: f32) {
 
 #[cfg(feature = "wgpu")]
 #[test] fn test_f16_w8_w4_logit_error_budgets() {
-    let (fixture, device) = (model_fixture(), init_device());
-    let model: Gpt<InferBackend> = model_from_fixture(&fixture, &device);
+    let (fixture, device) = (model_fixture(), Default::default());
+    let model: Gpt<WgpuBackend> = model_from_fixture(&fixture, &device);
     let input = fixture_ids(&fixture.input_ids, &device);
     let f16_logits = model.forward(input.clone());
     let error = fixture_max_abs_error(f16_logits.clone(), &fixture.logits);

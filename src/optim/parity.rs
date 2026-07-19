@@ -1,7 +1,5 @@
 use super::*;
-use crate::common::TestBackend;
-
-type TestDevice = <TestBackend as burn::tensor::backend::BackendTypes>::Device;
+use crate::common::{InferBackend, ModelDevice};
 
 #[derive(serde::Deserialize)]
 struct OptimizerParityFixture {
@@ -61,12 +59,12 @@ fn optimizer_fixture() -> OptimizerParityFixture {
 }
 
 fn fixture_tensor<const D: usize>(fixture: &TensorFixture,
-    device: &TestDevice) -> Tensor<TestBackend, D> {
+    device: &ModelDevice) -> Tensor<InferBackend, D> {
     let shape: [usize; D] = fixture.shape.as_slice().try_into().unwrap();
     Tensor::from_data(TensorData::new(fixture.values.clone(), Shape::new(shape)), device)
 }
 
-fn assert_fixture_close<const D: usize>(actual: Tensor<TestBackend, D>,
+fn assert_fixture_close<const D: usize>(actual: Tensor<InferBackend, D>,
     expected: &TensorFixture, tolerance: f32, label: &str) {
     assert_eq!(actual.shape().dims::<D>().as_slice(), expected.shape, "{label} shape mismatch");
     let actual = crate::common::tensor_data_to_f32_vec(actual.into_data());
@@ -90,7 +88,7 @@ fn assert_fixture_close<const D: usize>(actual: Tensor<TestBackend, D>,
     assert_fixture_close(state.exp_avg_sq, &case.exp_avg_sq, 2e-7, "AdamW second moment");
 }
 
-fn assert_muon_case(case: MuonFixture, device: &TestDevice, label: &str) {
+fn assert_muon_case(case: MuonFixture, device: &ModelDevice, label: &str) {
     let hyper = MuonHyper { lr: case.hyper.lr, weight_decay: case.hyper.weight_decay,
         momentum: case.hyper.momentum, beta2: case.hyper.beta2,
         ns_steps: case.hyper.ns_steps };

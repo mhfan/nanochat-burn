@@ -558,9 +558,9 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 #[cfg(test)] mod tests { use super::*;
 
     #[test] fn test_muon_orthogonalization() {
-        use crate::common::TestBackend;
+        use crate::common::InferBackend;
         let device = Default::default();
-        let p = Tensor::<TestBackend, 2>::from_data([[2.0, 0.0], [0.0, 3.0]], &device);
+        let p = Tensor::<InferBackend, 2>::from_data([[2.0, 0.0], [0.0, 3.0]], &device);
         let grad = Tensor::from_data([[0.1, 0.2], [0.3, 0.4]], &device);
         let mut state = None;
 
@@ -575,9 +575,9 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
 
     #[cfg(feature = "wgpu")]
     #[test] fn test_adamw_uses_f32_state_for_f16_parameters() {
-        use crate::common::InferBackend;
-        let device = crate::common::init_device();
-        let parameter = Tensor::<InferBackend, 1>::from_data([1.0, -2.0], &device);
+        use crate::common::WgpuBackend;
+        let device = Default::default();
+        let parameter = Tensor::<WgpuBackend, 1>::from_data([1.0, -2.0], &device);
         let gradient = Tensor::from_data([0.25, -0.5], &device);
         let mut state = None;
         let updated = adamw_step(parameter, gradient, &mut state,
@@ -589,10 +589,10 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
     }
 
     #[test] fn test_optimizer_state_roundtrip() {
-        use crate::common::{TestADBackend,
+        use crate::common::{TrainBackend,
             tensor_data_to_f32_vec};
         let device = Default::default();
-        let mut optimizer = MuonAdamW::<TestADBackend>::new(1, OptimizerKind::MuonAdamW);
+        let mut optimizer = MuonAdamW::<TrainBackend>::new(1, OptimizerKind::MuonAdamW);
         optimizer.wte = Some(AdamWState {
             exp_avg: Tensor::from_data([[1.0, 2.0]], &device),
             exp_avg_sq: Tensor::from_data([[3.0, 4.0]], &device),
@@ -606,7 +606,7 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
             "nanochat-optimizer-test-{}.safetensors", std::process::id()));
 
         optimizer.save_state(&path).unwrap();
-        let loaded = MuonAdamW::<TestADBackend>::load_state(&path, 1, &device).unwrap();
+        let loaded = MuonAdamW::<TrainBackend>::load_state(&path, 1, &device).unwrap();
 
         assert_eq!(loaded.kind, OptimizerKind::MuonAdamW);
         let loaded_wte = loaded.wte.unwrap();
@@ -619,9 +619,9 @@ fn muon_step<B: Backend>(p: Tensor<B, 2>, grad: Tensor<B, 2>,
         assert_eq!(tensor_data_to_f32_vec(state.second_momentum_buffer.clone().into_data()),
             vec![9.0, 10.0]);
 
-        let adamw = MuonAdamW::<TestADBackend>::new(1, OptimizerKind::AdamW);
+        let adamw = MuonAdamW::<TrainBackend>::new(1, OptimizerKind::AdamW);
         adamw.save_state(&path).unwrap();
-        let adamw = MuonAdamW::<TestADBackend>::load_state(&path, 1, &device).unwrap();
+        let adamw = MuonAdamW::<TrainBackend>::load_state(&path, 1, &device).unwrap();
         assert_eq!(adamw.kind, OptimizerKind::AdamW);
         std::fs::remove_file(path).ok();
     }

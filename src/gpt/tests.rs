@@ -7,8 +7,8 @@ use super::*;
         features: Default::default(),
     };
 
-    use crate::common::TestADBackend;
-    let gpt: Gpt<TestADBackend> = Gpt::new(config, &device);
+    use crate::common::TrainBackend;
+    let gpt: Gpt<TrainBackend> = Gpt::new(config, &device);
 
     let idx = Tensor::zeros([2, 16], &device);
     let targets = Tensor::zeros([2, 16], &device);
@@ -23,13 +23,13 @@ use super::*;
     let _grads = loss.backward();
 }
 
-use crate::common::TestBackend;
-type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
+use crate::common::InferBackend;
+type Int2DModelTensor = Tensor<InferBackend, 2, Int>;
 
 #[test] fn test_burn_attention_paths_match_reference() {
     let device = Default::default();
     let (batch_size, n_head, sequence_len, head_dim) = (2, 4, 32, 16);
-    let q = Tensor::<TestBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
+    let q = Tensor::<InferBackend, 4>::random([batch_size, n_head, sequence_len, head_dim],
         Distribution::Normal(0.0, 1.0), &device);
     let k = Tensor::random([batch_size, n_head, sequence_len, head_dim],
         Distribution::Normal(0.0, 1.0), &device);
@@ -73,7 +73,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
 
 #[test] fn test_relu_squared_ablation_changes_mlp_output() {
     let device = Default::default();
-    let fc = linear(Tensor::<TestBackend, 2>::from_data(
+    let fc = linear(Tensor::<InferBackend, 2>::from_data(
         [[1.0, 0.0], [0.0, 1.0]], &device));
     let projection = linear(Tensor::from_data(
         [[1.0, 0.0], [0.0, 1.0]], &device));
@@ -96,7 +96,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
         features: Default::default(),
     };
 
-    let mut gpt: Gpt<TestBackend> = Gpt::new(config, &device);
+    let mut gpt: Gpt<InferBackend> = Gpt::new(config, &device);
     gpt.h[0].attn.c_proj = random_linear(32, 32, Distribution::Uniform(-0.1, 0.1), &device);
     gpt.smear_lambda = tensor_param(vec![1.0], &device);
 
@@ -107,17 +107,17 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
         1, 1, gpt.config.sequence_len, gpt.config.n_kv_head, head_dim, 2, &device);
 
     let full_logits = gpt.forward(
-            Int2DTestTensor::from_data([[12, 45, 67, 68, 69]], &device))
+            Int2DModelTensor::from_data([[12, 45, 67, 68, 69]], &device))
         .slice([0..1, 3..5, 0..gpt.config.vocab_size]);
-    let prompt = Int2DTestTensor::from_data([[12, 45, 67]], &device);
+    let prompt = Int2DModelTensor::from_data([[12, 45, 67]], &device);
     gpt.forward_with_cache(prompt.clone(), &mut chunk_cache, 0);
     gpt.forward_with_cache(prompt, &mut incremental_cache, 0);
 
-    let chunk = Int2DTestTensor::from_data([[68, 69]], &device);
+    let chunk = Int2DModelTensor::from_data([[68, 69]], &device);
     let chunk_logits = gpt.forward_with_cache(chunk, &mut chunk_cache, 3);
-    let first = gpt.forward_with_cache(Int2DTestTensor::from_data([[68]], &device),
+    let first = gpt.forward_with_cache(Int2DModelTensor::from_data([[68]], &device),
         &mut incremental_cache, 3);
-    let second = gpt.forward_with_cache(Int2DTestTensor::from_data([[69]], &device),
+    let second = gpt.forward_with_cache(Int2DModelTensor::from_data([[69]], &device),
         &mut incremental_cache, 4);
     let incremental_logits = Tensor::cat(vec![first, second], 1);
 
@@ -138,25 +138,25 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
         n_kv_head: 1, n_embd: 32, window_pattern: "L".to_string(), quantization: None,
         features: Default::default(),
     };
-    let mut gpt: Gpt<TestBackend> = Gpt::new(config, &device);
+    let mut gpt: Gpt<InferBackend> = Gpt::new(config, &device);
     gpt.h[0].attn.c_proj = random_linear(32, 32, Distribution::Uniform(-0.1, 0.1), &device);
     gpt.smear_lambda = tensor_param(vec![1.0], &device);
     let head_dim = gpt.config.n_embd / gpt.config.n_head;
     let mut cache = KVCache::new_paged(1, 2, 16, 1, head_dim, 2, &device);
 
     gpt.forward_with_cache_rows(
-        Int2DTestTensor::from_data([[12, 45, 67]], &device), &mut cache, &[0], &[0]);
+        Int2DModelTensor::from_data([[12, 45, 67]], &device), &mut cache, &[0], &[0]);
     gpt.forward_with_cache_rows(
-        Int2DTestTensor::from_data([[12, 45]], &device), &mut cache, &[1], &[0]);
+        Int2DModelTensor::from_data([[12, 45]], &device), &mut cache, &[1], &[0]);
     let batched = gpt.forward_with_cache_rows(
-        Int2DTestTensor::from_data([[68], [67]], &device),
+        Int2DModelTensor::from_data([[68], [67]], &device),
         &mut cache, &[0, 1], &[3, 2]);
 
     let expected_first = gpt.forward(
-        Int2DTestTensor::from_data([[12, 45, 67, 68]], &device))
+        Int2DModelTensor::from_data([[12, 45, 67, 68]], &device))
         .slice([0..1, 3..4, 0..gpt.config.vocab_size]);
     let expected_second = gpt.forward(
-        Int2DTestTensor::from_data([[12, 45, 67]], &device))
+        Int2DModelTensor::from_data([[12, 45, 67]], &device))
         .slice([0..1, 2..3, 0..gpt.config.vocab_size]);
     let expected = Tensor::cat(vec![expected_first, expected_second], 0);
     let diff = crate::common::scalar_to_f32((batched - expected).abs().max().into_scalar());
@@ -175,7 +175,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
     assert!(matches!(gpt.h[0].attn.ve_gate.as_ref(), Some(LinearOrQuantized::Standard(_))));
     assert!(matches!(&gpt.smear_gate, LinearOrQuantized::Standard(_)));
 
-    let logits = gpt.forward(Int2DTestTensor::zeros([1, 4], &device));
+    let logits = gpt.forward(Int2DModelTensor::zeros([1, 4], &device));
     assert_eq!(logits.shape().dims(), [1, 4, 280]);
 }
 
@@ -186,7 +186,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
         features: Default::default(),
     };
 
-    let gpt: Gpt<TestBackend> = Gpt::new(config, &device);
+    let gpt: Gpt<InferBackend> = Gpt::new(config, &device);
 
     let prompt = [12, 45, 67];
     let (prompt_len, num_samples) = (prompt.len(), 1);
@@ -194,7 +194,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
     let idx_data: Vec<_> = std::iter::repeat_n(prompt, num_samples).flatten().collect();
 
     // Prefill index tensor
-    let prefill_idx = Int2DTestTensor::from_data(
+    let prefill_idx = Int2DModelTensor::from_data(
         TensorData::new(idx_data, Shape::new([num_samples, prompt_len])), &device);
 
     let head_dim = gpt.config.n_embd / gpt.config.n_head;
@@ -213,7 +213,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
         let mut step_logits = vec![logits.clone()];
 
         // 2. Autoregressive steps
-        let mut current_token = Int2DTestTensor::from_data(
+        let mut current_token = Int2DModelTensor::from_data(
             TensorData::new(vec![68; num_samples], Shape::new([num_samples, 1])), &device);
 
         for step_idx in 0..2 {
@@ -221,7 +221,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
             let logits_step = gpt.forward_with_cache(current_token.clone(), &mut cache, step);
             step_logits.push(logits_step.clone());
 
-            current_token = Int2DTestTensor::from_data(
+            current_token = Int2DModelTensor::from_data(
                 TensorData::new(vec![69; num_samples], Shape::new([num_samples, 1])),
                 &device,
             );
@@ -245,7 +245,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
 
 #[test] fn test_copied_cache_requests_own_physical_pages() {
     let device = Default::default();
-    let mut cache = KVCache::<TestBackend>::new_paged(1, 2, 8, 1, 2, 2, &device);
+    let mut cache = KVCache::<InferBackend>::new_paged(1, 2, 8, 1, 2, 2, &device);
     let key = Tensor::from_data([[[[1.0, 2.0]]]], &device);
     let value = Tensor::from_data([[[[3.0, 4.0]]]], &device);
     cache.update_rows(0, key, value, &[0], &[0]);
@@ -259,7 +259,7 @@ type Int2DTestTensor = Tensor<TestBackend, 2, Int>;
 
 #[test] fn test_attention_sink_eviction_preserves_logical_pages() {
     let device = Default::default();
-    let mut cache = KVCache::<TestBackend>::new_paged(1, 1, 16, 1, 8, 2, &device);
+    let mut cache = KVCache::<InferBackend>::new_paged(1, 1, 16, 1, 8, 2, &device);
     cache.ensure_pages(0, 7);
     cache.len = 16;
     cache.request_lens[0] = 16;

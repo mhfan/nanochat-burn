@@ -9,7 +9,7 @@ license = "MIT"
 default-run = "chat"
 
 [features]
-default = ["wgpu"]
+default = ["ndarray"]
 ndarray = ["burn/ndarray"]
 wgpu = ["burn/wgpu", "burn/fusion", "burn/autotune", "dep:cubecl-runtime"]
 web = ["dep:axum", "dep:futures-core"]  # Web UI server dependencies
@@ -47,10 +47,6 @@ cubecl-runtime = { version = "0.10", optional = true }
 axum = { version = "0.8", optional = true }
 futures-core = { version = "0.3", optional = true }
 fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode", "perf"] }
-
-[dev-dependencies]
-# 单元测试与 Python parity 默认使用确定性的 F32 CPU 后端。
-burn = { version = "0.21", default-features = false, features = ["ndarray"] }
 
 [profile.release]
 opt-level = 3

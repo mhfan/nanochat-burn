@@ -5,20 +5,19 @@ use burn::{prelude::ToElement, backend::autodiff::Autodiff,
 };
 use serde::de::DeserializeOwned;
 
-/// Production inference and training backends. WGPU takes precedence when enabled; ndarray is
-/// the explicit CPU-only fallback.
-//#[cfg(feature = "wgpu")] pub type InferBackend = burn::backend::wgpu::Wgpu;
-#[cfg(feature = "wgpu")] pub type InferBackend = burn::backend::wgpu::Wgpu<f16, i32>;
-#[cfg(all(not(feature = "wgpu"), feature = "ndarray"))]
+/// Selected inference and training backends. NdArray is the portable default; WGPU is selected
+/// explicitly with `--no-default-features --features wgpu`.
+#[cfg(feature = "wgpu")]
+pub type WgpuBackend = burn::backend::wgpu::Wgpu<f16, i32>;
+#[cfg(feature = "ndarray")]
 pub type InferBackend = burn::backend::ndarray::NdArray<f32, i32>;
+#[cfg(all(not(feature = "ndarray"), feature = "wgpu"))]
+pub type InferBackend = WgpuBackend;
 #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
 compile_error!("enable either the `wgpu` or `ndarray` feature");
 
 pub type ModelDevice = <InferBackend as BackendTypes>::Device;
 pub type TrainBackend = Autodiff<InferBackend>;
-
-#[cfg(test)] pub(crate) type TestBackend = burn::backend::ndarray::NdArray<f32, i32>;
-#[cfg(test)] pub(crate) type TestADBackend = Autodiff<TestBackend>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceMemoryUsage {
@@ -26,18 +25,17 @@ pub struct DeviceMemoryUsage {
     pub bytes_in_use: u64,
 }
 
-/// 初始化系统计算设备：优先使用 WGPU GPU；
-/// 如果环境变量 BURN_DEVICE=cpu，则强行使用 CPU 运行以规避 GPU JIT 编译开销
+/// 初始化当前 feature 选择的计算设备；WGPU-only 构建可用 `BURN_DEVICE=cpu` 强制选择 CPU。
 pub fn init_device() -> ModelDevice {
-    #[cfg(feature = "wgpu")]
+    #[cfg(all(feature = "wgpu", not(feature = "ndarray")))]
     if std::env::var("BURN_DEVICE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu")) {
         return burn::backend::wgpu::WgpuDevice::Cpu;
     }
     Default::default()
 }
 
-#[cfg(feature = "wgpu")]
-pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
+#[cfg(all(feature = "wgpu", any(test, not(feature = "ndarray"))))]
+fn wgpu_memory_usage(device: &burn::backend::wgpu::WgpuDevice) -> Option<DeviceMemoryUsage> {
     use cubecl_runtime::runtime::Runtime;
     let usage = burn::backend::wgpu::WgpuRuntime::client(device).memory_usage().ok()?;
     Some(DeviceMemoryUsage {
@@ -45,7 +43,12 @@ pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
     })
 }
 
-#[cfg(all(not(feature = "wgpu"), feature = "ndarray"))]
+#[cfg(all(feature = "wgpu", not(feature = "ndarray")))]
+pub fn device_memory_usage(device: &ModelDevice) -> Option<DeviceMemoryUsage> {
+    wgpu_memory_usage(device)
+}
+
+#[cfg(feature = "ndarray")]
 pub fn device_memory_usage(_device: &ModelDevice) -> Option<DeviceMemoryUsage> { None }
 
 pub fn process_memory_bytes() -> Option<u64> {
@@ -105,9 +108,9 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
     #[cfg(feature = "wgpu")]
     #[test] fn verify_device_memory_usage() {
         let device = Default::default();
-        let tensor = Tensor::<InferBackend, 1>::zeros([1024], &device);
+        let tensor = Tensor::<WgpuBackend, 1>::zeros([1024], &device);
         let _ = tensor.clone().into_data();
-        let usage = device_memory_usage(&device).expect("WGPU allocator memory report");
+        let usage = wgpu_memory_usage(&device).expect("WGPU allocator memory report");
         assert!(usage.bytes_in_use > 0);
         assert!(usage.bytes_reserved >= usage.bytes_in_use);
     }
@@ -118,9 +121,9 @@ pub(crate) fn read_jsonl<T: DeserializeOwned>(path: impl AsRef<Path>) -> io::Res
 
         let device = Default::default();
 
-        // 1. 创建前向张量（使用测试后端的 Autodiff 包装）
+        // 1. 创建前向张量（使用默认后端的 Autodiff 包装）
         // 注意：Burn 中可以直接使用 Tensor::from_data 传入多维数组
-        let x: Tensor<TestADBackend, 2> =
+        let x: Tensor<TrainBackend, 2> =
             Tensor::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
         let w = Tensor::from_data([[2.0, 0.0], [0.0, 2.0]], &device);
 

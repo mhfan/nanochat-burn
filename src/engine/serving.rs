@@ -199,9 +199,9 @@ fn record_generated_token<B: Backend>(tokenizer: &BpeTokenizer, state: &mut Requ
 }
 
 #[cfg(test)] mod tests { use super::*;
-    use crate::{common::{TestBackend}, gpt::{Gpt, GptConfig}};
+    use crate::{common::{InferBackend}, gpt::{Gpt, GptConfig}};
 
-    fn service(capacity: usize) -> DynamicGenerationEngine<TestBackend> {
+    fn service(capacity: usize) -> DynamicGenerationEngine<InferBackend> {
         let device = Default::default();
         let tokenizer = BpeTokenizer::train_from_iterator(["dynamic request scheduling"], 280);
         let config = GptConfig { sequence_len: 16, n_layer: 1, n_head: 2, n_kv_head: 1,

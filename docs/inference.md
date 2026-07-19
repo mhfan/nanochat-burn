@@ -87,8 +87,8 @@ cargo test engine::speculative::tests::test_speculative_decoding_lossless
 对真实 artifact 测吞吐而不是从单元测试计时：
 
 ```bash
-cargo run --release --bin bench_infer -- --artifact runs/sft --batches 1,2,4
-cargo run --release --bin bench_spec -- runs/sft runs/pretrain
+cargo run --release --no-default-features --features wgpu --bin bench_infer -- --artifact runs/sft --batches 1,2,4
+cargo run --release --no-default-features --features wgpu --bin bench_spec -- runs/sft runs/pretrain
 ```
 
 结果写入 `runs/benchmarks/`，包含 prefill、TTFT、同步逐步测得的 median TPOT、异步流水的 decode

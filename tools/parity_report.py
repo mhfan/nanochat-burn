@@ -69,10 +69,10 @@ class Result:
 def suites() -> dict[str, Suite]:
     test_args = ("--", "--show-output", "--test-threads=1")
     return {
-        "ndarray": Suite("NdArray", ("cargo", "test", "--features", "ndarray", "parity") +
+        "ndarray": Suite("NdArray", ("cargo", "test", "parity") +
             test_args, 10, frozenset({"NdArray f32", "NdArray portable W8",
                 "NdArray portable W4 (block 8)"})),
-        "wgpu": Suite("WGPU", ("cargo", "test",
+        "wgpu": Suite("WGPU", ("cargo", "test", "--features", "wgpu",
             "gpt::parity::test_f16_w8_w4_logit_error_budgets") + test_args,
             1, frozenset({"WGPU f16", "WGPU native W8", "WGPU native W4 (block 8)"})),
     }

@@ -1,16 +1,16 @@
 # GPU 算子基线
 
-M7 优先优化已被基准证明的热点。默认 WGPU 类型本身是 Burn Fusion 包装的 CubeCL 后端，
+M7 优先优化已被基准证明的热点。WGPU 类型本身是 Burn Fusion 包装的 CubeCL 后端，
 因此普通 element-wise 表达式已经进入图融合；直接维护私有 CubeCL kernel 只适合能稳定跨过
 reduction 或 materialization 边界、并有显著收益的算子。
 
 ## 可复现基准
 
 ```bash
-cargo run --release --bin bench_ops
-cargo run --release --bin bench_ops -- \
+cargo run --release --no-default-features --features wgpu --bin bench_ops
+cargo run --release --no-default-features --features wgpu --bin bench_ops -- \
   --batch 4 --sequence 256 --heads 8 --head-dim 64
-cargo run --release --bin bench_ops -- \
+cargo run --release --no-default-features --features wgpu --bin bench_ops -- \
   --batch 1 --sequence 1024 --heads 8 --head-dim 64
 ```
 

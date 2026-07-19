@@ -22,7 +22,7 @@ where
     const SUPPORTS_NATIVE_QUANTIZATION: bool = true;
 }
 
-#[cfg(any(test, feature = "ndarray"))]
+#[cfg(feature = "ndarray")]
 impl QuantizationBackend for burn::backend::ndarray::NdArray<f32, i32> {
     const SUPPORTS_NATIVE_QUANTIZATION: bool = false;
 }
@@ -245,13 +245,13 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
 #[cfg(test)] mod tests { use super::*;
     use burn::tensor::Distribution;
-    use crate::common::TestBackend;
+    use crate::common::InferBackend;
 
     #[test] fn test_quantization_w8_rowwise() {
         let device = Default::default();
 
         // Shape [64, 128] is divisible by 4 and 8
-        let weight = Tensor::<TestBackend, 2>::random([64, 128],
+        let weight = Tensor::<InferBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 
@@ -277,7 +277,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
         let device = Default::default();
 
         // Shape [64, 128]
-        let weight = Tensor::<TestBackend, 2>::random([64, 128],
+        let weight = Tensor::<InferBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 
@@ -302,7 +302,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
     #[test] fn test_quantized_linear_forward() {
         let device = Default::default();
 
-        let weight = Tensor::<TestBackend, 2>::random([64, 128],
+        let weight = Tensor::<InferBackend, 2>::random([64, 128],
             Distribution::Normal(0.0, 0.5), &device);
         let bias = Tensor::random([128], Distribution::Normal(0.0, 0.1), &device);
         let linear = Linear {
@@ -311,7 +311,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
         };
 
         // Input shape [2, 8, 64]
-        let input = Tensor::<TestBackend, 3>::random([2, 8, 64],
+        let input = Tensor::<InferBackend, 3>::random([2, 8, 64],
             Distribution::Normal(0.0, 1.0), &device);
         let out_std = linear.forward(input.clone());
 
@@ -326,7 +326,7 @@ fn effective_block_size(bits: usize, block_size: usize) -> usize {
 
     #[test] fn test_large_rowwise_quantization_uses_portable_fallback() {
         let device = Default::default();
-        let weight = Tensor::<TestBackend, 2>::random([256, 32],
+        let weight = Tensor::<InferBackend, 2>::random([256, 32],
             Distribution::Normal(0.0, 1.0), &device);
         let linear = Linear { weight: Param::from_tensor(weight.clone()), bias: None };
 

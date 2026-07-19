@@ -83,17 +83,17 @@ cargo test engine::sandbox::tests
 在同一 SFT artifact 上做控制变量对照：
 
 ```bash
-NANOCHAT_OUTPUT_ARTIFACT=runs/compare/reinforce cargo run --bin train -- --rl \
+NANOCHAT_OUTPUT_ARTIFACT=runs/compare/reinforce cargo run --no-default-features --features wgpu --bin train -- --rl \
   --rl-algorithm group_normalized_reinforce
-NANOCHAT_OUTPUT_ARTIFACT=runs/compare/grpo cargo run --bin train -- --rl \
+NANOCHAT_OUTPUT_ARTIFACT=runs/compare/grpo cargo run --no-default-features --features wgpu --bin train -- --rl \
   --rl-algorithm grpo
 ```
 
 分别评测后汇总：
 
 ```bash
-NANOCHAT_ARTIFACT=runs/compare/reinforce cargo run --bin eval
-NANOCHAT_ARTIFACT=runs/compare/grpo cargo run --bin eval
+NANOCHAT_ARTIFACT=runs/compare/reinforce cargo run --no-default-features --features wgpu --bin eval
+NANOCHAT_ARTIFACT=runs/compare/grpo cargo run --no-default-features --features wgpu --bin eval
 cargo run --bin report -- runs/sft runs/compare/reinforce runs/compare/grpo
 ```
 
